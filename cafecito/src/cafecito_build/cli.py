@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 from cafecito_build.apple_libgodot import build_apple_libgodot_slices, package_apple_libgodot_sdk
+from cafecito_build.apple_toolchain import select_and_verify_xcode
 from cafecito_build.environment import detect_host_environment
 from cafecito_build.identity import resolve_build_identity
 from cafecito_build.packaging import (
@@ -147,6 +148,11 @@ def _command_checksums(arguments: argparse.Namespace) -> int:
     return 0
 
 
+def _command_select_xcode(arguments: argparse.Namespace) -> int:
+    select_and_verify_xcode(arguments.min_ios_sdk)
+    return 0
+
+
 def _command_clean(arguments: argparse.Namespace) -> int:
     repository_root = Path(arguments.repo_root).resolve()
     bin_directory = repository_root / "bin"
@@ -231,6 +237,13 @@ def build_argument_parser() -> argparse.ArgumentParser:
     checksums_parser = subparsers.add_parser("checksums", help="Write SHA256SUMS.txt for a release directory")
     checksums_parser.add_argument("--directory", required=True)
     checksums_parser.set_defaults(handler=_command_checksums)
+
+    xcode_parser = subparsers.add_parser(
+        "select-xcode",
+        help="Select and verify a stable Xcode installation meeting the required iPhoneOS SDK floor",
+    )
+    xcode_parser.add_argument("--min-ios-sdk", type=int, required=True, help="Minimum required iPhoneOS SDK major")
+    xcode_parser.set_defaults(handler=_command_select_xcode)
 
     clean_parser = subparsers.add_parser("clean", help="Remove bin/ build outputs")
     clean_parser.set_defaults(handler=_command_clean)

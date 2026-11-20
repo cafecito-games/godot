@@ -47,6 +47,7 @@ on:
 env:
   SCONS_CACHE: ${{ github.workspace }}/.scons-cache
   SCONS_CACHE_LIMIT: 7168
+  REQUIRED_IOS_SDK_MAJOR: '27'
 
 jobs:
   generate-tag:
@@ -130,10 +131,17 @@ jobs:
   build-ios:
     name: Build iOS Templates
     if: inputs.build_ios
-    runs-on: macos-15
+    runs-on: xcode-27
+    outputs:
+      xcode_version: ${{ steps.xcode.outputs.xcode_version }}
+      ios_sdk_version: ${{ steps.xcode.outputs.ios_sdk_version }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
+
+      - name: Select and verify Xcode / iOS SDK
+        id: xcode
+        run: uv run --project cafecito cafecito-build select-xcode --min-ios-sdk "${REQUIRED_IOS_SDK_MAJOR}"
 
       - name: Install build dependencies
         run: brew install scons yasm zstd
@@ -145,8 +153,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/.scons-cache
-          key: ios-${{ hashFiles('core/**/*.h', 'core/**/*.cpp', 'SConstruct') }}
-          restore-keys: ios-
+          key: ios-sdk-${{ steps.xcode.outputs.ios_sdk_version }}-${{ hashFiles('core/**/*.h', 'core/**/*.cpp', 'SConstruct') }}
+          restore-keys: ios-sdk-${{ steps.xcode.outputs.ios_sdk_version }}-
 
       - name: Build iOS slices (release + debug; device + simulator)
         run: |
@@ -176,10 +184,17 @@ jobs:
   build-apple-libgodot:
     name: Build Apple LibGodot SDK
     if: inputs.build_apple_libgodot
-    runs-on: macos-15
+    runs-on: xcode-27
+    outputs:
+      xcode_version: ${{ steps.xcode.outputs.xcode_version }}
+      ios_sdk_version: ${{ steps.xcode.outputs.ios_sdk_version }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
+
+      - name: Select and verify Xcode / iOS SDK
+        id: xcode
+        run: uv run --project cafecito cafecito-build select-xcode --min-ios-sdk "${REQUIRED_IOS_SDK_MAJOR}"
 
       - name: Install build dependencies
         run: brew install scons yasm zstd
@@ -188,11 +203,10 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/.scons-cache
-          key: apple-libgodot-${{ hashFiles('core/**/*.h', 'core/**/*.cpp', 'SConstruct') }}
+          key: apple-libgodot-sdk-${{ steps.xcode.outputs.ios_sdk_version }}-${{ hashFiles('core/**/*.h', 'core/**/*.cpp', 'SConstruct') }}
           restore-keys: |
-            apple-libgodot-
-            ios-
-            macos-arm64-
+            apple-libgodot-sdk-${{ steps.xcode.outputs.ios_sdk_version }}-
+            ios-sdk-${{ steps.xcode.outputs.ios_sdk_version }}-
 
       - name: Build and package Apple LibGodot SDK + Relink Kits
         run: |
@@ -444,6 +458,7 @@ jobs:
 
             - Commit: `${{ github.sha }}`
             - Template Version: `${{ needs.generate-tag.outputs.template_version }}`
+            - iOS Toolchain: `${{ needs.build-ios.outputs.xcode_version || needs.build-apple-libgodot.outputs.xcode_version || 'n/a' }}` (iPhoneOS SDK `${{ needs.build-ios.outputs.ios_sdk_version || needs.build-apple-libgodot.outputs.ios_sdk_version || 'n/a' }}`, floor `>= ${{ env.REQUIRED_IOS_SDK_MAJOR }}`)
             - Checksums: `SHA256SUMS.txt`
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
