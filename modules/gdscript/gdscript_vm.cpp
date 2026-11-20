@@ -36,6 +36,71 @@
 #include "core/os/os.h"
 #include "core/profiling/profiling.h"
 
+#include <atomic>
+#include <cstring>
+
+namespace {
+
+constexpr uint32_t VM_SINGLE_FRAME_ALLOCA_LIMIT = 4096;
+constexpr uint32_t VM_TOTAL_ALLOCA_BUDGET = 256 * 1024;
+
+thread_local uint32_t vm_alloca_bytes_in_use = 0;
+#ifdef TESTS_ENABLED
+thread_local uint32_t vm_alloca_peak_bytes = 0;
+thread_local uint32_t vm_heap_spill_count = 0;
+#endif
+
+struct VMFrameMemoryGuard {
+	uint8_t *heap_buffer = nullptr;
+	uint32_t alloca_bytes_reserved = 0;
+
+	_FORCE_INLINE_ void track_alloca(uint32_t p_bytes) {
+		vm_alloca_bytes_in_use += p_bytes;
+		alloca_bytes_reserved = p_bytes;
+#ifdef TESTS_ENABLED
+		if (vm_alloca_bytes_in_use > vm_alloca_peak_bytes) {
+			vm_alloca_peak_bytes = vm_alloca_bytes_in_use;
+		}
+#endif
+	}
+
+	_FORCE_INLINE_ uint8_t *allocate_heap(size_t p_bytes) {
+		heap_buffer = static_cast<uint8_t *>(memalloc(p_bytes));
+#ifdef TESTS_ENABLED
+		if (heap_buffer != nullptr) {
+			vm_heap_spill_count++;
+		}
+#endif
+		return heap_buffer;
+	}
+
+	_FORCE_INLINE_ ~VMFrameMemoryGuard() {
+		if (alloca_bytes_reserved > 0) {
+			vm_alloca_bytes_in_use -= alloca_bytes_reserved;
+		}
+		if (heap_buffer != nullptr) {
+			memfree(heap_buffer);
+		}
+	}
+};
+
+} // namespace
+
+#ifdef TESTS_ENABLED
+GDScriptFunction::DebugVMAllocaStats GDScriptFunction::debug_get_vm_alloca_stats() {
+	return DebugVMAllocaStats{ vm_alloca_bytes_in_use, vm_alloca_peak_bytes, vm_heap_spill_count };
+}
+
+void GDScriptFunction::debug_reset_vm_alloca_stats() {
+	vm_alloca_peak_bytes = vm_alloca_bytes_in_use;
+	vm_heap_spill_count = 0;
+}
+
+void GDScriptFunction::debug_set_vm_alloca_bytes_in_use_for_test(uint32_t p_bytes) {
+	vm_alloca_bytes_in_use = p_bytes;
+}
+#endif
+
 #ifdef DEBUG_ENABLED
 
 static bool _profile_count_as_native(const Object *p_base_obj, const StringName &p_methodname) {
@@ -538,6 +603,7 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 	int defarg = 0;
 
 	uint32_t alloca_size = 0;
+	VMFrameMemoryGuard frame_memory_guard;
 	GDScript *script;
 	int ip = 0;
 	int line = _initial_line;
@@ -577,10 +643,21 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 			}
 		}
 
-		alloca_size = sizeof(Variant *) * FIXED_ADDRESSES_MAX + sizeof(Variant *) * _instruction_args_size + sizeof(Variant) * _stack_size;
+		const size_t frame_bytes = sizeof(Variant *) * FIXED_ADDRESSES_MAX + sizeof(Variant *) * static_cast<size_t>(_instruction_args_size) + sizeof(Variant) * static_cast<size_t>(_stack_size);
+		alloca_size = static_cast<uint32_t>(frame_bytes);
 
-		uint8_t *aptr = (uint8_t *)alloca(alloca_size);
-		stack = (Variant *)aptr;
+		uint8_t *frame_buffer = nullptr;
+		if (frame_bytes <= VM_SINGLE_FRAME_ALLOCA_LIMIT && vm_alloca_bytes_in_use <= VM_TOTAL_ALLOCA_BUDGET && frame_bytes <= VM_TOTAL_ALLOCA_BUDGET - vm_alloca_bytes_in_use) {
+			frame_buffer = static_cast<uint8_t *>(alloca(frame_bytes));
+			frame_memory_guard.track_alloca(static_cast<uint32_t>(frame_bytes));
+		} else {
+			frame_buffer = frame_memory_guard.allocate_heap(frame_bytes);
+			if (unlikely(frame_buffer == nullptr)) {
+				call_depth--;
+				ERR_FAIL_V_MSG(_get_default_variant_for_data_type(return_type), "Failed to allocate GDScript VM call frame.");
+			}
+		}
+		stack = reinterpret_cast<Variant *>(frame_buffer);
 
 		const int non_vararg_arg_count = MIN(p_argcount, _argument_count);
 		for (int i = 0; i < non_vararg_arg_count; i++) {
@@ -595,6 +672,9 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 				continue;
 			}
 			if (!argument_types[i].is_type(*p_args[i], true)) {
+				for (int cleanup_index = 0; cleanup_index < i; cleanup_index++) {
+					stack[cleanup_index + FIXED_ADDRESSES_MAX].~Variant();
+				}
 				r_err.error = Callable::CallError::CALL_ERROR_INVALID_ARGUMENT;
 				r_err.argument = i;
 				r_err.expected = argument_types[i].builtin_type;
@@ -615,6 +695,9 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 					Variant variant;
 					Variant::construct(argument_types[i].builtin_type, variant, &p_args[i], 1, r_err);
 					if (unlikely(r_err.error)) {
+						for (int cleanup_index = 0; cleanup_index < i; cleanup_index++) {
+							stack[cleanup_index + FIXED_ADDRESSES_MAX].~Variant();
+						}
 						r_err.error = Callable::CallError::CALL_ERROR_INVALID_ARGUMENT;
 						r_err.argument = i;
 						r_err.expected = argument_types[i].builtin_type;
@@ -643,7 +726,7 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 		}
 
 		if (_instruction_args_size) {
-			instruction_args = (Variant **)&aptr[sizeof(Variant) * _stack_size];
+			instruction_args = reinterpret_cast<Variant **>(&frame_buffer[sizeof(Variant) * _stack_size]);
 		} else {
 			instruction_args = nullptr;
 		}
@@ -759,8 +842,7 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 
 		OPCODE_SWITCH(_code_ptr[ip]) {
 			OPCODE(OPCODE_OPERATOR) {
-				constexpr int _pointer_size = sizeof(Variant::ValidatedOperatorEvaluator) / sizeof(*_code_ptr);
-				CHECK_SPACE(7 + _pointer_size);
+				CHECK_SPACE(7 + OPERATOR_INLINE_CACHE_PTR_WORDS);
 
 				bool valid;
 				Variant::Operator op = (Variant::Operator)_code_ptr[ip + 4];
@@ -803,17 +885,20 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 
 						// Check again in case another thread already set it.
 						if (_code_ptr[ip + 5] == 0) {
-							_code_ptr[ip + 5] = actual_signature;
 							_code_ptr[ip + 6] = static_cast<int>(ret_type);
-							Variant::ValidatedOperatorEvaluator *tmp = reinterpret_cast<Variant::ValidatedOperatorEvaluator *>(&_code_ptr[ip + 7]);
-							*tmp = op_func;
+							memset(&_code_ptr[ip + 7], 0, sizeof(int) * OPERATOR_INLINE_CACHE_PTR_WORDS);
+							memcpy(&_code_ptr[ip + 7], &op_func, sizeof(op_func));
+							std::atomic_thread_fence(std::memory_order_release);
+							_code_ptr[ip + 5] = actual_signature;
 						}
 					}
 					initializer_mutex.unlock();
 				} else if (likely(op_signature == actual_signature)) {
 					// If the signature matches, we can use the optimized path.
+					std::atomic_thread_fence(std::memory_order_acquire);
 					Variant::Type ret_type = static_cast<Variant::Type>(_code_ptr[ip + 6]);
-					Variant::ValidatedOperatorEvaluator op_func = *reinterpret_cast<Variant::ValidatedOperatorEvaluator *>(&_code_ptr[ip + 7]);
+					Variant::ValidatedOperatorEvaluator op_func = nullptr;
+					memcpy(&op_func, &_code_ptr[ip + 7], sizeof(op_func));
 
 					// Make sure the return value has the correct type.
 					VariantInternal::initialize(dst, ret_type);
@@ -841,7 +926,7 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 					*dst = ret;
 #endif
 				}
-				ip += 7 + _pointer_size;
+				ip += 7 + OPERATOR_INLINE_CACHE_PTR_WORDS;
 			}
 			DISPATCH_OPCODE;
 

@@ -422,7 +422,7 @@ GDScriptCodeGenerator::Address GDScriptCompiler::_parse_expression(CodeGen &code
 					if (GDScriptExportCompileSession *export_session = GDScriptCache::get_active_export_session()) {
 						if (export_session->should_compile_autoloads_as_runtime_globals() && ProjectSettings::get_singleton()->has_autoload(identifier) && ProjectSettings::get_singleton()->get_autoload(identifier).is_singleton) {
 							GDScriptCodeGenerator::Address global = codegen.add_temporary(_gdtype_from_datatype(in->get_datatype(), codegen.script));
-							gen->write_store_global(global, 0);
+							gen->write_store_global(global, 0, identifier);
 							return global;
 						}
 					}
@@ -435,7 +435,7 @@ GDScriptCodeGenerator::Address GDScriptCompiler::_parse_expression(CodeGen &code
 						if (autoloads.has(identifier) && autoloads[identifier].is_singleton) {
 							GDScriptCodeGenerator::Address global = codegen.add_temporary(_gdtype_from_datatype(in->get_datatype(), codegen.script));
 							int idx = GDScriptLanguage::get_singleton()->get_global_map()[identifier];
-							gen->write_store_global(global, idx);
+							gen->write_store_global(global, idx, identifier);
 							return global;
 						} else {
 							int idx = GDScriptLanguage::get_singleton()->get_global_map()[identifier];

@@ -151,6 +151,33 @@ bool GDScriptDataType::is_type(const Variant &p_variant, bool p_allow_implicit_c
 
 /////////////////////
 
+const GDScriptBytecodeFormat::OpcodeLayout &GDScriptFunction::get_opcode_layout(Opcode p_opcode) {
+	using namespace GDScriptBytecodeFormat;
+
+#define GDSCRIPT_OPCODE_OPERANDS_UNPACK(...) \
+	{ __VA_ARGS__ }
+#define GDSCRIPT_OPCODE_FIXED(m_name, m_word_count, m_operands) \
+	OpcodeLayout{ false, static_cast<uint8_t>(m_word_count), 0, 0, 0, static_cast<uint8_t>((m_word_count) - 1), GDSCRIPT_OPCODE_OPERANDS_UNPACK m_operands },
+#define GDSCRIPT_OPCODE_VARARG(m_name, m_trailing_words, m_count_tail_offset, m_count_multiplier, m_count_addend, m_trailing_operands) \
+	OpcodeLayout{ true, static_cast<uint8_t>(m_trailing_words), static_cast<uint8_t>(m_count_tail_offset), static_cast<uint8_t>(m_count_multiplier), static_cast<uint8_t>(m_count_addend), static_cast<uint8_t>(m_trailing_words), GDSCRIPT_OPCODE_OPERANDS_UNPACK m_trailing_operands },
+
+	static constexpr OpcodeLayout opcode_layout_table[] = {
+#include "gdscript_opcode_layout.inc"
+	};
+
+#undef GDSCRIPT_OPCODE_FIXED
+#undef GDSCRIPT_OPCODE_VARARG
+#undef GDSCRIPT_OPCODE_OPERANDS_UNPACK
+
+	static_assert(sizeof(opcode_layout_table) / sizeof(opcode_layout_table[0]) == GDScriptFunction::OPCODE_END + 1,
+			"Opcode layout table size must match GDScriptFunction::OPCODE_END + 1.");
+	static_assert(validate_opcode_layout_table(opcode_layout_table, GDScriptFunction::OPCODE_END + 1),
+			"Invalid operand metadata in gdscript_opcode_layout.inc.");
+
+	ERR_FAIL_INDEX_V(p_opcode, GDScriptFunction::OPCODE_END + 1, opcode_layout_table[GDScriptFunction::OPCODE_END]);
+	return opcode_layout_table[p_opcode];
+}
+
 Variant GDScriptFunction::get_constant(int p_idx) const {
 	ERR_FAIL_INDEX_V(p_idx, constants.size(), "<errconst>");
 	return constants[p_idx];
