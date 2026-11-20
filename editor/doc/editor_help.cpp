@@ -3081,6 +3081,13 @@ void EditorHelp::_gen_doc_thread(void *p_udata) {
 }
 
 void EditorHelp::_gen_extensions_docs() {
+	if (!doc) {
+		// This is a deferred call queued from the documentation worker thread, so it can still be
+		// pending in the message queue when EditorNode is destroyed and cleanup_doc() frees the
+		// DocTools instance. The editor is shutting down at that point, so there is nothing to document.
+		return;
+	}
+
 	doc->generate((DocTools::GENERATE_FLAG_SKIP_BASIC_TYPES | DocTools::GENERATE_FLAG_EXTENSION_CLASSES_ONLY));
 
 	// Append extra doc data, as it gets overridden by the generation step.
