@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import shlex
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -12,7 +13,7 @@ from typing import Any
 def _flatten_strings(env, value: Any) -> list[str]:
     if value is None:
         return []
-    if isinstance(value, (list, tuple)):
+    if isinstance(value, Iterable) and not isinstance(value, (str, bytes)):
         result: list[str] = []
         for item in value:
             result.extend(_flatten_strings(env, item))
@@ -26,7 +27,7 @@ def _flatten_strings(env, value: Any) -> list[str]:
 def _flatten_raw_items(value: Any) -> list[Any]:
     if value is None:
         return []
-    if isinstance(value, (list, tuple)):
+    if isinstance(value, Iterable) and not isinstance(value, (str, bytes)):
         result: list[Any] = []
         for item in value:
             result.extend(_flatten_raw_items(item))
