@@ -492,7 +492,7 @@ void ResourceLoader::_run_load_task(void *p_userdata) {
 				// Release any mutexes the calling thread allows unlocking while waiting
 				// (such as GDScriptCache::mutex), since the worker loading this dependency
 				// may be blocked on one of them outside ResourceLoader's wait graph.
-				WorkerThreadPool::thread_delay_usec_unlocked(1000);
+				_wait_tick();
 			}
 		} while (wait && status == THREAD_LOAD_IN_PROGRESS && !cleaning_tasks);
 
@@ -580,7 +580,7 @@ void ResourceLoader::_run_load_task(void *p_userdata) {
 				// cache registration, then use their instance.
 				while (!old_res.is_valid()) {
 					ResourceCache::lock.unlock();
-					WorkerThreadPool::thread_delay_usec_unlocked(1000);
+					_wait_tick();
 					ResourceCache::lock.lock();
 					old_res = ResourceCache::get_ref(load_task.local_path);
 				}
@@ -1172,12 +1172,57 @@ Ref<Resource> ResourceLoader::_load_complete_inner(LoadToken &p_load_token, Erro
 	return resource;
 }
 
+// Waits for a short while for another thread to make progress on a load task.
+//
+// When called on the main thread, servers that can only be driven from the main thread
+// have to be pumped while waiting: with single-threaded rendering, the thread holding the
+// load task may be blocked inside RenderingServer waiting for the main thread to drain
+// the command queue, and it may also be waiting on something posted to the main
+// MessageQueue. Without pumping those, both threads wait on each other forever.
+void ResourceLoader::_wait_tick() {
+	if (!Thread::is_main_thread()) {
+		// Releases any mutexes the calling thread allows unlocking while waiting
+		// (such as GDScriptCache::mutex).
+		WorkerThreadPool::thread_delay_usec_unlocked(1000);
+		return;
+	}
+
+	// The server work and the deferred calls pumped below are not part of the loads
+	// this thread has in progress, so their whole load context is set aside for them,
+	// like it is when yielding to the WorkerThreadPool. Otherwise a load started by a
+	// pumped callback would be registered as a sub-task of the awaited task (which may
+	// be destroyed long before that load finishes), and it would also run at the
+	// nesting level of the suspended load, whose resource reference overrides it would
+	// then drop on completion.
+	ThreadLoadTask *curr_load_task_backup = curr_load_task;
+	int load_nesting_backup = load_nesting;
+	HashMap<int, HashMap<String, Ref<Resource>>> res_ref_overrides_backup;
+	curr_load_task = nullptr;
+	load_nesting = 0;
+	SWAP(res_ref_overrides, res_ref_overrides_backup);
+
+	_ensure_load_progress();
+
+	WorkerThreadPool::thread_delay_usec_unlocked(1000);
+
+	if (MessageQueue::get_singleton()) {
+		MessageQueue::get_singleton()->flush();
+	}
+
+	curr_load_task = curr_load_task_backup;
+	load_nesting = load_nesting_backup;
+	SWAP(res_ref_overrides, res_ref_overrides_backup);
+}
+
 bool ResourceLoader::_ensure_load_progress() {
 	// Some servers may need a new engine iteration to allow the load to progress.
 	// Since the only known one is the rendering server (in single thread mode), let's keep it simple and just sync it.
 	// This may be refactored in the future to support other servers and have less coupling.
 	if (OS::get_singleton()->is_separate_thread_rendering_enabled()) {
 		return false; // Not needed.
+	}
+	if (!RenderingServer::get_singleton()) {
+		return false; // Nothing to sync (e.g., during engine teardown).
 	}
 	RenderingServer::get_singleton()->sync();
 	return true;
@@ -1632,11 +1677,7 @@ void ResourceLoader::clear_thread_load_tasks() {
 
 		thread_load_lock.temp_unlock();
 
-		if (MessageQueue::get_singleton()) {
-			MessageQueue::get_singleton()->flush();
-		}
-
-		WorkerThreadPool::thread_delay_usec_unlocked(1000);
+		_wait_tick();
 
 		thread_load_lock.temp_relock();
 	}
