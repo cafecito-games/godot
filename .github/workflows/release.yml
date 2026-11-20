@@ -29,10 +29,10 @@ on:
         type: boolean
         default: false
       build_linux:
-        description: 'Build Linux x86_64 templates + Relink Kits'
+        description: 'Build Linux x86_64 templates (linux-template_release/debug.tar.gz) + Relink Kits'
         required: false
         type: boolean
-        default: false
+        default: true
       build_linux_editor:
         description: 'Build Linux x86_64 editor + Relink Kit'
         required: false
@@ -309,13 +309,13 @@ jobs:
       - name: Build Linux release and debug templates
         run: |
           mkdir -p release-out
-          uv run --project cafecito cafecito-build build --platform linuxbsd --target template_release --arch x86_64
-          uv run --project cafecito cafecito-build build --platform linuxbsd --target template_debug --arch x86_64
-          strip bin/godot.linuxbsd.template_release.x86_64 bin/godot.linuxbsd.template_debug.x86_64
-          tar czf release-out/linux-template_release.tar.gz -C bin godot.linuxbsd.template_release.x86_64
-          tar czf release-out/linux-template_debug.tar.gz -C bin godot.linuxbsd.template_debug.x86_64
-          for manifest in bin/godot.linuxbsd.template_*.relink.json; do
-            uv run --project cafecito cafecito-build package-relink-kit --manifest "$manifest" --output-dir release-out
+          for target in template_release template_debug; do
+            uv run --project cafecito cafecito-build build --platform linuxbsd --target "$target" --arch x86_64
+            strip "bin/godot.linuxbsd.${target}.x86_64"
+            tar czf "release-out/linux-${target}.tar.gz" -C bin "godot.linuxbsd.${target}.x86_64"
+            uv run --project cafecito cafecito-build package-relink-kit \
+              --manifest "bin/godot.linuxbsd.${target}.x86_64.relink.json" \
+              --output-dir release-out
           done
 
       - name: Upload Linux template artifacts
