@@ -31,6 +31,9 @@
 #include "gdscript_analyzer.h"
 
 #include "gdscript.h"
+#if defined(TOOLS_ENABLED) || defined(TESTS_ENABLED)
+#include "gdscript_export_compile_session.h"
+#endif
 #include "gdscript_utility_callable.h"
 #include "gdscript_utility_functions.h"
 
@@ -4764,9 +4767,16 @@ void GDScriptAnalyzer::reduce_preload(GDScriptParser::PreloadNode *p_preload) {
 				}
 			} else {
 				Error err = OK;
-				p_preload->resource = ResourceLoader::load(p_preload->resolved_path, res_type, ResourceFormatLoader::CACHE_MODE_REUSE, &err);
-				if (err == ERR_BUSY) {
-					p_preload->resource = ResourceLoader::ensure_resource_ref_override_for_outer_load(p_preload->resolved_path, res_type);
+#if defined(TOOLS_ENABLED) || defined(TESTS_ENABLED)
+				if (GDScriptExportCompileSession *export_session = GDScriptCache::get_active_export_session()) {
+					p_preload->resource = export_session->resolve_preload_resource(p_preload->resolved_path, res_type, err);
+				} else
+#endif
+				{
+					p_preload->resource = ResourceLoader::load(p_preload->resolved_path, res_type, ResourceFormatLoader::CACHE_MODE_REUSE, &err);
+					if (err == ERR_BUSY) {
+						p_preload->resource = ResourceLoader::ensure_resource_ref_override_for_outer_load(p_preload->resolved_path, res_type);
+					}
 				}
 				if (p_preload->resource.is_null()) {
 					push_error(vformat(R"(Could not preload resource file "%s".)", p_preload->resolved_path), p_preload->path);

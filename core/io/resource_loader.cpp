@@ -1197,9 +1197,11 @@ void ResourceLoader::_wait_tick() {
 	ThreadLoadTask *curr_load_task_backup = curr_load_task;
 	int load_nesting_backup = load_nesting;
 	HashMap<int, HashMap<String, Ref<Resource>>> res_ref_overrides_backup;
+	HashMap<String, Ref<Resource>> *external_res_ref_overrides_backup = external_res_ref_overrides;
 	curr_load_task = nullptr;
 	load_nesting = 0;
 	SWAP(res_ref_overrides, res_ref_overrides_backup);
+	external_res_ref_overrides = nullptr;
 
 	_ensure_load_progress();
 
@@ -1212,6 +1214,7 @@ void ResourceLoader::_wait_tick() {
 	curr_load_task = curr_load_task_backup;
 	load_nesting = load_nesting_backup;
 	SWAP(res_ref_overrides, res_ref_overrides_backup);
+	external_res_ref_overrides = external_res_ref_overrides_backup;
 }
 
 bool ResourceLoader::_ensure_load_progress() {
@@ -1294,8 +1297,23 @@ Ref<Resource> ResourceLoader::ensure_resource_ref_override_for_outer_load(const 
 	}
 }
 
+ResourceLoader::ExternalRefOverrideGuard::ExternalRefOverrideGuard(HashMap<String, Ref<Resource>> *p_overrides) :
+		previous_overrides(ResourceLoader::external_res_ref_overrides) {
+	ResourceLoader::external_res_ref_overrides = p_overrides;
+}
+
+ResourceLoader::ExternalRefOverrideGuard::~ExternalRefOverrideGuard() {
+	ResourceLoader::external_res_ref_overrides = previous_overrides;
+}
+
 Ref<Resource> ResourceLoader::get_resource_ref_override(const String &p_path) {
 	DEV_ASSERT(p_path == _validate_local_path(p_path));
+	if (external_res_ref_overrides != nullptr) {
+		HashMap<String, Ref<Resource>>::Iterator external_entry = external_res_ref_overrides->find(p_path);
+		if (external_entry) {
+			return external_entry->value;
+		}
+	}
 	HashMap<int, HashMap<String, Ref<Resource>>>::Iterator E = res_ref_overrides.find(load_nesting);
 	if (!E) {
 		return nullptr;
@@ -1848,6 +1866,7 @@ bool ResourceLoader::timestamp_on_load = false;
 thread_local bool ResourceLoader::import_thread = false;
 thread_local int ResourceLoader::load_nesting = 0;
 thread_local HashMap<int, HashMap<String, Ref<Resource>>> ResourceLoader::res_ref_overrides;
+thread_local HashMap<String, Ref<Resource>> *ResourceLoader::external_res_ref_overrides = nullptr;
 thread_local ResourceLoader::ThreadLoadTask *ResourceLoader::curr_load_task = nullptr;
 
 SafeBinaryMutex<ResourceLoader::BINARY_MUTEX_TAG> &_get_res_loader_mutex() {

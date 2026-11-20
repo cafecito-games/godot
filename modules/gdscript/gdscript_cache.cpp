@@ -33,6 +33,9 @@
 #include "gdscript.h"
 #include "gdscript_analyzer.h"
 #include "gdscript_compiler.h"
+#if defined(TOOLS_ENABLED) || defined(TESTS_ENABLED)
+#include "gdscript_export_compile_session.h"
+#endif
 #include "gdscript_parser.h"
 
 #include "core/io/file_access.h"
@@ -141,13 +144,33 @@ void GDScriptParserRef::clear() {
 GDScriptParserRef::~GDScriptParserRef() {
 	clear();
 
-	if (!abandoned) {
+	if (!abandoned && !detached) {
 		MutexLock lock(GDScriptCache::singleton->mutex);
 		GDScriptCache::singleton->parser_map.erase(path);
 	}
 }
 
 GDScriptCache *GDScriptCache::singleton = nullptr;
+#if defined(TOOLS_ENABLED) || defined(TESTS_ENABLED)
+thread_local GDScriptExportCompileSession *GDScriptCache::active_export_session = nullptr;
+
+GDScriptCache::ActiveSessionGuard::ActiveSessionGuard(GDScriptExportCompileSession *p_session) :
+		previous_session(GDScriptCache::active_export_session) {
+	GDScriptCache::active_export_session = p_session;
+}
+
+GDScriptCache::ActiveSessionGuard::~ActiveSessionGuard() {
+	GDScriptCache::active_export_session = previous_session;
+}
+
+bool GDScriptCache::has_active_export_session() {
+	return active_export_session != nullptr;
+}
+
+GDScriptExportCompileSession *GDScriptCache::get_active_export_session() {
+	return active_export_session;
+}
+#endif
 
 SafeBinaryMutex<GDScriptCache::BINARY_MUTEX_TAG> &_get_gdscript_cache_mutex() {
 	return GDScriptCache::mutex;
@@ -158,6 +181,11 @@ thread_local SafeBinaryMutex<GDScriptCache::BINARY_MUTEX_TAG>::TLSData SafeBinar
 SafeBinaryMutex<GDScriptCache::BINARY_MUTEX_TAG> GDScriptCache::mutex;
 
 void GDScriptCache::move_script(const String &p_from, const String &p_to) {
+#if defined(TOOLS_ENABLED) || defined(TESTS_ENABLED)
+	if (active_export_session != nullptr) {
+		return;
+	}
+#endif
 	if (singleton == nullptr || p_from == p_to || p_from.is_empty()) {
 		return;
 	}
@@ -182,6 +210,11 @@ void GDScriptCache::move_script(const String &p_from, const String &p_to) {
 }
 
 void GDScriptCache::remove_script(const String &p_path) {
+#if defined(TOOLS_ENABLED) || defined(TESTS_ENABLED)
+	if (active_export_session != nullptr) {
+		return;
+	}
+#endif
 	if (singleton == nullptr) {
 		return;
 	}
@@ -215,6 +248,11 @@ void GDScriptCache::remove_script(const String &p_path) {
 }
 
 Ref<GDScriptParserRef> GDScriptCache::get_parser(const String &p_path, GDScriptParserRef::Status p_status, Error &r_error, const String &p_owner) {
+#if defined(TOOLS_ENABLED) || defined(TESTS_ENABLED)
+	if (active_export_session != nullptr) {
+		return active_export_session->get_parser(p_path, p_status, r_error, p_owner);
+	}
+#endif
 	MutexLock lock(singleton->mutex);
 	Ref<GDScriptParserRef> ref;
 	if (!p_owner.is_empty() && p_path != p_owner) {
@@ -243,11 +281,22 @@ Ref<GDScriptParserRef> GDScriptCache::get_parser(const String &p_path, GDScriptP
 }
 
 bool GDScriptCache::has_parser(const String &p_path) {
+#if defined(TOOLS_ENABLED) || defined(TESTS_ENABLED)
+	if (active_export_session != nullptr) {
+		return active_export_session->has_parser(p_path);
+	}
+#endif
 	MutexLock lock(singleton->mutex);
 	return singleton->parser_map.has(p_path);
 }
 
 void GDScriptCache::remove_parser(const String &p_path) {
+#if defined(TOOLS_ENABLED) || defined(TESTS_ENABLED)
+	if (active_export_session != nullptr) {
+		active_export_session->remove_parser(p_path);
+		return;
+	}
+#endif
 	MutexLock lock(singleton->mutex);
 
 	if (singleton->parser_map.has(p_path)) {
@@ -301,6 +350,11 @@ Vector<uint8_t> GDScriptCache::get_binary_tokens(const String &p_path) {
 }
 
 Ref<GDScript> GDScriptCache::get_shallow_script(const String &p_path, Error &r_error, const String &p_owner) {
+#if defined(TOOLS_ENABLED) || defined(TESTS_ENABLED)
+	if (active_export_session != nullptr) {
+		return active_export_session->get_shallow_script(p_path, r_error, p_owner);
+	}
+#endif
 	MutexLock lock(singleton->mutex);
 
 	if (!p_owner.is_empty() && p_path != p_owner) {
@@ -344,6 +398,11 @@ Ref<GDScript> GDScriptCache::get_shallow_script(const String &p_path, Error &r_e
 }
 
 Ref<GDScript> GDScriptCache::get_full_script(const String &p_path, Error &r_error, const String &p_owner, bool p_update_from_disk) {
+#if defined(TOOLS_ENABLED) || defined(TESTS_ENABLED)
+	if (active_export_session != nullptr) {
+		return active_export_session->get_full_script(p_path, r_error, p_owner);
+	}
+#endif
 	MutexLock lock(singleton->mutex);
 
 	if (!p_owner.is_empty() && p_path != p_owner) {
@@ -411,6 +470,11 @@ finish:
 }
 
 Ref<GDScript> GDScriptCache::get_cached_script(const String &p_path) {
+#if defined(TOOLS_ENABLED) || defined(TESTS_ENABLED)
+	if (active_export_session != nullptr) {
+		return active_export_session->get_cached_script(p_path);
+	}
+#endif
 	MutexLock lock(singleton->mutex);
 
 	if (singleton->full_gdscript_cache.has(p_path)) {
@@ -425,6 +489,11 @@ Ref<GDScript> GDScriptCache::get_cached_script(const String &p_path) {
 }
 
 Error GDScriptCache::finish_compiling(const String &p_owner) {
+#if defined(TOOLS_ENABLED) || defined(TESTS_ENABLED)
+	if (active_export_session != nullptr) {
+		return active_export_session->finish_compiling(p_owner);
+	}
+#endif
 	MutexLock lock(singleton->mutex);
 
 	// Mark this as compiled.
@@ -451,12 +520,22 @@ Error GDScriptCache::finish_compiling(const String &p_owner) {
 }
 
 void GDScriptCache::add_static_script(Ref<GDScript> p_script) {
+#if defined(TOOLS_ENABLED) || defined(TESTS_ENABLED)
+	if (active_export_session != nullptr) {
+		return;
+	}
+#endif
 	ERR_FAIL_COND_MSG(p_script.is_null(), "Trying to cache empty script as static.");
 	ERR_FAIL_COND_MSG(!p_script->is_valid(), "Trying to cache non-compiled script as static.");
 	singleton->static_gdscript_cache[p_script->get_fully_qualified_name()] = p_script;
 }
 
 void GDScriptCache::remove_static_script(const String &p_fqcn) {
+#if defined(TOOLS_ENABLED) || defined(TESTS_ENABLED)
+	if (active_export_session != nullptr) {
+		return;
+	}
+#endif
 	singleton->static_gdscript_cache.erase(p_fqcn);
 }
 

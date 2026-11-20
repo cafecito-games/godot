@@ -34,6 +34,9 @@
 #include "gdscript_analyzer.h"
 #include "gdscript_byte_codegen.h"
 #include "gdscript_cache.h"
+#if defined(TOOLS_ENABLED) || defined(TESTS_ENABLED)
+#include "gdscript_export_compile_session.h"
+#endif
 #include "gdscript_utility_functions.h"
 
 #include "core/config/engine.h"
@@ -415,6 +418,15 @@ GDScriptCodeGenerator::Address GDScriptCompiler::_parse_expression(CodeGen &code
 				// GLOBALS.
 				case GDScriptParser::IdentifierNode::NATIVE_CLASS:
 				case GDScriptParser::IdentifierNode::UNDEFINED_SOURCE: {
+#if defined(TOOLS_ENABLED) || defined(TESTS_ENABLED)
+					if (GDScriptExportCompileSession *export_session = GDScriptCache::get_active_export_session()) {
+						if (export_session->should_compile_autoloads_as_runtime_globals() && ProjectSettings::get_singleton()->has_autoload(identifier) && ProjectSettings::get_singleton()->get_autoload(identifier).is_singleton) {
+							GDScriptCodeGenerator::Address global = codegen.add_temporary(_gdtype_from_datatype(in->get_datatype(), codegen.script));
+							gen->write_store_global(global, 0);
+							return global;
+						}
+					}
+#endif
 					// Try globals.
 					if (GDScriptLanguage::get_singleton()->get_global_map().has(identifier)) {
 						// If it's an autoload singleton, we postpone to load it at runtime.
@@ -2180,34 +2192,50 @@ Error GDScriptCompiler::_parse_block(CodeGen &codegen, const GDScriptParser::Sui
 			} break;
 			case GDScriptParser::Node::ASSERT: {
 #ifdef DEBUG_ENABLED
-				const GDScriptParser::AssertNode *as = static_cast<const GDScriptParser::AssertNode *>(s);
-
-				GDScriptCodeGenerator::Address condition = _parse_expression(codegen, err, as->condition);
-				if (err) {
-					return err;
+				bool should_emit_debug = true;
+#if defined(TOOLS_ENABLED) || defined(TESTS_ENABLED)
+				if (GDScriptExportCompileSession *export_session = GDScriptCache::get_active_export_session()) {
+					should_emit_debug = export_session->should_emit_debug_opcodes();
 				}
+#endif
+				if (should_emit_debug) {
+					const GDScriptParser::AssertNode *as = static_cast<const GDScriptParser::AssertNode *>(s);
 
-				GDScriptCodeGenerator::Address message;
-
-				if (as->message) {
-					message = _parse_expression(codegen, err, as->message);
+					GDScriptCodeGenerator::Address condition = _parse_expression(codegen, err, as->condition);
 					if (err) {
 						return err;
 					}
-				}
-				gen->write_assert(condition, message);
 
-				if (condition.mode == GDScriptCodeGenerator::Address::TEMPORARY) {
-					codegen.generator->pop_temporary();
-				}
-				if (message.mode == GDScriptCodeGenerator::Address::TEMPORARY) {
-					codegen.generator->pop_temporary();
+					GDScriptCodeGenerator::Address message;
+
+					if (as->message) {
+						message = _parse_expression(codegen, err, as->message);
+						if (err) {
+							return err;
+						}
+					}
+					gen->write_assert(condition, message);
+
+					if (condition.mode == GDScriptCodeGenerator::Address::TEMPORARY) {
+						codegen.generator->pop_temporary();
+					}
+					if (message.mode == GDScriptCodeGenerator::Address::TEMPORARY) {
+						codegen.generator->pop_temporary();
+					}
 				}
 #endif
 			} break;
 			case GDScriptParser::Node::BREAKPOINT: {
 #ifdef DEBUG_ENABLED
-				gen->write_breakpoint();
+				bool should_emit_debug = true;
+#if defined(TOOLS_ENABLED) || defined(TESTS_ENABLED)
+				if (GDScriptExportCompileSession *export_session = GDScriptCache::get_active_export_session()) {
+					should_emit_debug = export_session->should_emit_debug_opcodes();
+				}
+#endif
+				if (should_emit_debug) {
+					gen->write_breakpoint();
+				}
 #endif
 			} break;
 			case GDScriptParser::Node::VARIABLE: {
@@ -3138,7 +3166,12 @@ void GDScriptCompiler::make_scripts(GDScript *p_script, const GDScriptParser::Cl
 		if (old_subclasses.has(name)) {
 			subclass = old_subclasses[name];
 		} else {
-			subclass = GDScriptLanguage::get_singleton()->get_orphan_subclass(inner_class->fqcn);
+#if defined(TOOLS_ENABLED) || defined(TESTS_ENABLED)
+			if (!GDScriptCache::has_active_export_session())
+#endif
+			{
+				subclass = GDScriptLanguage::get_singleton()->get_orphan_subclass(inner_class->fqcn);
+			}
 		}
 
 		if (subclass.is_null()) {
@@ -3147,6 +3180,9 @@ void GDScriptCompiler::make_scripts(GDScript *p_script, const GDScriptParser::Cl
 
 		subclass->_owner = p_script;
 		subclass->path = p_script->path;
+#if defined(TOOLS_ENABLED) || defined(TESTS_ENABLED)
+		subclass->set_detached_export_script(p_script->is_detached_export_script());
+#endif
 		p_script->subclasses.insert(name, subclass);
 
 		make_scripts(subclass.ptr(), inner_class, p_keep_state);
@@ -3313,7 +3349,12 @@ Error GDScriptCompiler::compile(const GDScriptParser *p_parser, GDScript *p_scri
 	main_script->_recurse_replace_function_ptrs(func_ptr_replacements);
 
 	if (has_static_data && !root->annotated_static_unload) {
-		GDScriptCache::add_static_script(p_script);
+#if defined(TOOLS_ENABLED) || defined(TESTS_ENABLED)
+		if (!GDScriptCache::has_active_export_session())
+#endif
+		{
+			GDScriptCache::add_static_script(p_script);
+		}
 	}
 
 	err = GDScriptCache::finish_compiling(main_script->path);
