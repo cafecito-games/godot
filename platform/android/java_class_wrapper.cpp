@@ -620,9 +620,9 @@ bool JavaClass::_call_method(JavaObject *p_instance, const StringName &p_method,
 		} break;
 		case ARG_TYPE_BOOLEAN: {
 			if (method->_static) {
-				ret = env->CallStaticBooleanMethodA(_class, method->method, argv);
+				ret = (bool)env->CallStaticBooleanMethodA(_class, method->method, argv);
 			} else {
-				ret = env->CallBooleanMethodA(p_instance->instance, method->method, argv);
+				ret = (bool)env->CallBooleanMethodA(p_instance->instance, method->method, argv);
 			}
 		} break;
 		case ARG_TYPE_BYTE: {
@@ -1022,7 +1022,7 @@ bool JavaClass::_convert_object_to_variant(JNIEnv *env, jobject obj, Variant &va
 			return Variant();
 		} break;
 		case ARG_TYPE_BOOLEAN | ARG_NUMBER_CLASS_BIT: {
-			var = env->CallBooleanMethod(obj, JavaClassWrapper::singleton->Boolean_booleanValue);
+			var = (bool)env->CallBooleanMethod(obj, JavaClassWrapper::singleton->Boolean_booleanValue);
 			return true;
 		} break;
 		case ARG_TYPE_BYTE | ARG_NUMBER_CLASS_BIT: {
