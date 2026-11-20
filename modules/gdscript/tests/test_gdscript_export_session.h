@@ -39,6 +39,7 @@
 #include "core/io/dir_access.h"
 #include "core/io/file_access.h"
 #include "core/io/resource_loader.h"
+#include "core/string/print_string.h"
 #include "scene/resources/packed_scene.h"
 #include "tests/test_macros.h"
 #include "tests/test_utils.h"
@@ -107,6 +108,37 @@ static bool function_has_global_name(const GDScriptFunction *p_function, const S
 	ERR_PRINT_ON;
 	return false;
 }
+
+#ifdef DEBUG_ENABLED
+static void capture_print_line(void *p_userdata, const String &p_string, bool p_error, bool p_rich) {
+	if (!p_error) {
+		Vector<String> *captured_lines = static_cast<Vector<String> *>(p_userdata);
+		captured_lines->push_back(p_string);
+	}
+}
+
+static Vector<String> disassemble_function(const GDScriptFunction *p_function, const String &p_source_code) {
+	REQUIRE(p_function != nullptr);
+	Vector<String> captured_lines;
+	PrintHandlerList handler;
+	handler.printfunc = capture_print_line;
+	handler.userdata = &captured_lines;
+	add_print_handler(&handler);
+	p_function->disassemble(p_source_code.split("\n"));
+	remove_print_handler(&handler);
+	return captured_lines;
+}
+
+static bool disassembly_has_instruction(const Vector<String> &p_lines, const String &p_instruction_prefix) {
+	for (const String &line : p_lines) {
+		const int colon_index = line.find(": ");
+		if (colon_index != -1 && line.substr(colon_index + 2).begins_with(p_instruction_prefix)) {
+			return true;
+		}
+	}
+	return false;
+}
+#endif
 
 TEST_SUITE("[Modules][GDScript][ExportSession]") {
 	TEST_CASE("Live @tool script, instance, static state, and suspended await are untouched") {
@@ -404,24 +436,24 @@ TEST_SUITE("[Modules][GDScript][ExportSession]") {
 				project_dir.path_join("invalid_syntax.gd"),
 				"extends Node\nfunc broken(:\n\tpass\n");
 
-		write_file_contents(
-				project_dir.path_join("debug_ops.gd"),
+		const String debug_ops_source =
 				"extends Node\n"
 				"func check_value(value: int) -> int:\n"
 				"\tassert(value > 0, \"secret assert text\")\n"
 				"\tbreakpoint\n"
-				"\treturn value + 1\n");
+				"\treturn value + 1\n";
+		write_file_contents(project_dir.path_join("debug_ops.gd"), debug_ops_source);
 
 		write_file_contents(
 				project_dir.path_join("my_autoload.gd"),
 				"extends Node\n"
 				"var tag: int = 42\n");
 
-		write_file_contents(
-				project_dir.path_join("uses_autoload.gd"),
+		const String autoload_user_source =
 				"extends Node\n"
 				"func read_tag() -> int:\n"
-				"\treturn TestExportAutoload.tag\n");
+				"\treturn TestExportAutoload.tag\n";
+		write_file_contents(project_dir.path_join("uses_autoload.gd"), autoload_user_source);
 
 		// Active session guard must clear even when compilation fails.
 		{
@@ -455,6 +487,11 @@ TEST_SUITE("[Modules][GDScript][ExportSession]") {
 			const GDScriptFunction *release_function = release_script->get_member_functions().get(SNAME("check_value"));
 			REQUIRE(release_function != nullptr);
 			CHECK(!function_has_constant(release_function, String("secret assert text")));
+
+			const Vector<String> release_disassembly = disassemble_function(release_function, debug_ops_source);
+			CHECK(!disassembly_has_instruction(release_disassembly, "assert ("));
+			CHECK(!disassembly_has_instruction(release_disassembly, "breakpoint"));
+			CHECK(!disassembly_has_instruction(release_disassembly, "line "));
 		}
 
 		{
@@ -471,6 +508,11 @@ TEST_SUITE("[Modules][GDScript][ExportSession]") {
 			const GDScriptFunction *debug_function = debug_script->get_member_functions().get(SNAME("check_value"));
 			REQUIRE(debug_function != nullptr);
 			CHECK(function_has_constant(debug_function, String("secret assert text")));
+
+			const Vector<String> debug_disassembly = disassemble_function(debug_function, debug_ops_source);
+			CHECK(disassembly_has_instruction(debug_disassembly, "assert ("));
+			CHECK(disassembly_has_instruction(debug_disassembly, "breakpoint"));
+			CHECK(disassembly_has_instruction(debug_disassembly, "line "));
 		}
 
 		ProjectSettings::get_singleton()->set_setting("debug/settings/gdscript/always_track_call_stacks", true);
@@ -478,6 +520,20 @@ TEST_SUITE("[Modules][GDScript][ExportSession]") {
 			GDScriptExportCompileSession tracked_release_session(true);
 			CHECK(!tracked_release_session.should_emit_debug_opcodes());
 			CHECK(tracked_release_session.should_emit_line_opcodes());
+
+			Error tracked_error = OK;
+			Ref<GDScript> tracked_script = tracked_release_session.get_or_compile(debug_ops_script_path, tracked_error);
+			CHECK(!GDScriptCache::has_active_export_session());
+			REQUIRE_EQ(tracked_error, OK);
+			REQUIRE(tracked_script.is_valid());
+			const GDScriptFunction *tracked_function = tracked_script->get_member_functions().get(SNAME("check_value"));
+			REQUIRE(tracked_function != nullptr);
+			CHECK(!function_has_constant(tracked_function, String("secret assert text")));
+
+			const Vector<String> tracked_disassembly = disassemble_function(tracked_function, debug_ops_source);
+			CHECK(!disassembly_has_instruction(tracked_disassembly, "assert ("));
+			CHECK(!disassembly_has_instruction(tracked_disassembly, "breakpoint"));
+			CHECK(disassembly_has_instruction(tracked_disassembly, "line "));
 		}
 
 		ProjectSettings::get_singleton()->set_setting("debug/settings/gdscript/always_track_call_stacks", previous_track_stacks);
@@ -502,6 +558,11 @@ TEST_SUITE("[Modules][GDScript][ExportSession]") {
 			REQUIRE(read_tag_function != nullptr);
 			CHECK(function_has_global_name(read_tag_function, SNAME("tag")));
 			CHECK(!function_has_global_name(read_tag_function, SNAME("TestExportAutoload")));
+#ifdef DEBUG_ENABLED
+			const Vector<String> autoload_disassembly = disassemble_function(read_tag_function, autoload_user_source);
+			CHECK(disassembly_has_instruction(autoload_disassembly, "store global "));
+			CHECK(!disassembly_has_instruction(autoload_disassembly, "store named global "));
+#endif
 		}
 
 #ifdef TOOLS_ENABLED
@@ -509,6 +570,86 @@ TEST_SUITE("[Modules][GDScript][ExportSession]") {
 #endif
 		ProjectSettings::get_singleton()->clear("autoload/TestExportAutoload");
 		CHECK(!GDScriptCache::has_active_export_session());
+	}
+
+	TEST_CASE("Detached inner classes do not pollute global GDScriptLanguage orphan_subclasses") {
+		ensure_gdscript_language_initialized();
+
+		const String project_dir = TestUtils::get_temp_path("gdscript_export_session_inner_classes");
+		Ref<DirAccess> directory = DirAccess::create_for_path(project_dir.get_base_dir());
+		REQUIRE(directory.is_valid());
+		directory->make_dir_recursive(project_dir);
+
+		ScopedResourcePath resource_path_guard(project_dir);
+		const String owner_script_path = "res://inner_owner.gd";
+		const String consumer_script_path = "res://inner_consumer.gd";
+
+		write_file_contents(
+				project_dir.path_join("inner_owner.gd"),
+				"extends RefCounted\n"
+				"class Inner:\n"
+				"\tvar payload: int = 9\n");
+
+		write_file_contents(
+				project_dir.path_join("inner_consumer.gd"),
+				"extends RefCounted\n"
+				"const OWNER := preload(\"res://inner_owner.gd\")\n"
+				"const INNER_CLASS := OWNER.Inner\n");
+
+		String inner_fqcn;
+		Ref<GDScript> held_inner_subclass;
+		{
+			GDScriptExportCompileSession session(true);
+			Error consumer_error = OK;
+			Ref<GDScript> compiled_consumer = session.get_or_compile(consumer_script_path, consumer_error);
+			CHECK(!GDScriptCache::has_active_export_session());
+			REQUIRE_EQ(consumer_error, OK);
+			REQUIRE(compiled_consumer.is_valid());
+
+			Error owner_error = OK;
+			Ref<GDScript> compiled_owner = session.get_or_compile(owner_script_path, owner_error);
+			CHECK(!GDScriptCache::has_active_export_session());
+			REQUIRE_EQ(owner_error, OK);
+			REQUIRE(compiled_owner.is_valid());
+			CHECK(compiled_owner->is_detached_export_script());
+
+			const HashMap<StringName, Ref<GDScript>> &owner_subclasses = compiled_owner->get_subclasses();
+			REQUIRE(owner_subclasses.has(SNAME("Inner")));
+			held_inner_subclass = owner_subclasses[SNAME("Inner")];
+			REQUIRE(held_inner_subclass.is_valid());
+			CHECK(held_inner_subclass->is_detached_export_script());
+			inner_fqcn = held_inner_subclass->get_fully_qualified_name();
+			REQUIRE(!inner_fqcn.is_empty());
+
+			// Session teardown calls compiled_owner->clear() while held_inner_subclass is still alive in ObjectDB.
+		}
+
+		// Detached inner class must NOT have been registered in GDScriptLanguage::orphan_subclasses.
+		CHECK(GDScriptLanguage::get_singleton()->get_orphan_subclass(inner_fqcn).is_null());
+
+		// Also verify a pre-existing live orphan subclass with the same FQCN is neither consumed nor clobbered.
+		Ref<GDScript> live_sentinel_subclass;
+		live_sentinel_subclass.instantiate();
+		GDScriptLanguage::get_singleton()->add_orphan_subclass(inner_fqcn, live_sentinel_subclass->get_instance_id());
+		{
+			GDScriptExportCompileSession second_session(true);
+			Error owner_error = OK;
+			Ref<GDScript> recompiled_owner = second_session.get_or_compile(owner_script_path, owner_error);
+			CHECK(!GDScriptCache::has_active_export_session());
+			REQUIRE_EQ(owner_error, OK);
+			REQUIRE(recompiled_owner.is_valid());
+			REQUIRE(recompiled_owner->get_subclasses().has(SNAME("Inner")));
+			CHECK(recompiled_owner->get_subclasses()[SNAME("Inner")].ptr() != live_sentinel_subclass.ptr());
+		}
+		CHECK_EQ(GDScriptLanguage::get_singleton()->get_orphan_subclass(inner_fqcn).ptr(), live_sentinel_subclass.ptr());
+
+		held_inner_subclass->clear();
+		held_inner_subclass.unref();
+		live_sentinel_subclass.unref();
+		CHECK(!ResourceCache::has(owner_script_path));
+		CHECK(!ResourceCache::has(consumer_script_path));
+		CHECK(GDScriptCache::get_cached_script(owner_script_path).is_null());
+		CHECK(GDScriptCache::get_cached_script(consumer_script_path).is_null());
 	}
 }
 

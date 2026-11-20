@@ -214,6 +214,7 @@ Ref<GDScript> GDScriptExportCompileSession::get_shallow_script(const String &p_p
 
 	Ref<GDScript> script;
 	script.instantiate();
+	script->set_detached_export_script(true);
 	// Detached scripts use set_path_cache() exclusively so global ResourceCache is never modified.
 	script->set_path_cache(p_path);
 

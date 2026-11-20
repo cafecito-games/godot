@@ -1332,6 +1332,11 @@ void GDScript::_save_orphaned_subclasses() {
 	// collect subclasses ObjectID and name
 	for (KeyValue<StringName, Ref<GDScript>> &E : subclasses) {
 		E.value->_owner = nullptr; //bye, you are no longer owned cause I died
+#if defined(TOOLS_ENABLED) || defined(TESTS_ENABLED)
+		if (detached_export_script || E.value->detached_export_script) {
+			continue;
+		}
+#endif
 		ClassRefWithName subclass;
 		subclass.id = E.value->get_instance_id();
 		subclass.fully_qualified_name = E.value->fully_qualified_name;

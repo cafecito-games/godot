@@ -61,6 +61,9 @@ class GDScript : public Script {
 	bool valid = false;
 	bool reloading = false;
 	bool _is_abstract = false;
+#if defined(TOOLS_ENABLED) || defined(TESTS_ENABLED)
+	bool detached_export_script = false;
+#endif
 
 	struct MemberInfo {
 		int index = 0;
@@ -241,6 +244,10 @@ public:
 	void cancel_pending_functions(bool warn);
 
 	virtual bool is_valid() const override { return valid; }
+#if defined(TOOLS_ENABLED) || defined(TESTS_ENABLED)
+	void set_detached_export_script(bool p_detached) { detached_export_script = p_detached; }
+	bool is_detached_export_script() const { return detached_export_script; }
+#endif
 
 	bool inherits_script(const Ref<Script> &p_script) const override;
 

@@ -420,13 +420,10 @@ GDScriptCodeGenerator::Address GDScriptCompiler::_parse_expression(CodeGen &code
 				case GDScriptParser::IdentifierNode::UNDEFINED_SOURCE: {
 #if defined(TOOLS_ENABLED) || defined(TESTS_ENABLED)
 					if (GDScriptExportCompileSession *export_session = GDScriptCache::get_active_export_session()) {
-						if (export_session->should_compile_autoloads_as_runtime_globals()) {
-							HashMap<StringName, ProjectSettings::AutoloadInfo> autoloads(ProjectSettings::get_singleton()->get_autoload_list());
-							if (autoloads.has(identifier) && autoloads[identifier].is_singleton) {
-								GDScriptCodeGenerator::Address global = codegen.add_temporary(_gdtype_from_datatype(in->get_datatype(), codegen.script));
-								gen->write_store_global(global, 0);
-								return global;
-							}
+						if (export_session->should_compile_autoloads_as_runtime_globals() && ProjectSettings::get_singleton()->has_autoload(identifier) && ProjectSettings::get_singleton()->get_autoload(identifier).is_singleton) {
+							GDScriptCodeGenerator::Address global = codegen.add_temporary(_gdtype_from_datatype(in->get_datatype(), codegen.script));
+							gen->write_store_global(global, 0);
+							return global;
 						}
 					}
 #endif
@@ -3183,6 +3180,9 @@ void GDScriptCompiler::make_scripts(GDScript *p_script, const GDScriptParser::Cl
 
 		subclass->_owner = p_script;
 		subclass->path = p_script->path;
+#if defined(TOOLS_ENABLED) || defined(TESTS_ENABLED)
+		subclass->set_detached_export_script(p_script->is_detached_export_script());
+#endif
 		p_script->subclasses.insert(name, subclass);
 
 		make_scripts(subclass.ptr(), inner_class, p_keep_state);
