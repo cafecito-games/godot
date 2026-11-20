@@ -256,26 +256,26 @@ jobs:
           key: android-${{ hashFiles('core/**/*.h', 'core/**/*.cpp', 'SConstruct') }}
           restore-keys: android-
 
-      - name: Build Android native slices (arm64 + x86_64; release + debug)
+      - name: Build Android native slices and package Relink Kits
         run: |
+          mkdir -p release-out
           for target in template_release template_debug; do
             for arch in arm64 x86_64; do
               uv run --project cafecito cafecito-build build --platform android --target "$target" --arch "$arch"
+              uv run --project cafecito cafecito-build package-relink-kit \
+                --manifest "bin/libgodot.android.${target}.${arch}.so.relink.json" \
+                --output-dir release-out
             done
           done
 
-      - name: Generate Android template APKs and package Relink Kits
+      - name: Generate Android template APKs
         run: |
-          mkdir -p release-out
           (cd platform/android/java && ./gradlew generateGodotTemplates)
           uv run --project cafecito cafecito-build package-android-templates \
             --bin-dir bin \
             --output-zip release-out/android.zip \
             --abi arm64-v8a \
             --abi x86_64
-          for manifest in bin/libgodot.android.*.relink.json; do
-            uv run --project cafecito cafecito-build package-relink-kit --manifest "$manifest" --output-dir release-out
-          done
 
       - name: Upload Android artifacts
         uses: actions/upload-artifact@v4

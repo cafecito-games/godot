@@ -188,10 +188,13 @@ def write_relink_manifest(target, source, env) -> None:
         target_kind = "shared_library"
         raw_linker = str(env.subst("$SHLINK")).strip() if is_msvc else (cxx_driver or str(env.subst("$SHLINK")).strip())
         linker = " ".join(_normalize_sdk_tokens(shlex.split(raw_linker), env)) if raw_linker else ""
-        link_flags = _normalize_sdk_tokens(
-            _flatten_strings(env, env.get("SHLINKFLAGS", [])) + _flatten_strings(env, env.get("LINKFLAGS", [])),
-            env,
-        )
+        raw_shlinkflags = env.get("SHLINKFLAGS", [])
+        shlink_tokens = _flatten_strings(env, raw_shlinkflags)
+        if any("$LINKFLAGS" in str(item) for item in _flatten_raw_items(raw_shlinkflags)):
+            raw_link_flags = shlink_tokens
+        else:
+            raw_link_flags = _flatten_strings(env, env.get("LINKFLAGS", [])) + shlink_tokens
+        link_flags = _normalize_sdk_tokens(raw_link_flags, env)
     else:
         target_kind = "executable" if library_type == "executable" else library_type
         raw_linker = str(env.subst("$LINK")).strip() if is_msvc else (cxx_driver or str(env.subst("$LINK")).strip())
