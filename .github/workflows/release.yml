@@ -112,8 +112,8 @@ jobs:
 
       - name: Build iOS release slices
         run: |
-          uv run --project cafecito cafecito-build build --platform ios --target template_release --arch arm64 --library-type static_library --extra-flag ios_simulator=no --extra-flag vulkan=no --extra-flag metal=yes
-          uv run --project cafecito cafecito-build build --platform ios --target template_release --arch arm64 --library-type static_library --extra-flag ios_simulator=yes --extra-flag vulkan=no --extra-flag metal=yes
+          uv run --project cafecito cafecito-build build --platform ios --target template_release --arch arm64 --extra-flag ios_simulator=no
+          uv run --project cafecito cafecito-build build --platform ios --target template_release --arch arm64 --extra-flag ios_simulator=yes
 
       - name: Package iOS Relink Kits
         run: |

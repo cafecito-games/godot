@@ -171,6 +171,9 @@ def combine_libs_apple_embedded(target, source, env):
         libtool + ' -static -o "' + lib_path + '" ' + " ".join([('"' + lib.srcnode().abspath + '"') for lib in source])
     )
     if env.get("cafecito_relink_kit"):
+        repo_root_dir = os.path.dirname(os.path.abspath(__file__))
+        if repo_root_dir not in sys.path:
+            sys.path.insert(0, repo_root_dir)
         from cafecito.relink_manifest import write_apple_embedded_relink_kit
 
         write_apple_embedded_relink_kit(target, source, env, libtool)
