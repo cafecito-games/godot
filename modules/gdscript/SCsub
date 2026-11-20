@@ -1,10 +1,27 @@
 #!/usr/bin/env python
 from misc.utility.scons_hints import *
 
+import gdscript_bytecode_abi_builder
+
 Import("env")
 Import("env_modules")
 
 env_gdscript = env_modules.Clone()
+
+gdscript_bytecode_abi_sources = [
+    "gdscript_opcode_layout.inc",
+    "gdscript_bytecode_format.h",
+    "#core/variant/variant.h",
+    "#core/variant/variant_construct.cpp",
+    "gdscript_bytecode_abi_builder.py",
+    env.Value(str(env["precision"])),
+    env.Value(bool(env["deprecated"])),
+]
+env_gdscript.CommandNoCache(
+    "gdscript_bytecode_abi.gen.h",
+    gdscript_bytecode_abi_sources,
+    env.Run(gdscript_bytecode_abi_builder.make_gdscript_bytecode_abi_header),
+)
 
 env_gdscript.add_source_files(env.modules_sources, "*.cpp")
 
@@ -26,5 +43,7 @@ if env.editor_build:
 
 if env["tests"]:
     # TODO: Handle test creation magic without needing to pass macro.
-    env_gdscript.Append(CPPDEFINES=["TESTS_ENABLED"])
+    env_gdscript.AppendUnique(CPPDEFINES=["TESTS_ENABLED"])
+    # Ensure tests/test_main.cpp sees the same TESTS_ENABLED layout as gdscript headers.
+    env.AppendUnique(CPPDEFINES=["TESTS_ENABLED"])
     env_gdscript.add_source_files(env.modules_sources, "./tests/*.cpp")
