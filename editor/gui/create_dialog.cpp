@@ -508,11 +508,19 @@ float CreateDialog::_score_type(const String &p_type, const String &p_search) co
 		return 1.0f;
 	}
 
-	float inverse_length = 1.f / float(p_type.length());
+	// A namespaced global script class is registered under its qualified name ("app.combat.Weapon").
+	// Both heuristics below would penalize it for a prefix the user never types: the match sits far
+	// from the start, and the type reads as long. Score the simple name whenever the search still
+	// matches it, so a namespaced class competes with a flat one on equal terms. Names without a
+	// separator are unaffected, since `rfind_char()` reports -1 and the whole name is taken.
+	const String simple_name = p_type.substr(p_type.rfind_char('.') + 1);
+	const String &scored_type = p_search.is_subsequence_ofn(simple_name) ? simple_name : p_type;
+
+	float inverse_length = 1.f / float(scored_type.length());
 
 	// Favor types where search term is a substring close to the start of the type.
 	float w = 0.5f;
-	int pos = p_type.findn(p_search);
+	int pos = scored_type.findn(p_search);
 	float score = (pos > -1) ? 1.0f - w * MIN(1, 3 * pos * inverse_length) : MAX(0.f, .9f - w);
 
 	// Favor shorter items: they resemble the search term more.
@@ -750,7 +758,9 @@ Variant CreateDialog::instantiate_selected() {
 			obj = EditorNode::get_editor_data().script_class_instance(type_name);
 			Node *n = Object::cast_to<Node>(obj);
 			if (n) {
-				n->set_name(type_name);
+				// Node names cannot contain "." (see `String::validate_node_name()`), so a namespaced
+				// global script class contributes its simple name instead of a mangled qualified one.
+				n->set_name(type_name.substr(type_name.rfind_char('.') + 1));
 			}
 		} else {
 			obj = EditorNode::get_editor_data().instantiate_custom_type(selected->get_text(0), type_name);
