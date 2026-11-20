@@ -175,13 +175,13 @@ including us, and a fix landed upstream reaches this fork on the next rebase.
 For problems with the changes listed above, the build tooling, or the Apple
 embedding layer, open an issue here.
 
-**We don't accept pull requests.** Pull requests are disabled on this
-repository. This fork is driven by what our own games need, and keeping it a
-small, rebaseable delta on top of upstream matters more to us than growing it.
-If you have a fix, the best home for it is
+**We don't take outside pull requests.** This fork is driven by what our own
+games need, and keeping it a small, rebaseable delta on top of upstream matters
+more to us than growing it, so PRs from outside the team will be closed
+unreviewed. If you have a fix, the best home for it is
 [upstream Godot](https://github.com/godotengine/godot/pulls) — we'll pick it up
-from there. If it's specific to something in this fork, open an issue with the
-details and we'll take a look.
+from there on the next rebase. If it's specific to something in this fork, open
+an issue with the details and we'll take a look.
 
 Since everything here is MIT-licensed, you are of course free to fork this fork
 and take it wherever you need.

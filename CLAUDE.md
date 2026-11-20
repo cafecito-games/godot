@@ -193,10 +193,11 @@ iOS builds are fail-closed on the Xcode 27 / iOS 27 SDK floor via
 
 ## How work lands, reporting, and upstreaming
 
-**Pull requests are disabled on `cafecito-games/godot`** — the repository accepts
-issues but not PRs, for contributors and maintainers alike. Land work by
-committing to a branch and pushing, then fast-forwarding `main`; do not try to
-open a PR here, and do not suggest one as the finishing step.
+Work lands through pull requests on `cafecito-games/godot`: branch, commit with
+the `cafecito(<topic>)` prefix, push, open a PR against `main`, and squash-merge
+it. **Outside pull requests are not accepted** — PRs from people outside the
+team are closed unreviewed, and outside fixes are directed upstream instead. The
+repository does take issues from anyone.
 
 If a bug is not specific to this fork, it belongs
 [upstream](https://github.com/godotengine/godot/issues) — fixing it there means
