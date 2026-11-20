@@ -122,7 +122,7 @@ def _classify_libraries(env, repo_root: Path, default_ext_lib_path: Path | None)
     return internal_static_libs, external_libs, default_ext_rel
 
 
-def _collect_compile_metadata(env) -> dict[str, Any]:
+def _collect_compile_metadata(env, target_filename: str = "") -> dict[str, Any]:
     raw_cxx = str(env.subst("$CXX")).strip()
     cxx_tokens = _normalize_sdk_tokens(shlex.split(raw_cxx), env) if raw_cxx else []
     cxx = " ".join(cxx_tokens)
@@ -148,12 +148,17 @@ def _collect_compile_metadata(env) -> dict[str, Any]:
 
     android_ndk_root = str(env.get("ANDROID_NDK_ROOT", "")).rstrip("/")
     android_ndk_version = Path(android_ndk_root).name if android_ndk_root else ""
+    is_ios_simulator = bool(
+        env.get("simulator")
+        or env.get("ios_simulator")
+        or ".simulator." in target_filename
+    )
 
     return {
         "cxx": cxx,
         "flags": kept_flags,
         "defines": _format_cppdefines(env),
-        "ios_simulator": bool(env.get("ios_simulator", False)),
+        "ios_simulator": is_ios_simulator,
         "android_ndk_version": android_ndk_version,
     }
 
@@ -213,7 +218,7 @@ def write_relink_manifest(target, source, env) -> None:
         "object_files": object_files,
         "static_libraries": internal_static_libs,
         "external_libs": external_libs,
-        "compile": _collect_compile_metadata(env),
+        "compile": _collect_compile_metadata(env, target_path.name),
         "link": {
             "linker": linker,
             "flags": link_flags,
@@ -266,7 +271,7 @@ def write_apple_embedded_relink_kit(target, source, env, libtool_cmd: str) -> No
         "object_files": [],
         "static_libraries": [os.path.relpath(relink_archive_path, repo_root).replace("\\", "/")],
         "external_libs": [],
-        "compile": _collect_compile_metadata(env),
+        "compile": _collect_compile_metadata(env, target_path.name),
         "link": {
             "linker": "libtool",
             "flags": ["-static"],

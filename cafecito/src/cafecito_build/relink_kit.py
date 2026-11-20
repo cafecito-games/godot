@@ -29,7 +29,7 @@ def derive_kit_name(manifest: dict[str, Any]) -> str:
         str(manifest["target"]),
         str(manifest["arch"]),
     ]
-    if compile_section.get("ios_simulator"):
+    if compile_section.get("ios_simulator") or ".simulator." in str(manifest.get("output_filename", "")):
         parts.append("simulator")
     if "-DLIBGODOT_ENABLED" in defines:
         parts.append("libgodot")
