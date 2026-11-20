@@ -37,6 +37,8 @@ def _flatten_raw_items(value: Any) -> list[Any]:
 
 def _normalize_sdk_tokens(tokens: list[str], env) -> list[str]:
     vulkan_sdk = os.environ.get("VULKAN_SDK", "").rstrip("/")
+    apple_toolchain = str(env.get("APPLE_TOOLCHAIN_PATH", "")).rstrip("/")
+    android_ndk_root = str(env.get("ANDROID_NDK_ROOT", "")).rstrip("/")
     normalized: list[str] = []
     index = 0
     while index < len(tokens):
@@ -51,6 +53,12 @@ def _normalize_sdk_tokens(tokens: list[str], env) -> list[str]:
             continue
         if vulkan_sdk and vulkan_sdk in token:
             token = token.replace(vulkan_sdk, "__VULKAN_SDK__")
+        if apple_toolchain and apple_toolchain in token:
+            token = token.replace(apple_toolchain, "__APPLE_TOOLCHAIN_PATH__")
+        if android_ndk_root and android_ndk_root in token:
+            token = token.replace(android_ndk_root, "__ANDROID_NDK_ROOT__")
+            for host_tag in ("darwin-x86_64", "linux-x86_64", "windows-x86_64"):
+                token = token.replace(f"/prebuilt/{host_tag}/", "/prebuilt/__NDK_HOST_TAG__/")
         normalized.append(token)
         index += 1
     return normalized
@@ -115,7 +123,9 @@ def _classify_libraries(env, repo_root: Path, default_ext_lib_path: Path | None)
 
 
 def _collect_compile_metadata(env) -> dict[str, Any]:
-    cxx = str(env.subst("$CXX")).strip()
+    raw_cxx = str(env.subst("$CXX")).strip()
+    cxx_tokens = _normalize_sdk_tokens(shlex.split(raw_cxx), env) if raw_cxx else []
+    cxx = " ".join(cxx_tokens)
     ccflags = _normalize_sdk_tokens(_flatten_strings(env, env.get("CCFLAGS", [])), env)
     cxxflags = _normalize_sdk_tokens(_flatten_strings(env, env.get("CXXFLAGS", [])), env)
 
@@ -136,11 +146,15 @@ def _collect_compile_metadata(env) -> dict[str, Any]:
             continue
         kept_flags.append(token)
 
+    android_ndk_root = str(env.get("ANDROID_NDK_ROOT", "")).rstrip("/")
+    android_ndk_version = Path(android_ndk_root).name if android_ndk_root else ""
+
     return {
         "cxx": cxx,
         "flags": kept_flags,
         "defines": _format_cppdefines(env),
         "ios_simulator": bool(env.get("ios_simulator", False)),
+        "android_ndk_version": android_ndk_version,
     }
 
 
@@ -162,18 +176,21 @@ def write_relink_manifest(target, source, env) -> None:
     internal_static_libs, external_libs, default_ext_rel = _classify_libraries(env, repo_root, default_ext_path)
 
     is_msvc = bool(getattr(env, "msvc", False))
-    cxx_driver = str(env.subst("$CXX")).strip()
+    raw_cxx_driver = str(env.subst("$CXX")).strip()
+    cxx_driver = " ".join(_normalize_sdk_tokens(shlex.split(raw_cxx_driver), env)) if raw_cxx_driver else ""
     library_type = str(env.get("library_type", "executable"))
     if str(target_path).endswith((".dylib", ".so", ".dll")):
         target_kind = "shared_library"
-        linker = str(env.subst("$SHLINK")).strip() if is_msvc else (cxx_driver or str(env.subst("$SHLINK")).strip())
+        raw_linker = str(env.subst("$SHLINK")).strip() if is_msvc else (cxx_driver or str(env.subst("$SHLINK")).strip())
+        linker = " ".join(_normalize_sdk_tokens(shlex.split(raw_linker), env)) if raw_linker else ""
         link_flags = _normalize_sdk_tokens(
             _flatten_strings(env, env.get("SHLINKFLAGS", [])) + _flatten_strings(env, env.get("LINKFLAGS", [])),
             env,
         )
     else:
         target_kind = "executable" if library_type == "executable" else library_type
-        linker = str(env.subst("$LINK")).strip() if is_msvc else (cxx_driver or str(env.subst("$LINK")).strip())
+        raw_linker = str(env.subst("$LINK")).strip() if is_msvc else (cxx_driver or str(env.subst("$LINK")).strip())
+        linker = " ".join(_normalize_sdk_tokens(shlex.split(raw_linker), env)) if raw_linker else ""
         link_flags = _normalize_sdk_tokens(_flatten_strings(env, env.get("LINKFLAGS", [])), env)
 
     frameworks = [str(env.subst(str(fw))).strip() for fw in _flatten_raw_items(env.get("FRAMEWORKS", [])) if str(fw).strip()]

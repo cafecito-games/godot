@@ -58,6 +58,23 @@ def detect_vulkan_sdk_macos() -> Path | None:
     return None
 
 
+def detect_android_sdk() -> Path | None:
+    for variable_name in ("ANDROID_HOME", "ANDROID_SDK_ROOT"):
+        configured = os.environ.get(variable_name, "").strip()
+        if configured:
+            candidate = Path(configured)
+            if candidate.is_dir():
+                return candidate
+
+    for candidate in (
+        Path.home() / "Library" / "Android" / "sdk",
+        Path.home() / "Android" / "Sdk",
+    ):
+        if candidate.is_dir():
+            return candidate
+    return None
+
+
 def detect_host_environment() -> HostEnvironment:
     godot_platform = detect_godot_platform()
     vulkan_sdk = detect_vulkan_sdk_macos() if godot_platform == "macos" else None
@@ -95,6 +112,11 @@ def build_process_environment(
                 "VULKAN_SDK is not set and ~/VulkanSDK was not found. "
                 "Install the Vulkan SDK for macOS before building with Vulkan enabled."
             )
+
+    android_sdk = detect_android_sdk()
+    if android_sdk is not None:
+        process_environment.setdefault("ANDROID_HOME", str(android_sdk))
+        process_environment.setdefault("ANDROID_SDK_ROOT", str(android_sdk))
 
     if scons_cache_directory is not None:
         process_environment["SCONS_CACHE"] = str(scons_cache_directory)
