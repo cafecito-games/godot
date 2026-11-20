@@ -242,6 +242,7 @@ private:
 	static float _dependency_get_progress(const String &p_path);
 
 	static bool _ensure_load_progress();
+	static void _wait_tick();
 
 	static String _validate_local_path(const String &p_path);
 
