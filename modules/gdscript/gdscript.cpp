@@ -882,6 +882,7 @@ Error GDScript::reload(bool p_keep_state) {
 	if (can_run) {
 		err = _static_init();
 		if (err) {
+			reloading = false;
 			return err;
 		}
 	}

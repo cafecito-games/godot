@@ -367,6 +367,10 @@ Ref<GDScript> GDScriptCache::get_full_script(const String &p_path, Error &r_erro
 		}
 	}
 
+	if (script->reloading) {
+		return script;
+	}
+
 	const String remapped_path = ResourceLoader::path_remap(p_path);
 
 	if (p_update_from_disk) {

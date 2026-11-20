@@ -226,8 +226,8 @@ private:
 	static uint32_t _thread_enter_unlock_allowance_zone(THREADING_NAMESPACE::unique_lock<THREADING_NAMESPACE::mutex> &p_ulock);
 #endif
 
-	void _lock_unlockable_mutexes();
-	void _unlock_unlockable_mutexes();
+	static void _lock_unlockable_mutexes();
+	static void _unlock_unlockable_mutexes();
 
 protected:
 	static void _bind_methods();
@@ -294,6 +294,9 @@ public:
 	static uint32_t thread_enter_unlock_allowance_zone(const SafeBinaryMutex<Tag> &p_mutex) { return UINT32_MAX; }
 	static void thread_exit_unlock_allowance_zone(uint32_t p_zone_id) {}
 #endif
+	static void thread_unlock_allowance_zones();
+	static void thread_relock_allowance_zones();
+	static void thread_delay_usec_unlocked(uint32_t p_usec);
 
 	void init(int p_thread_count = -1, float p_low_priority_task_ratio = 0.3);
 	void exit_languages_threads();

@@ -35,6 +35,19 @@ TEST_FORCE_LINK(test_worker_thread_pool)
 #include "core/object/callable_mp.h"
 #include "core/object/worker_thread_pool.h"
 #include "core/os/os.h"
+#include "core/os/safe_binary_mutex.h"
+
+#ifdef THREADS_ENABLED
+static constexpr int TEST_WORKER_POOL_ALLOWANCE_MUTEX_TAG = 1001;
+static SafeBinaryMutex<TEST_WORKER_POOL_ALLOWANCE_MUTEX_TAG> _test_worker_pool_allowance_mutex;
+
+SafeBinaryMutex<TEST_WORKER_POOL_ALLOWANCE_MUTEX_TAG> &_get_test_worker_pool_allowance_mutex() {
+	return _test_worker_pool_allowance_mutex;
+}
+
+template <>
+thread_local SafeBinaryMutex<TEST_WORKER_POOL_ALLOWANCE_MUTEX_TAG>::TLSData SafeBinaryMutex<TEST_WORKER_POOL_ALLOWANCE_MUTEX_TAG>::tls_data(_get_test_worker_pool_allowance_mutex());
+#endif
 
 namespace TestWorkerThreadPool {
 
@@ -173,5 +186,61 @@ TEST_CASE("[WorkerThreadPool] Run a yielding daemon as the only hope for other t
 	}
 	CHECK_MESSAGE(all_needed_yield, "All legit tasks should have needed the daemon yielding to run.");
 }
+
+#ifdef THREADS_ENABLED
+static void _acquire_allowance_mutex_task(void *p_flag) {
+	SafeFlag *acquired_flag = static_cast<SafeFlag *>(p_flag);
+	MutexLock<SafeBinaryMutex<TEST_WORKER_POOL_ALLOWANCE_MUTEX_TAG>> lock(_test_worker_pool_allowance_mutex);
+	acquired_flag->set();
+}
+
+static void _delayed_acquire_allowance_mutex_task(void *p_flag) {
+	OS::get_singleton()->delay_usec(2000);
+	SafeFlag *acquired_flag = static_cast<SafeFlag *>(p_flag);
+	MutexLock<SafeBinaryMutex<TEST_WORKER_POOL_ALLOWANCE_MUTEX_TAG>> lock(_test_worker_pool_allowance_mutex);
+	acquired_flag->set();
+}
+
+TEST_CASE("[WorkerThreadPool] Release unlock allowance zones during unlocked delay and non-pool task wait") {
+	if (WorkerThreadPool::get_singleton()->get_thread_count() <= 0) {
+		return;
+	}
+
+	SUBCASE("thread_delay_usec_unlocked releases and relocks nested SafeBinaryMutex allowance zones") {
+		SafeFlag worker_acquired;
+		{
+			MutexLock<SafeBinaryMutex<TEST_WORKER_POOL_ALLOWANCE_MUTEX_TAG>> outer_lock(_test_worker_pool_allowance_mutex);
+			MutexLock<SafeBinaryMutex<TEST_WORKER_POOL_ALLOWANCE_MUTEX_TAG>> inner_lock(_test_worker_pool_allowance_mutex);
+			uint32_t outer_zone = WorkerThreadPool::thread_enter_unlock_allowance_zone(_test_worker_pool_allowance_mutex);
+			uint32_t inner_zone = WorkerThreadPool::thread_enter_unlock_allowance_zone(_test_worker_pool_allowance_mutex);
+
+			WorkerThreadPool::TaskID task_id = WorkerThreadPool::get_singleton()->add_native_task(_acquire_allowance_mutex_task, &worker_acquired, true);
+			while (!worker_acquired.is_set()) {
+				WorkerThreadPool::thread_delay_usec_unlocked(1000);
+			}
+
+			WorkerThreadPool::thread_exit_unlock_allowance_zone(inner_zone);
+			WorkerThreadPool::thread_exit_unlock_allowance_zone(outer_zone);
+			CHECK(WorkerThreadPool::get_singleton()->wait_for_task_completion(task_id) == OK);
+		}
+		CHECK(worker_acquired.is_set());
+	}
+
+	SUBCASE("wait_for_task_completion from non-pool thread releases unlock allowance zones") {
+		SafeFlag worker_acquired;
+		{
+			MutexLock<SafeBinaryMutex<TEST_WORKER_POOL_ALLOWANCE_MUTEX_TAG>> lock(_test_worker_pool_allowance_mutex);
+			uint32_t zone_id = WorkerThreadPool::thread_enter_unlock_allowance_zone(_test_worker_pool_allowance_mutex);
+
+			WorkerThreadPool::TaskID task_id = WorkerThreadPool::get_singleton()->add_native_task(_delayed_acquire_allowance_mutex_task, &worker_acquired, true);
+			Error wait_error = WorkerThreadPool::get_singleton()->wait_for_task_completion(task_id);
+			CHECK(wait_error == OK);
+			CHECK(worker_acquired.is_set());
+
+			WorkerThreadPool::thread_exit_unlock_allowance_zone(zone_id);
+		}
+	}
+}
+#endif // THREADS_ENABLED
 
 } // namespace TestWorkerThreadPool

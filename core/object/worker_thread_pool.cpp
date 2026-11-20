@@ -452,7 +452,13 @@ Error WorkerThreadPool::wait_for_task_completion(TaskID p_task_id) {
 		}
 	} else {
 		task_mutex.unlock();
+		if (this == singleton) {
+			_unlock_unlockable_mutexes();
+		}
 		task->done_semaphore.wait();
+		if (this == singleton) {
+			_lock_unlockable_mutexes();
+		}
 		task_mutex.lock();
 		task->waiting_user--;
 		if (task->waiting_pool == 0 && task->waiting_user == 0) {
@@ -807,6 +813,20 @@ void WorkerThreadPool::thread_exit_unlock_allowance_zone(uint32_t p_zone_id) {
 	}
 }
 #endif
+
+void WorkerThreadPool::thread_unlock_allowance_zones() {
+	_unlock_unlockable_mutexes();
+}
+
+void WorkerThreadPool::thread_relock_allowance_zones() {
+	_lock_unlockable_mutexes();
+}
+
+void WorkerThreadPool::thread_delay_usec_unlocked(uint32_t p_usec) {
+	_unlock_unlockable_mutexes();
+	OS::get_singleton()->delay_usec(p_usec);
+	_lock_unlockable_mutexes();
+}
 
 void WorkerThreadPool::init(int p_thread_count, float p_low_priority_task_ratio) {
 	ERR_FAIL_COND(threads.size() > 0);

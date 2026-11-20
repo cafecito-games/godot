@@ -238,7 +238,7 @@ void ResourceLoader::LoadToken::clear() {
 			} else {
 				DEV_ASSERT(thread_load_tasks.has(local_path));
 				ThreadLoadTask &load_task = thread_load_tasks[local_path];
-				if (load_task.task_id && !load_task.awaited) {
+				if (load_task.task_id && !load_task.awaited && load_task.task_id != WorkerThreadPool::get_singleton()->get_caller_task_id()) {
 					task_to_await = load_task.task_id;
 				}
 				// Removing a task which is still in progress would be catastrophic.
@@ -489,7 +489,10 @@ void ResourceLoader::_run_load_task(void *p_userdata) {
 				// This is not the most optimal thing to do, but it is safe. Either the
 				// dependency will complete soon, or will block soon when we can safely
 				// yield.
-				OS::get_singleton()->delay_usec(1000);
+				// Release any mutexes the calling thread allows unlocking while waiting
+				// (such as GDScriptCache::mutex), since the worker loading this dependency
+				// may be blocked on one of them outside ResourceLoader's wait graph.
+				WorkerThreadPool::thread_delay_usec_unlocked(1000);
 			}
 		} while (wait && status == THREAD_LOAD_IN_PROGRESS && !cleaning_tasks);
 
@@ -506,14 +509,17 @@ void ResourceLoader::_run_load_task(void *p_userdata) {
 		}
 
 		if (status != THREAD_LOAD_IN_PROGRESS) {
-			load_task.load_token->unreference();
 			thread_load_mutex.lock();
+			LoadToken *load_token = load_task.load_token;
 			if (thread_waiting_on_backup.is_empty()) {
 				thread_waiting_on.erase(thread_index);
 			} else {
 				thread_waiting_on[thread_index] = thread_waiting_on_backup;
 			}
 			thread_load_mutex.unlock();
+			if (load_token->unreference()) {
+				memdelete(load_token);
+			}
 			return;
 		}
 
@@ -574,7 +580,7 @@ void ResourceLoader::_run_load_task(void *p_userdata) {
 				// cache registration, then use their instance.
 				while (!old_res.is_valid()) {
 					ResourceCache::lock.unlock();
-					OS::get_singleton()->delay_usec(1000);
+					WorkerThreadPool::thread_delay_usec_unlocked(1000);
 					ResourceCache::lock.lock();
 					old_res = ResourceCache::get_ref(load_task.local_path);
 				}
@@ -669,10 +675,17 @@ void ResourceLoader::_run_load_task(void *p_userdata) {
 		WorkerThreadPool::get_singleton()->notify_yield_over(tid);
 	}
 
+	LoadToken *load_token = load_task.load_token;
+	String completed_local_path = load_task.local_path;
+
 	thread_load_mutex.unlock();
 
+	curr_load_task = curr_load_task_backup;
+
 	// It's safe now to let the task go in case no one else was grabbing the token.
-	load_task.load_token->unreference();
+	if (load_token->unreference()) {
+		memdelete(load_token);
+	}
 
 	if (load_nesting == 0) {
 		if (own_mq_override) {
@@ -681,9 +694,7 @@ void ResourceLoader::_run_load_task(void *p_userdata) {
 		}
 	}
 
-	curr_load_task = curr_load_task_backup;
-
-	print_verbose(vformat("Completed load for: '%s' remapped '%s' at thread %d", load_task.local_path, remapped_path, thread_index));
+	print_verbose(vformat("Completed load for: '%s' remapped '%s' at thread %d", completed_local_path, remapped_path, thread_index));
 }
 
 String ResourceLoader::_validate_local_path(const String &p_path) {
@@ -970,7 +981,7 @@ Ref<Resource> ResourceLoader::load_threaded_get(const String &p_path, Error *r_e
 			while (load_task_ptr->status == THREAD_LOAD_IN_PROGRESS) {
 				thread_load_lock.temp_unlock();
 				bool exit = !_ensure_load_progress();
-				OS::get_singleton()->delay_usec(1000);
+				WorkerThreadPool::thread_delay_usec_unlocked(1000);
 				if (MessageQueue::get_singleton()) {
 					MessageQueue::get_singleton()->flush();
 				}
@@ -1082,6 +1093,7 @@ Ref<Resource> ResourceLoader::_load_complete_inner(LoadToken &p_load_token, Erro
 					load_task.cond_var = memnew(ConditionVariable);
 				}
 				load_task.awaiters_count++;
+				WorkerThreadPool::thread_unlock_allowance_zones();
 				do {
 					load_task.cond_var->wait(p_thread_load_lock);
 					DEV_ASSERT(thread_load_tasks.has(p_load_token.local_path) && p_load_token.get_reference_count());
@@ -1091,6 +1103,11 @@ Ref<Resource> ResourceLoader::_load_complete_inner(LoadToken &p_load_token, Erro
 					memdelete(load_task.cond_var);
 					load_task.cond_var = nullptr;
 				}
+				// Drop thread_load_mutex before relocking allowance-zone mutexes so global
+				// lock ordering (e.g., GDScriptCache::mutex -> thread_load_mutex) holds.
+				p_thread_load_lock.temp_unlock();
+				WorkerThreadPool::thread_relock_allowance_zones();
+				p_thread_load_lock.temp_relock();
 
 				DEV_ASSERT(load_task.status == THREAD_LOAD_FAILED || load_task.status == THREAD_LOAD_LOADED);
 			}
@@ -1141,7 +1158,9 @@ Ref<Resource> ResourceLoader::_load_complete_inner(LoadToken &p_load_token, Erro
 					if (!import_thread) { // Main thread is blocked by initial resource reimport, do not wait.
 						CoreBind::Semaphore done;
 						MessageQueue::get_main_singleton()->push_callable(callable_mp(&done, &CoreBind::Semaphore::post).bind(1));
+						WorkerThreadPool::thread_unlock_allowance_zones();
 						done.wait();
+						WorkerThreadPool::thread_relock_allowance_zones();
 					}
 				}
 			}
@@ -1617,7 +1636,7 @@ void ResourceLoader::clear_thread_load_tasks() {
 			MessageQueue::get_singleton()->flush();
 		}
 
-		OS::get_singleton()->delay_usec(1000);
+		WorkerThreadPool::thread_delay_usec_unlocked(1000);
 
 		thread_load_lock.temp_relock();
 	}
@@ -1628,7 +1647,10 @@ void ResourceLoader::clear_thread_load_tasks() {
 		DEV_ASSERT(user_token->user_rc > 0 && !user_token->user_path.is_empty());
 		user_token->user_path.clear();
 		user_token->user_rc = 0;
-		user_token->unreference();
+		if (user_token->unreference()) {
+			user_token->local_path.clear();
+			memdelete(user_token);
+		}
 	}
 
 	thread_load_tasks.clear();
