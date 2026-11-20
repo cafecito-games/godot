@@ -39,6 +39,9 @@
 
 class GDScriptAnalyzer;
 class GDScriptParser;
+#if defined(TOOLS_ENABLED) || defined(TESTS_ENABLED)
+class GDScriptExportCompileSession;
+#endif
 
 class GDScriptParserRef : public RefCounted {
 	GDSOFTCLASS(GDScriptParserRef, RefCounted);
@@ -61,9 +64,13 @@ private:
 	uint32_t source_hash = 0;
 	bool clearing = false;
 	bool abandoned = false;
+	bool detached = false;
 
 	friend class GDScriptCache;
 	friend class GDScript;
+#if defined(TOOLS_ENABLED) || defined(TESTS_ENABLED)
+	friend class GDScriptExportCompileSession;
+#endif
 
 public:
 	Status get_status() const;
@@ -107,8 +114,26 @@ public:
 private:
 	static SafeBinaryMutex<BINARY_MUTEX_TAG> mutex;
 	friend SafeBinaryMutex<BINARY_MUTEX_TAG> &_get_gdscript_cache_mutex();
+#if defined(TOOLS_ENABLED) || defined(TESTS_ENABLED)
+	static thread_local GDScriptExportCompileSession *active_export_session;
+#endif
 
 public:
+#if defined(TOOLS_ENABLED) || defined(TESTS_ENABLED)
+	class ActiveSessionGuard {
+		GDScriptExportCompileSession *previous_session = nullptr;
+
+	public:
+		explicit ActiveSessionGuard(GDScriptExportCompileSession *p_session);
+		~ActiveSessionGuard();
+		ActiveSessionGuard(const ActiveSessionGuard &) = delete;
+		ActiveSessionGuard &operator=(const ActiveSessionGuard &) = delete;
+	};
+
+	static bool has_active_export_session();
+	static GDScriptExportCompileSession *get_active_export_session();
+#endif
+
 	static void move_script(const String &p_from, const String &p_to);
 	static void remove_script(const String &p_path);
 	static Ref<GDScriptParserRef> get_parser(const String &p_path, GDScriptParserRef::Status status, Error &r_error, const String &p_owner = String());

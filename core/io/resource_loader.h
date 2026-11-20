@@ -227,6 +227,7 @@ private:
 	static thread_local bool import_thread;
 	static thread_local int load_nesting;
 	static thread_local HashMap<int, HashMap<String, Ref<Resource>>> res_ref_overrides; // Outermost key is nesting level.
+	static thread_local HashMap<String, Ref<Resource>> *external_res_ref_overrides;
 	static thread_local ThreadLoadTask *curr_load_task;
 
 	static SafeBinaryMutex<BINARY_MUTEX_TAG> thread_load_mutex;
@@ -314,6 +315,18 @@ public:
 
 	static void set_create_missing_resources_if_class_unavailable(bool p_enable);
 	_FORCE_INLINE_ static bool is_creating_missing_resources_if_class_unavailable_enabled() { return create_missing_resources_if_class_unavailable; }
+
+	class ExternalRefOverrideGuard {
+		HashMap<String, Ref<Resource>> *previous_overrides = nullptr;
+
+	public:
+		explicit ExternalRefOverrideGuard(HashMap<String, Ref<Resource>> *p_overrides);
+		~ExternalRefOverrideGuard();
+		ExternalRefOverrideGuard(const ExternalRefOverrideGuard &) = delete;
+		ExternalRefOverrideGuard &operator=(const ExternalRefOverrideGuard &) = delete;
+	};
+
+	static String validate_local_path(const String &p_path) { return _validate_local_path(p_path); }
 
 	static Ref<Resource> ensure_resource_ref_override_for_outer_load(const String &p_path, const String &p_res_type);
 	static Ref<Resource> get_resource_ref_override(const String &p_path);

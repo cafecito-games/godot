@@ -30,6 +30,11 @@
 
 #include "gdscript_byte_codegen.h"
 
+#if defined(TOOLS_ENABLED) || defined(TESTS_ENABLED)
+#include "gdscript_cache.h"
+#include "gdscript_export_compile_session.h"
+#endif
+
 #include "core/object/class_db.h"
 
 uint32_t GDScriptByteCodeGenerator::add_parameter(const StringName &p_name, bool p_is_optional, const GDScriptDataType &p_type) {
@@ -1826,7 +1831,13 @@ void GDScriptByteCodeGenerator::write_breakpoint() {
 }
 
 void GDScriptByteCodeGenerator::write_newline(int p_line) {
-	if (GDScriptLanguage::get_singleton()->should_track_call_stack()) {
+	bool should_emit_line = GDScriptLanguage::get_singleton()->should_track_call_stack();
+#if defined(TOOLS_ENABLED) || defined(TESTS_ENABLED)
+	if (GDScriptExportCompileSession *export_session = GDScriptCache::get_active_export_session()) {
+		should_emit_line = export_session->should_emit_line_opcodes();
+	}
+#endif
+	if (should_emit_line) {
 		// Add newline for debugger and stack tracking if enabled in the project settings.
 		append_opcode(GDScriptFunction::OPCODE_LINE);
 		append(p_line);
