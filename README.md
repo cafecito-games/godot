@@ -103,7 +103,7 @@ upstream.
 - **Mobile text context menus** — touch long-press brings up copy/paste context
   menus in text controls.
 - **Namespaced script classes** — namespaced global script classes are ranked
-  and labelled by their simple name in the Create Node dialog.
+  and labeled by their simple name in the Create Node dialog.
 
 ### Build, packaging, and extension seams
 
@@ -166,16 +166,25 @@ We rebase the fork onto new upstream stable releases rather than carrying long
 divergent branches, which keeps each change reviewable in isolation and easy to
 drop once upstream fixes it.
 
-## Contributing and bug reports
+## Bug reports
 
 **If your bug is not specific to this fork, please report it
 [upstream](https://github.com/godotengine/godot/issues)** — that helps everyone,
-including us.
+including us, and a fix landed upstream reaches this fork on the next rebase.
 
-For issues with the changes listed above, the build tooling, or the Apple
-embedding layer, open an issue here. Pull requests are welcome; be aware that we
-weigh them against the needs of our own shipping projects, and we may ask you to
-take a change upstream instead.
+For problems with the changes listed above, the build tooling, or the Apple
+embedding layer, open an issue here.
+
+**We don't accept pull requests.** Pull requests are disabled on this
+repository. This fork is driven by what our own games need, and keeping it a
+small, rebaseable delta on top of upstream matters more to us than growing it.
+If you have a fix, the best home for it is
+[upstream Godot](https://github.com/godotengine/godot/pulls) — we'll pick it up
+from there. If it's specific to something in this fork, open an issue with the
+details and we'll take a look.
+
+Since everything here is MIT-licensed, you are of course free to fork this fork
+and take it wherever you need.
 
 ## About Godot
 
