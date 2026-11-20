@@ -77,6 +77,25 @@ TEST_CASE("[Logger][RotatedFileLogger] Creates the first log file and logs on it
 	cleanup_logs();
 }
 
+TEST_CASE("[Logger][RotatedFileLogger] Falls back when the log destination cannot be opened") {
+	initialize_logs();
+
+	Ref<DirAccess> logs_dir = DirAccess::open("user://logs");
+	REQUIRE(logs_dir.is_valid());
+	if (logs_dir->dir_exists("unavailable.log")) {
+		REQUIRE_EQ(logs_dir->remove("unavailable.log"), OK);
+	}
+	REQUIRE_EQ(logs_dir->make_dir("unavailable.log"), OK);
+
+	{
+		RotatedFileLogger logger("user://logs/unavailable.log");
+		logger.logf("%s", "Console logging remains available");
+	}
+
+	CHECK_EQ(logs_dir->remove("unavailable.log"), OK);
+	cleanup_logs();
+}
+
 void get_log_files(Vector<String> &log_files) {
 	Ref<DirAccess> dir = DirAccess::open("user://logs");
 	dir->list_dir_begin();
@@ -91,6 +110,22 @@ void get_log_files(Vector<String> &log_files) {
 	if (FileAccess::exists("user://logs/godot.log")) {
 		log_files.push_back("godot.log");
 	}
+}
+
+TEST_CASE("[Logger][RotatedFileLogger] Creates unique backups without waiting") {
+	initialize_logs();
+
+	const int logger_count = 3;
+	for (int i = 0; i < logger_count; i++) {
+		RotatedFileLogger logger("user://logs/godot.log", logger_count);
+		logger.logf("Logger %d", i);
+	}
+
+	Vector<String> log_files;
+	get_log_files(log_files);
+	CHECK_EQ(log_files.size(), logger_count);
+
+	cleanup_logs();
 }
 
 // All things related to log file rotation are in the same test because testing it require some sleeps.
