@@ -33,6 +33,16 @@ tasks:
       - task: build:template-release
       - task: build:template-debug
 
+  build:libgodot:release:
+    desc: Build release Apple LibGodot SDK slices (macOS dylibs + iOS static libs + Relink Kits)
+    cmds:
+      - uv run --project cafecito cafecito-build build-apple-libgodot --configuration release {{.CLI_ARGS}}
+
+  build:libgodot:debug:
+    desc: Build debug Apple LibGodot SDK slices (macOS dylibs + iOS static libs + Relink Kits)
+    cmds:
+      - uv run --project cafecito cafecito-build build-apple-libgodot --configuration debug {{.CLI_ARGS}}
+
   package:relink-kit:
     desc: 'Package a Relink Kit from a .relink.json manifest (usage: task package:relink-kit -- --manifest bin/<name>.relink.json)'
     cmds:

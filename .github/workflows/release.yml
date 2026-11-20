@@ -1,0 +1,175 @@
+name: Build Public Godot Fork & Relink Kits
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release tag override (leave empty to auto-generate as v{godot}-{date}.{N})'
+        required: false
+        type: string
+        default: ''
+      build_macos_arm64:
+        description: 'Build macOS Apple Silicon editor + templates + Relink Kits'
+        required: false
+        type: boolean
+        default: true
+      build_macos_x86_64:
+        description: 'Cross-build macOS Intel editor + templates + Relink Kits on macos-15'
+        required: false
+        type: boolean
+        default: false
+      build_ios:
+        description: 'Build iOS templates + Relink Kits'
+        required: false
+        type: boolean
+        default: true
+      build_apple_libgodot:
+        description: 'Build Apple LibGodot SDK slices + Relink Kits'
+        required: false
+        type: boolean
+        default: false
+      build_linux:
+        description: 'Build Linux x86_64 editor + templates + Relink Kits'
+        required: false
+        type: boolean
+        default: false
+      build_windows:
+        description: 'Build Windows x86_64 templates + Relink Kits (MinGW cross-compile)'
+        required: false
+        type: boolean
+        default: false
+
+env:
+  SCONS_CACHE: ${{ github.workspace }}/.scons-cache
+  SCONS_CACHE_LIMIT: 7168
+
+jobs:
+  build-macos-arm64:
+    name: Build macOS (arm64)
+    if: inputs.build_macos_arm64
+    runs-on: macos-15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install build tools
+        run: brew install scons yasm zstd
+
+      - name: Install macOS Vulkan SDK
+        run: bash misc/scripts/install_vulkan_sdk_macos.sh
+
+      - name: Restore SCons cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.scons-cache
+          key: macos-arm64-${{ hashFiles('core/**/*.h', 'core/**/*.cpp', 'SConstruct') }}
+          restore-keys: |
+            macos-arm64-
+
+      - name: Build macOS editor and release template
+        run: |
+          uv run --project cafecito cafecito-build build --platform macos --target editor --arch arm64
+          uv run --project cafecito cafecito-build build --platform macos --target template_release --arch arm64
+
+      - name: Package Relink Kits
+        run: |
+          for manifest in bin/*.relink.json; do
+            uv run --project cafecito cafecito-build package-relink-kit --manifest "$manifest" --output-dir bin/relink-kits
+          done
+
+      - name: Upload macOS public binaries and Relink Kits
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-arm64
+          path: |
+            bin/godot.macos.*
+            bin/relink-kits/*.tar.zst
+
+  build-ios:
+    name: Build iOS (arm64 + simulator)
+    if: inputs.build_ios
+    runs-on: macos-15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install build tools
+        run: brew install scons yasm zstd
+
+      - name: Restore SCons cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.scons-cache
+          key: ios-${{ hashFiles('core/**/*.h', 'core/**/*.cpp', 'SConstruct') }}
+          restore-keys: |
+            ios-
+
+      - name: Build iOS release slices
+        run: |
+          uv run --project cafecito cafecito-build build --platform ios --target template_release --arch arm64 --library-type static_library --extra-flag ios_simulator=no --extra-flag vulkan=no --extra-flag metal=yes
+          uv run --project cafecito cafecito-build build --platform ios --target template_release --arch arm64 --library-type static_library --extra-flag ios_simulator=yes --extra-flag vulkan=no --extra-flag metal=yes
+
+      - name: Package iOS Relink Kits
+        run: |
+          for manifest in bin/*.relink.json; do
+            uv run --project cafecito cafecito-build package-relink-kit --manifest "$manifest" --output-dir bin/relink-kits
+          done
+
+      - name: Upload iOS Relink Kits
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios
+          path: |
+            bin/libgodot.ios.*.a
+            bin/relink-kits/*.tar.zst
+
+  build-linux:
+    name: Build Linux (x86_64)
+    if: inputs.build_linux
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential scons pkg-config zstd libx11-dev libxcursor-dev \
+            libxinerama-dev libgl1-mesa-dev libglu1-mesa-dev libasound2-dev libpulse-dev \
+            libudev-dev libxi-dev libxrandr-dev yasm
+
+      - name: Restore SCons cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.scons-cache
+          key: linux-x86_64-${{ hashFiles('core/**/*.h', 'core/**/*.cpp', 'SConstruct') }}
+          restore-keys: |
+            linux-x86_64-
+
+      - name: Build Linux editor and release template
+        run: |
+          uv run --project cafecito cafecito-build build --platform linuxbsd --target editor --arch x86_64
+          uv run --project cafecito cafecito-build build --platform linuxbsd --target template_release --arch x86_64
+
+      - name: Package Linux Relink Kits
+        run: |
+          for manifest in bin/*.relink.json; do
+            uv run --project cafecito cafecito-build package-relink-kit --manifest "$manifest" --output-dir bin/relink-kits
+          done
+
+      - name: Upload Linux public binaries and Relink Kits
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-x86_64
+          path: |
+            bin/godot.linuxbsd.*
+            bin/relink-kits/*.tar.zst

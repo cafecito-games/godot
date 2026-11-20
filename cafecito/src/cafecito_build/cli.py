@@ -7,6 +7,7 @@ import shutil
 import sys
 from pathlib import Path
 
+from cafecito_build.apple_libgodot import build_apple_libgodot_slices
 from cafecito_build.environment import detect_host_environment
 from cafecito_build.identity import resolve_build_identity
 from cafecito_build.packaging import package_macos_template_bundle
@@ -79,6 +80,19 @@ def _command_package_macos_template(arguments: argparse.Namespace) -> int:
     return 0
 
 
+def _command_build_apple_libgodot(arguments: argparse.Namespace) -> int:
+    repository_root = Path(arguments.repo_root).resolve()
+    outputs = build_apple_libgodot_slices(
+        repository_root,
+        arguments.configuration,
+        relink_kit=not arguments.no_relink_kit,
+        jobs=arguments.jobs,
+    )
+    for output_path in outputs:
+        print(f"[cafecito-build] Built Apple LibGodot slice: {output_path}")
+    return 0
+
+
 def _command_clean(arguments: argparse.Namespace) -> int:
     repository_root = Path(arguments.repo_root).resolve()
     bin_directory = repository_root / "bin"
@@ -121,6 +135,15 @@ def build_argument_parser() -> argparse.ArgumentParser:
     macos_zip_parser.add_argument("--output", default="bin/godot_macos.zip", help="Output zip path")
     macos_zip_parser.add_argument("--debug", action="store_true", help="Package as debug template")
     macos_zip_parser.set_defaults(handler=_command_package_macos_template)
+
+    apple_libgodot_parser = subparsers.add_parser(
+        "build-apple-libgodot",
+        help="Build Apple LibGodot SDK slices (macOS dylibs + iOS static libraries)",
+    )
+    apple_libgodot_parser.add_argument("--configuration", default="release", choices=("release", "debug"))
+    apple_libgodot_parser.add_argument("--no-relink-kit", action="store_true")
+    apple_libgodot_parser.add_argument("-j", "--jobs", type=int, default=None)
+    apple_libgodot_parser.set_defaults(handler=_command_build_apple_libgodot)
 
     clean_parser = subparsers.add_parser("clean", help="Remove bin/ build outputs")
     clean_parser.set_defaults(handler=_command_clean)
