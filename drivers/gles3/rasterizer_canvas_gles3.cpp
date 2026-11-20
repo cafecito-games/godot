@@ -1883,10 +1883,21 @@ void RasterizerCanvasGLES3::_update_shadow_atlas() {
 			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, state.shadow_texture_size, data.max_lights_per_render * 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
 		}
 
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+		// The atlas stores occluder distances, not colors, so it must be point sampled:
+		// blending two neighboring texels produces a depth that belongs to neither
+		// occluder, and the four 90 degree faces packed across each row would bleed
+		// into each other at the quadrant seams. The shadow filters do their own
+		// multi-tap offsets by shadow_pixel_size, so hardware filtering only added a
+		// second, unintended blur on top. This also keeps the GL_R32F atlas sampleable
+		// where GL_OES_texture_float_linear is missing (Config::float_texture_linear_supported),
+		// which otherwise leaves the texture incomplete and every lookup returning 0.
+		// GL_TEXTURE_WRAP_S stays GL_REPEAT so that filter taps crossing a row edge
+		// wrap onto the neighboring face, which is geometrically continuous; wrapping
+		// in T instead aliases onto another light's band, so T clamps.
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 0);
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 1);
 		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, state.shadow_texture, 0);
