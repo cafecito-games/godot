@@ -54,6 +54,7 @@ class EditorExportPlugin : public RefCounted {
 	};
 	Vector<ExtraFile> extra_files;
 	bool skipped = false;
+	Error fatal_export_error = OK;
 
 	Vector<String> apple_embedded_platform_frameworks;
 	Vector<String> apple_embedded_platform_embedded_frameworks;
@@ -79,6 +80,7 @@ class EditorExportPlugin : public RefCounted {
 		apple_embedded_platform_linker_flags = "";
 		apple_embedded_platform_cpp_code = "";
 		macos_plugin_files.clear();
+		fatal_export_error = OK;
 	}
 
 	// Export
@@ -109,10 +111,12 @@ protected:
 	void add_macos_plugin_file(const String &p_path);
 
 	void skip();
+	void fail_export(Error p_error, const String &p_category, const String &p_message);
 
 	virtual void _export_file(const String &p_path, const String &p_type, const HashSet<String> &p_features);
 	virtual void _export_begin(const HashSet<String> &p_features, bool p_debug, const String &p_path, int p_flags);
 	virtual void _export_end();
+	virtual void _validate_exported_file(const String &p_source_path, const String &p_exported_path, const String &p_type, const Vector<uint8_t> *p_in_memory_data = nullptr);
 	virtual void _end_generate_apple_embedded_project(const String &p_path, bool p_will_build_archive);
 
 	static void _bind_methods();
@@ -194,4 +198,5 @@ public:
 	String get_apple_embedded_platform_cpp_code() const;
 	const Vector<String> &get_macos_plugin_files() const;
 	Variant get_option(const StringName &p_name) const;
+	Error get_fatal_export_error() const { return fatal_export_error; }
 };

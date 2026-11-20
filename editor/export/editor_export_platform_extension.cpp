@@ -282,68 +282,111 @@ List<String> EditorExportPlatformExtension::get_binary_extensions(const Ref<Edit
 
 Error EditorExportPlatformExtension::export_project(const Ref<EditorExportPreset> &p_preset, bool p_debug, const String &p_path, BitField<EditorExportPlatform::DebugFlags> p_flags, bool p_notify) {
 	ExportNotifier notifier(*this, p_preset, p_debug, p_path, p_flags, p_notify);
+	Error begin_error = notifier.get_fatal_export_error();
+	if (begin_error != OK) {
+		notifier.finish();
+		return begin_error;
+	}
 
 	Error ret = FAILED;
 	GDVIRTUAL_CALL(_export_project, p_preset, p_debug, p_path, p_flags, ret);
+	Error end_error = notifier.finish();
+	if (ret == OK && end_error != OK) {
+		return end_error;
+	}
 	return ret;
 }
 
 Error EditorExportPlatformExtension::export_pack(const Ref<EditorExportPreset> &p_preset, bool p_debug, const String &p_path, BitField<EditorExportPlatform::DebugFlags> p_flags) {
-	ExportNotifier notifier(*this, p_preset, p_debug, p_path, p_flags);
-
-	Error ret = FAILED;
-	if (GDVIRTUAL_CALL(_export_pack, p_preset, p_debug, p_path, p_flags, ret)) {
+	if (GDVIRTUAL_IS_OVERRIDDEN(_export_pack)) {
+		ExportNotifier notifier(*this, p_preset, p_debug, p_path, p_flags);
+		Error begin_error = notifier.get_fatal_export_error();
+		if (begin_error != OK) {
+			notifier.finish();
+			return begin_error;
+		}
+		Error ret = FAILED;
+		GDVIRTUAL_CALL(_export_pack, p_preset, p_debug, p_path, p_flags, ret);
+		Error end_error = notifier.finish();
+		if (ret == OK && end_error != OK) {
+			return end_error;
+		}
 		return ret;
 	}
-	return save_pack(p_preset, p_debug, p_path);
+	return EditorExportPlatform::export_pack(p_preset, p_debug, p_path, p_flags);
 }
 
 Error EditorExportPlatformExtension::export_zip(const Ref<EditorExportPreset> &p_preset, bool p_debug, const String &p_path, BitField<EditorExportPlatform::DebugFlags> p_flags) {
-	ExportNotifier notifier(*this, p_preset, p_debug, p_path, p_flags);
-
-	Error ret = FAILED;
-	if (GDVIRTUAL_CALL(_export_zip, p_preset, p_debug, p_path, p_flags, ret)) {
+	if (GDVIRTUAL_IS_OVERRIDDEN(_export_zip)) {
+		ExportNotifier notifier(*this, p_preset, p_debug, p_path, p_flags);
+		Error begin_error = notifier.get_fatal_export_error();
+		if (begin_error != OK) {
+			notifier.finish();
+			return begin_error;
+		}
+		Error ret = FAILED;
+		GDVIRTUAL_CALL(_export_zip, p_preset, p_debug, p_path, p_flags, ret);
+		Error end_error = notifier.finish();
+		if (ret == OK && end_error != OK) {
+			return end_error;
+		}
 		return ret;
 	}
-	return save_zip(p_preset, p_debug, p_path);
+	return EditorExportPlatform::export_zip(p_preset, p_debug, p_path, p_flags);
 }
 
 Error EditorExportPlatformExtension::export_pack_patch(const Ref<EditorExportPreset> &p_preset, bool p_debug, const String &p_path, const Vector<String> &p_patches, BitField<EditorExportPlatform::DebugFlags> p_flags) {
-	ExportNotifier notifier(*this, p_preset, p_debug, p_path, p_flags);
+	if (GDVIRTUAL_IS_OVERRIDDEN(_export_pack_patch)) {
+		ExportNotifier notifier(*this, p_preset, p_debug, p_path, p_flags);
+		Error begin_error = notifier.get_fatal_export_error();
+		if (begin_error != OK) {
+			notifier.finish();
+			return begin_error;
+		}
 
-	Error err = _load_patches(p_preset, p_patches.is_empty() ? p_preset->get_patches() : p_patches);
-	if (err != OK) {
-		return err;
-	}
+		Error err = _load_patches(p_preset, p_patches.is_empty() ? p_preset->get_patches() : p_patches);
+		if (err != OK) {
+			notifier.finish();
+			return err;
+		}
 
-	Error ret = FAILED;
-	if (GDVIRTUAL_CALL(_export_pack_patch, p_preset, p_debug, p_path, p_patches, p_flags, ret)) {
+		Error ret = FAILED;
+		GDVIRTUAL_CALL(_export_pack_patch, p_preset, p_debug, p_path, p_patches, p_flags, ret);
 		_unload_patches();
+		Error end_error = notifier.finish();
+		if (ret == OK && end_error != OK) {
+			return end_error;
+		}
 		return ret;
 	}
-
-	err = save_pack_patch(p_preset, p_debug, p_path);
-	_unload_patches();
-	return err;
+	return EditorExportPlatform::export_pack_patch(p_preset, p_debug, p_path, p_patches, p_flags);
 }
 
 Error EditorExportPlatformExtension::export_zip_patch(const Ref<EditorExportPreset> &p_preset, bool p_debug, const String &p_path, const Vector<String> &p_patches, BitField<EditorExportPlatform::DebugFlags> p_flags) {
-	ExportNotifier notifier(*this, p_preset, p_debug, p_path, p_flags);
+	if (GDVIRTUAL_IS_OVERRIDDEN(_export_zip_patch)) {
+		ExportNotifier notifier(*this, p_preset, p_debug, p_path, p_flags);
+		Error begin_error = notifier.get_fatal_export_error();
+		if (begin_error != OK) {
+			notifier.finish();
+			return begin_error;
+		}
 
-	Error err = _load_patches(p_preset, p_patches.is_empty() ? p_preset->get_patches() : p_patches);
-	if (err != OK) {
-		return err;
-	}
+		Error err = _load_patches(p_preset, p_patches.is_empty() ? p_preset->get_patches() : p_patches);
+		if (err != OK) {
+			notifier.finish();
+			return err;
+		}
 
-	Error ret = FAILED;
-	if (GDVIRTUAL_CALL(_export_zip_patch, p_preset, p_debug, p_path, p_patches, p_flags, ret)) {
+		Error ret = FAILED;
+		GDVIRTUAL_CALL(_export_zip_patch, p_preset, p_debug, p_path, p_patches, p_flags, ret);
 		_unload_patches();
+		Error end_error = notifier.finish();
+		if (ret == OK && end_error != OK) {
+			return end_error;
+		}
 		return ret;
 	}
-
-	err = save_zip_patch(p_preset, p_debug, p_path);
-	_unload_patches();
-	return err;
+	return EditorExportPlatform::export_zip_patch(p_preset, p_debug, p_path, p_patches, p_flags);
 }
 
 void EditorExportPlatformExtension::get_platform_features(List<String> *r_features) const {

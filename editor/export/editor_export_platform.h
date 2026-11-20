@@ -169,14 +169,33 @@ private:
 
 	String _export_customize(const String &p_path, LocalVector<Ref<EditorExportPlugin>> &customize_resources_plugins, LocalVector<Ref<EditorExportPlugin>> &customize_scenes_plugins, HashMap<String, FileExportCache> &export_cache, const String &export_base_path, bool p_force_save);
 
+	static String _make_staging_export_path(const String &p_target_path);
+	static void _remove_staging_file(const String &p_staging_path);
+	Error _commit_staging_file(const String &p_staging_path, const String &p_target_path, const String &p_category);
+	Error _save_pack_staged(const Ref<EditorExportPreset> &p_preset, bool p_debug, const String &p_path, String *r_staging_path, Vector<SharedObject> *p_so_files = nullptr, EditorExportSaveFunction p_save_func = nullptr, EditorExportRemoveFunction p_remove_func = nullptr, bool p_embed = false, int64_t *r_embedded_start = nullptr, int64_t *r_embedded_size = nullptr);
+	Error _save_zip_staged(const Ref<EditorExportPreset> &p_preset, bool p_debug, const String &p_path, String *r_staging_path, Vector<SharedObject> *p_so_files = nullptr, EditorExportSaveFunction p_save_func = nullptr);
+
 protected:
 	struct ExportNotifier {
+		EditorExportPlatform *platform = nullptr;
+		ExportNotifier *previous_notifier = nullptr;
+		Vector<Ref<EditorExportPlugin>> started_plugins;
+		Error fatal_export_error = OK;
 		bool enabled = true;
+		bool ended = false;
 
 		ExportNotifier(EditorExportPlatform &p_platform, const Ref<EditorExportPreset> &p_preset, bool p_debug, const String &p_path, BitField<EditorExportPlatform::DebugFlags> p_flags, bool p_enabled = true);
+		ExportNotifier(const ExportNotifier &) = delete;
+		ExportNotifier &operator=(const ExportNotifier &) = delete;
+		Error finish();
+		Error get_fatal_export_error() const { return fatal_export_error; }
 		~ExportNotifier();
 	};
 
+private:
+	ExportNotifier *active_export_notifier = nullptr;
+
+protected:
 	HashSet<String> get_features(const Ref<EditorExportPreset> &p_preset, bool p_debug) const;
 
 	Dictionary _find_export_template(const String &p_template_file_name) const {

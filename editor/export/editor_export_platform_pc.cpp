@@ -141,12 +141,19 @@ bool EditorExportPlatformPC::has_valid_project_configuration(const Ref<EditorExp
 Error EditorExportPlatformPC::export_project(const Ref<EditorExportPreset> &p_preset, bool p_debug, const String &p_path, BitField<EditorExportPlatform::DebugFlags> p_flags, bool p_notify) {
 	ExportNotifier notifier(*this, p_preset, p_debug, p_path, p_flags, p_notify);
 
-	Error err = prepare_template(p_preset, p_debug, p_path, p_flags);
+	Error err = notifier.get_fatal_export_error();
+	if (err == OK) {
+		err = prepare_template(p_preset, p_debug, p_path, p_flags);
+	}
 	if (err == OK) {
 		err = modify_template(p_preset, p_debug, p_path, p_flags);
 	}
 	if (err == OK) {
 		err = export_project_data(p_preset, p_debug, p_path, p_flags);
+	}
+	Error end_error = notifier.finish();
+	if (err == OK && end_error != OK) {
+		err = end_error;
 	}
 
 	return err;

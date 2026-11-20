@@ -331,6 +331,8 @@ void EditorExportPlugin::_export_begin(const HashSet<String> &p_features, bool p
 
 void EditorExportPlugin::_export_end() {}
 
+void EditorExportPlugin::_validate_exported_file(const String &p_source_path, const String &p_exported_path, const String &p_type, const Vector<uint8_t> *p_in_memory_data) {}
+
 void EditorExportPlugin::_end_generate_apple_embedded_project(const String &p_path, bool p_p_will_build_archive) {}
 
 void EditorExportPlugin::end_generate_apple_embedded_project(const String &p_path, bool p_will_build_archive) {
@@ -343,6 +345,20 @@ void EditorExportPlugin::end_generate_apple_embedded_project(const String &p_pat
 
 void EditorExportPlugin::skip() {
 	skipped = true;
+}
+
+void EditorExportPlugin::fail_export(Error p_error, const String &p_category, const String &p_message) {
+	Error recorded_error = (p_error == OK) ? FAILED : p_error;
+	if (fatal_export_error == OK) {
+		fatal_export_error = recorded_error;
+	}
+	skip();
+	Ref<EditorExportPlatform> platform = get_export_platform();
+	if (platform.is_valid()) {
+		platform->add_message(EditorExportPlatform::EXPORT_MESSAGE_ERROR, p_category, p_message);
+	} else {
+		ERR_PRINT(vformat("%s: %s", p_category, p_message));
+	}
 }
 
 void EditorExportPlugin::_bind_methods() {
