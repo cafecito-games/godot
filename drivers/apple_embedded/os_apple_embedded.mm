@@ -36,6 +36,7 @@
 #include "core/config/project_settings.h"
 #include "core/io/dir_access.h"
 #include "core/io/file_access.h"
+#include "core/math/math_funcs.h"
 #include "core/os/main_loop.h"
 #include "core/os/os.h"
 #include "core/profiling/profiling.h"
@@ -197,7 +198,9 @@ void OS_AppleEmbedded::deinitialize_modules() {
 #endif
 
 	if (apple_embedded) {
+		apple_embedded->stop_haptic_engine();
 		memdelete(apple_embedded);
+		apple_embedded = nullptr;
 	}
 }
 
@@ -739,12 +742,21 @@ String OS_AppleEmbedded::get_system_font_path(const String &p_font_name, int p_w
 }
 
 void OS_AppleEmbedded::vibrate_handheld(int p_duration_ms, float p_amplitude) {
+	if (!apple_embedded) {
+		return;
+	}
+
+	if (p_duration_ms <= 0 || !Math::is_finite(p_amplitude) || p_amplitude == 0.0f) {
+		apple_embedded->vibrate_haptic_engine(0.0f, 0.0f);
+		return;
+	}
+
 	if (apple_embedded->supports_haptic_engine()) {
-		if (p_amplitude > 0.0) {
-			p_amplitude = CLAMP(p_amplitude, 0.0, 1.0);
+		if (p_amplitude > 0.0f) {
+			p_amplitude = CLAMP(p_amplitude, 0.0f, 1.0f);
 		}
 
-		apple_embedded->vibrate_haptic_engine((float)p_duration_ms / 1000.f, p_amplitude);
+		apple_embedded->vibrate_haptic_engine((float)p_duration_ms / 1000.0f, p_amplitude);
 	} else {
 		// iOS <13 does not support duration for vibration
 		AudioServicesPlaySystemSound(kSystemSoundID_Vibrate);
@@ -772,6 +784,10 @@ Error OS_AppleEmbedded::setup_remote_filesystem(const String &p_server_host, int
 }
 
 void OS_AppleEmbedded::on_focus_out() {
+	if (apple_embedded) {
+		apple_embedded->stop_haptic_engine();
+	}
+
 	if (is_focused) {
 		is_focused = false;
 
