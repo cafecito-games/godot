@@ -216,7 +216,23 @@ PackedData::~PackedData() {
 //////////////////////////////////////////////////////////////////
 
 bool PackedSourcePCK::try_open_pack(const String &p_path, bool p_replace_files, uint64_t p_offset, const Vector<uint8_t> &p_decryption_key) {
-	Ref<FileAccess> f = FileAccess::open(p_path, FileAccess::READ);
+	String resolved_pack_path = p_path;
+	const bool is_packed_file = PackedData::get_singleton() != nullptr && !PackedData::get_singleton()->is_disabled() && PackedData::get_singleton()->has_path(p_path);
+	if (!p_path.is_empty() && p_path.is_relative_path() && !is_packed_file && OS::get_singleton() != nullptr) {
+		String current_working_directory = OS::get_singleton()->get_cwd();
+		if (!current_working_directory.is_empty() && current_working_directory.is_absolute_path()) {
+			String relative_subpath = p_path.replace_char('\\', '/');
+			while (relative_subpath.begins_with("./")) {
+				relative_subpath = relative_subpath.substr(2);
+			}
+			if (relative_subpath == ".") {
+				relative_subpath = String();
+			}
+			resolved_pack_path = relative_subpath.is_empty() ? current_working_directory : current_working_directory.path_join(relative_subpath);
+		}
+	}
+
+	Ref<FileAccess> f = FileAccess::open(resolved_pack_path, FileAccess::READ);
 	if (f.is_null()) {
 		return false;
 	}
@@ -349,6 +365,10 @@ bool PackedSourcePCK::try_open_pack(const String &p_path, bool p_replace_files, 
 		f = fae;
 	}
 
+	if (!p_path.is_empty() && p_path.is_relative_path() && is_packed_file) {
+		resolved_pack_path = "res://" + p_path.simplify_path();
+	}
+
 	for (int i = 0; i < file_count; i++) {
 		uint32_t sl = f->get_32();
 		CharString cs;
@@ -366,7 +386,7 @@ bool PackedSourcePCK::try_open_pack(const String &p_path, bool p_replace_files, 
 		if (flags & PACK_FILE_REMOVAL) { // The file was removed.
 			PackedData::get_singleton()->remove_path(path);
 		} else {
-			PackedData::get_singleton()->add_path(p_path, path, file_base + ofs, size, md5, this, p_replace_files, (flags & PACK_FILE_ENCRYPTED), sparse_bundle, (flags & PACK_FILE_DELTA), salt);
+			PackedData::get_singleton()->add_path(resolved_pack_path, path, file_base + ofs, size, md5, this, p_replace_files, (flags & PACK_FILE_ENCRYPTED), sparse_bundle, (flags & PACK_FILE_DELTA), salt);
 		}
 	}
 

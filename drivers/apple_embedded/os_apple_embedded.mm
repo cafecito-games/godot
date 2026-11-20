@@ -444,16 +444,44 @@ String OS_AppleEmbedded::get_resource_dir() const {
 }
 
 String OS_AppleEmbedded::get_bundle_resource_dir() const {
-	NSString *str = [[[NSBundle mainBundle] infoDictionary] objectForKey:@"godot_path"];
-	if (!str) {
-		return OS_Unix::get_bundle_resource_dir();
-	} else {
-		String res_path = String::utf8([str cStringUsingEncoding:NSUTF8StringEncoding]);
-		if (res_path.is_relative_path()) {
-			res_path = String::utf8([[[NSBundle mainBundle] bundlePath] cStringUsingEncoding:NSUTF8StringEncoding]).path_join(res_path);
+	NSBundle *main_bundle = [NSBundle mainBundle];
+	id raw_godot_path = main_bundle ? [[main_bundle infoDictionary] objectForKey:@"godot_path"] : nil;
+	if ([raw_godot_path isKindOfClass:[NSString class]] && [(NSString *)raw_godot_path length] > 0) {
+		const char *godot_path_utf8 = [(NSString *)raw_godot_path UTF8String];
+		String resource_directory = godot_path_utf8 ? String::utf8(godot_path_utf8).replace_char('\\', '/') : String();
+		if (!resource_directory.is_empty()) {
+			if (resource_directory.is_relative_path()) {
+				while (resource_directory.begins_with("./")) {
+					resource_directory = resource_directory.substr(2);
+				}
+				if (resource_directory == ".") {
+					resource_directory = String();
+				}
+				NSString *bundle_path = [main_bundle bundlePath];
+				const char *bundle_path_utf8 = bundle_path ? [bundle_path UTF8String] : nullptr;
+				if (bundle_path_utf8 && bundle_path_utf8[0] != '\0') {
+					String base_bundle_path = String::utf8(bundle_path_utf8);
+					resource_directory = resource_directory.is_empty() ? base_bundle_path : base_bundle_path.path_join(resource_directory);
+				} else if (resource_directory.is_empty()) {
+					resource_directory = ".";
+				}
+			}
+			while (resource_directory.length() > 1 && resource_directory.ends_with("/")) {
+				resource_directory = resource_directory.substr(0, resource_directory.length() - 1);
+			}
+			return resource_directory;
 		}
-		return res_path;
 	}
+
+	NSString *bundle_resource_path = main_bundle ? [main_bundle resourcePath] : nil;
+	if (bundle_resource_path && [bundle_resource_path length] > 0) {
+		const char *bundle_resource_utf8 = [bundle_resource_path UTF8String];
+		if (bundle_resource_utf8 && bundle_resource_utf8[0] != '\0') {
+			return String::utf8(bundle_resource_utf8);
+		}
+	}
+
+	return OS_Unix::get_bundle_resource_dir();
 }
 
 String OS_AppleEmbedded::get_locale() const {

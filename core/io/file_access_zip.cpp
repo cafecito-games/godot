@@ -33,6 +33,8 @@
 #include "file_access_zip.h"
 
 #include "core/io/file_access.h"
+#include "core/io/file_access_pack.h"
+#include "core/os/os.h"
 
 extern "C" {
 
@@ -152,6 +154,22 @@ bool ZipArchive::try_open_pack(const String &p_path, bool p_replace_files, uint6
 		return false;
 	}
 
+	String resolved_pack_path = p_path;
+	const bool is_packed_file = PackedData::get_singleton() != nullptr && !PackedData::get_singleton()->is_disabled() && PackedData::get_singleton()->has_path(p_path);
+	if (!p_path.is_empty() && p_path.is_relative_path() && !is_packed_file && OS::get_singleton() != nullptr) {
+		String current_working_directory = OS::get_singleton()->get_cwd();
+		if (!current_working_directory.is_empty() && current_working_directory.is_absolute_path()) {
+			String relative_subpath = p_path.replace_char('\\', '/');
+			while (relative_subpath.begins_with("./")) {
+				relative_subpath = relative_subpath.substr(2);
+			}
+			if (relative_subpath == ".") {
+				relative_subpath = String();
+			}
+			resolved_pack_path = relative_subpath.is_empty() ? current_working_directory : current_working_directory.path_join(relative_subpath);
+		}
+	}
+
 	zlib_filefunc_def io;
 	memset(&io, 0, sizeof(io));
 
@@ -165,15 +183,19 @@ bool ZipArchive::try_open_pack(const String &p_path, bool p_replace_files, uint6
 	io.zclose_file = godot_close;
 	io.zerror_file = godot_testerror;
 
-	unzFile zfile = unzOpen2(p_path.utf8().get_data(), &io);
+	unzFile zfile = unzOpen2(resolved_pack_path.utf8().get_data(), &io);
 	ERR_FAIL_NULL_V(zfile, false);
 
 	unz_global_info64 gi;
 	int err = unzGetGlobalInfo64(zfile, &gi);
 	ERR_FAIL_COND_V(err != UNZ_OK, false);
 
+	if (!p_path.is_empty() && p_path.is_relative_path() && is_packed_file) {
+		resolved_pack_path = "res://" + p_path.simplify_path();
+	}
+
 	Package pkg;
-	pkg.filename = p_path;
+	pkg.filename = resolved_pack_path;
 	packages.push_back(pkg);
 	int pkg_num = packages.size() - 1;
 
@@ -192,7 +214,7 @@ bool ZipArchive::try_open_pack(const String &p_path, bool p_replace_files, uint6
 		files[fname] = f;
 
 		uint8_t md5[16] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
-		PackedData::get_singleton()->add_path(p_path, fname, 1, 0, md5, this, p_replace_files, false);
+		PackedData::get_singleton()->add_path(resolved_pack_path, fname, 1, 0, md5, this, p_replace_files, false);
 		//printf("packed data add path %s, %s\n", p_name.utf8().get_data(), fname.utf8().get_data());
 
 		if ((i + 1) < gi.number_entry) {
