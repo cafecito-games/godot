@@ -9,7 +9,7 @@ def get_opts(platform):
         BoolVariable(
             "cvtt_export_templates",
             "Enable CVTT image compression in export template builds (increases binary size)",
-            False,
+            True,
         ),
     ]
 

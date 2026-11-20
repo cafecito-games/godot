@@ -42,12 +42,10 @@ GODOT_GCC_WARNING_IGNORE("-Wshadow")
 GODOT_GCC_WARNING_IGNORE("-Wunused-value")
 
 #include <transcoder/basisu_transcoder.h>
-#ifdef TOOLS_ENABLED
 #include <encoder/basisu_comp.h>
 
 static Mutex init_mutex;
 static bool initialized = false;
-#endif
 
 GODOT_GCC_WARNING_POP
 
@@ -55,7 +53,6 @@ void basis_universal_init() {
 	basist::basisu_transcoder_init();
 }
 
-#ifdef TOOLS_ENABLED
 template <typename T>
 inline void _basisu_pad_mipmap(const uint8_t *p_image_mip_data, Vector<uint8_t> &r_mip_data_padded, int p_next_width, int p_next_height, int p_width, int p_height, int64_t p_size) {
 	// Source mip's data interpreted as 32-bit RGBA blocks to help with copying pixel data.
@@ -104,6 +101,8 @@ Vector<uint8_t> basis_universal_packer(const Ref<Image> &p_image, Image::UsedCha
 	} else if (image->get_format() <= Image::FORMAT_RGBE9995) {
 		image->convert(Image::FORMAT_RGBAF);
 		is_hdr = true;
+	} else {
+		ERR_FAIL_V_MSG(Vector<uint8_t>(), vformat("BasisU: Unsupported image format %s.", Image::get_format_name(image->get_format())));
 	}
 
 	int rdo_dict_size = GLOBAL_GET_CACHED(int, "rendering/textures/basis_universal/rdo_dict_size");
@@ -270,13 +269,13 @@ Vector<uint8_t> basis_universal_packer(const Ref<Image> &p_image, Image::UsedCha
 
 	return basisu_data;
 }
-#endif // TOOLS_ENABLED
 
 Ref<Image> basis_universal_unpacker_ptr(const uint8_t *p_data, int p_size) {
 	uint64_t start_time = OS::get_singleton()->get_ticks_msec();
 
 	Ref<Image> image;
 	ERR_FAIL_NULL_V_MSG(p_data, image, "Cannot unpack invalid BasisUniversal data.");
+	ERR_FAIL_COND_V_MSG(p_size < 4, image, "Cannot unpack invalid BasisUniversal data.");
 
 	const uint8_t *src_ptr = p_data;
 	int src_size = p_size;
