@@ -53,6 +53,32 @@ static NSMutableArray<GDTAppDelegateServiceProtocol *> *services = nil;
 	[services addObject:service];
 }
 
+static void _forward_open_urls_to_service(GDTAppDelegateServiceProtocol *service, UIScene *scene, NSSet<UIOpenURLContext *> *url_contexts) {
+	if ([service respondsToSelector:@selector(scene:openURLContexts:)]) {
+		[service scene:scene openURLContexts:url_contexts];
+		return;
+	}
+
+	if (![service respondsToSelector:@selector(application:openURL:options:)]) {
+		return;
+	}
+
+	for (UIOpenURLContext *url_context in url_contexts) {
+		[service application:UIApplication.sharedApplication openURL:url_context.URL options:@{}];
+	}
+}
+
+static void _forward_user_activity_to_service(GDTAppDelegateServiceProtocol *service, UIScene *scene, NSUserActivity *user_activity) {
+	if ([service respondsToSelector:@selector(scene:continueUserActivity:)]) {
+		[service scene:scene continueUserActivity:user_activity];
+		return;
+	}
+
+	if ([service respondsToSelector:@selector(application:continueUserActivity:restorationHandler:)]) {
+		[service application:UIApplication.sharedApplication continueUserActivity:user_activity restorationHandler:^(__unused NSArray<id<UIUserActivityRestoring>> *restorable_objects) {}];
+	}
+}
+
 // UIApplicationDelegate documentation can be found here: https://developer.apple.com/documentation/uikit/uiapplicationdelegate
 
 // MARK: Window
@@ -122,31 +148,31 @@ static NSMutableArray<GDTAppDelegateServiceProtocol *> *services = nil;
 
 - (void)scene:(UIScene *)scene willConnectToSession:(UISceneSession *)session options:(UISceneConnectionOptions *)connectionOptions API_AVAILABLE(ios(13.0), tvos(13.0), visionos(1.0)) {
 	for (GDTAppDelegateServiceProtocol *service in services) {
-		if (![service respondsToSelector:_cmd]) {
-			continue;
+		const bool handles_connection_options = [service respondsToSelector:_cmd];
+		if (handles_connection_options) {
+			[service scene:scene willConnectToSession:session options:connectionOptions];
 		}
 
-		[service scene:scene willConnectToSession:session options:connectionOptions];
+		if (connectionOptions.URLContexts.count > 0 && (!handles_connection_options || ![service respondsToSelector:@selector(scene:openURLContexts:)])) {
+			_forward_open_urls_to_service(service, scene, connectionOptions.URLContexts);
+		}
+		if (!handles_connection_options || ![service respondsToSelector:@selector(scene:continueUserActivity:)]) {
+			for (NSUserActivity *user_activity in connectionOptions.userActivities) {
+				_forward_user_activity_to_service(service, scene, user_activity);
+			}
+		}
 	}
 }
 
 - (void)scene:(UIScene *)scene openURLContexts:(NSSet<UIOpenURLContext *> *)URLContexts API_AVAILABLE(ios(13.0), tvos(13.0), visionos(1.0)) {
 	for (GDTAppDelegateServiceProtocol *service in services) {
-		if (![service respondsToSelector:_cmd]) {
-			continue;
-		}
-
-		[service scene:scene openURLContexts:URLContexts];
+		_forward_open_urls_to_service(service, scene, URLContexts);
 	}
 }
 
 - (void)scene:(UIScene *)scene continueUserActivity:(NSUserActivity *)userActivity API_AVAILABLE(ios(13.0), tvos(13.0), visionos(1.0)) {
 	for (GDTAppDelegateServiceProtocol *service in services) {
-		if (![service respondsToSelector:_cmd]) {
-			continue;
-		}
-
-		[service scene:scene continueUserActivity:userActivity];
+		_forward_user_activity_to_service(service, scene, userActivity);
 	}
 }
 
