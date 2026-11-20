@@ -72,10 +72,20 @@ bool JavaClass::_call_method(JavaObject *p_instance, const StringName &p_method,
 		bool valid = true;
 
 		for (int i = 0; i < pc; i++) {
+			// Null is always OK for array types.
+			if ((ptypes[i] & ARG_ARRAY_BIT) && p_args[i]->get_type() == Variant::NIL) {
+				continue;
+			}
+
 			Variant::Type arg_expected = Variant::NIL;
 			switch (ptypes[i]) {
 				case ARG_TYPE_VOID: {
 					//bug?
+				} break;
+				case ARG_NUMBER_CLASS_BIT | ARG_TYPE_BOOLEAN: {
+					if (p_args[i]->get_type() != Variant::BOOL && p_args[i]->get_type() != Variant::NIL) {
+						arg_expected = Variant::BOOL;
+					}
 				} break;
 				case ARG_TYPE_BOOLEAN: {
 					if (p_args[i]->get_type() != Variant::BOOL) {
@@ -86,7 +96,11 @@ bool JavaClass::_call_method(JavaObject *p_instance, const StringName &p_method,
 				case ARG_NUMBER_CLASS_BIT | ARG_TYPE_CHAR:
 				case ARG_NUMBER_CLASS_BIT | ARG_TYPE_SHORT:
 				case ARG_NUMBER_CLASS_BIT | ARG_TYPE_INT:
-				case ARG_NUMBER_CLASS_BIT | ARG_TYPE_LONG:
+				case ARG_NUMBER_CLASS_BIT | ARG_TYPE_LONG: {
+					if (!p_args[i]->is_num() && p_args[i]->get_type() != Variant::NIL) {
+						arg_expected = Variant::INT;
+					}
+				} break;
 				case ARG_TYPE_BYTE:
 				case ARG_TYPE_CHAR:
 				case ARG_TYPE_SHORT:
@@ -97,7 +111,11 @@ bool JavaClass::_call_method(JavaObject *p_instance, const StringName &p_method,
 					}
 				} break;
 				case ARG_NUMBER_CLASS_BIT | ARG_TYPE_FLOAT:
-				case ARG_NUMBER_CLASS_BIT | ARG_TYPE_DOUBLE:
+				case ARG_NUMBER_CLASS_BIT | ARG_TYPE_DOUBLE: {
+					if (!p_args[i]->is_num() && p_args[i]->get_type() != Variant::NIL) {
+						arg_expected = Variant::FLOAT;
+					}
+				} break;
 				case ARG_TYPE_FLOAT:
 				case ARG_TYPE_DOUBLE: {
 					if (!p_args[i]->is_num()) {
@@ -106,7 +124,7 @@ bool JavaClass::_call_method(JavaObject *p_instance, const StringName &p_method,
 				} break;
 				case ARG_TYPE_STRING:
 				case ARG_TYPE_CHARSEQUENCE: {
-					if (!p_args[i]->is_string()) {
+					if (!p_args[i]->is_string() && p_args[i]->get_type() != Variant::NIL) {
 						arg_expected = Variant::STRING;
 					}
 				} break;
@@ -292,6 +310,12 @@ bool JavaClass::_call_method(JavaObject *p_instance, const StringName &p_method,
 	}
 
 	for (int i = 0; i < method->param_types.size(); i++) {
+		// Allow passing null for all the boxed number and array types.
+		if (p_args[i]->get_type() == Variant::NIL && (method->param_types[i] & (ARG_NUMBER_CLASS_BIT | ARG_ARRAY_BIT))) {
+			argv[i].l = nullptr;
+			continue;
+		}
+
 		switch (method->param_types[i]) {
 			case ARG_TYPE_VOID: {
 				//can't happen
@@ -388,9 +412,13 @@ bool JavaClass::_call_method(JavaObject *p_instance, const StringName &p_method,
 			} break;
 			case ARG_TYPE_STRING:
 			case ARG_TYPE_CHARSEQUENCE: {
-				String s = *p_args[i];
-				jstring jStr = env->NewStringUTF(s.utf8().get_data());
-				argv[i].l = jStr;
+				if (p_args[i]->is_string()) {
+					String s = *p_args[i];
+					jstring jStr = env->NewStringUTF(s.utf8().get_data());
+					argv[i].l = jStr;
+				} else {
+					argv[i].l = nullptr;
+				}
 			} break;
 			case ARG_TYPE_CALLABLE: {
 				jobject jcallable = callable_to_jcallable(env, *p_args[i]);
