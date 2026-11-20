@@ -36,6 +36,7 @@
 #include "core/crypto/cafecito_security_godot.h"
 #include "core/crypto/crypto.h"
 #include "core/debugger/engine_debugger.h"
+#include "core/extension/cafecito_extensions.h"
 #include "core/extension/extension_api_dump.h"
 #include "core/extension/gdextension_interface_dump.gen.h"
 #include "core/extension/gdextension_interface_header_generator.h"
@@ -328,7 +329,12 @@ static String get_full_version_string() {
 	if (!hash.is_empty()) {
 		hash = "." + hash.left(9);
 	}
-	return String(GODOT_VERSION_FULL_BUILD) + hash;
+	String extension_suffix;
+	const char *extension_build_id = CafecitoExtensions::get_extension_build_id();
+	if (extension_build_id && extension_build_id[0] != '\0') {
+		extension_suffix = "." + String(extension_build_id);
+	}
+	return String(GODOT_VERSION_FULL_BUILD) + hash + extension_suffix;
 }
 
 #if defined(TOOLS_ENABLED) && defined(MODULE_GDSCRIPT_ENABLED)

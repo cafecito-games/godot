@@ -20,7 +20,7 @@ class BuildIdentity:
     @property
     def build_name(self) -> str:
         dirty_suffix = "_dirty" if self.dirty else ""
-        return f"cafecito_{self.commit_sha}{dirty_suffix}"
+        return f"cafecito{dirty_suffix}"
 
     @property
     def template_version(self) -> str:

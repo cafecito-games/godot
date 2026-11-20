@@ -33,6 +33,7 @@
 #include "core/authors.gen.h"
 #include "core/config/project_settings.h"
 #include "core/donors.gen.h"
+#include "core/extension/cafecito_extensions.h"
 #include "core/license.gen.h"
 #include "core/object/object.h"
 #include "core/variant/typed_array.h"
@@ -170,6 +171,11 @@ Dictionary Engine::get_version_info() const {
 	}
 	stringver += "-" + String(dict["status"]) + " (" + String(dict["build"]) + ")";
 	dict["string"] = stringver;
+
+	const char *extension_build_id = CafecitoExtensions::get_extension_build_id();
+	if (extension_build_id && extension_build_id[0] != '\0') {
+		dict["extension_build"] = String(extension_build_id);
+	}
 
 	return dict;
 }
