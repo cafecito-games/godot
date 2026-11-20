@@ -580,9 +580,20 @@ def precious_program(env, program, sources, **args):
     return program
 
 
+def _maybe_attach_relink_manifest(env, name, targets):
+    if not env.get("cafecito_relink_kit"):
+        return
+    if not str(name).startswith("#bin/"):
+        return
+    from cafecito.relink_manifest import write_relink_manifest
+
+    env.AddPostAction(targets, env.Run(write_relink_manifest, "Writing relink manifest for $TARGET"))
+
+
 def add_shared_library(env, name, sources, **args):
     library = env.SharedLibrary(name, sources, **args)
     env.NoCache(library)
+    _maybe_attach_relink_manifest(env, name, library)
     return library
 
 
@@ -595,6 +606,7 @@ def add_library(env, name, sources, **args):
 def add_program(env, name, sources, **args):
     program = env.Program(name, sources, **args)
     env.NoCache(program)
+    _maybe_attach_relink_manifest(env, name, program)
     return program
 
 

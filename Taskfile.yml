@@ -1,0 +1,44 @@
+version: '3'
+
+tasks:
+  default:
+    desc: Show available tasks
+    cmds:
+      - task --list
+
+  info:
+    desc: Show host, Godot version, and build identity information
+    cmds:
+      - uv run --project cafecito cafecito-build info
+
+  build:editor:
+    desc: Build the Godot editor for the current host (with Relink Kit manifest)
+    cmds:
+      - uv run --project cafecito cafecito-build build --target editor {{.CLI_ARGS}}
+
+  build:template-release:
+    desc: Build the Godot release export template for the current host (with Relink Kit manifest)
+    cmds:
+      - uv run --project cafecito cafecito-build build --target template_release {{.CLI_ARGS}}
+
+  build:template-debug:
+    desc: Build the Godot debug export template for the current host (with Relink Kit manifest)
+    cmds:
+      - uv run --project cafecito cafecito-build build --target template_debug {{.CLI_ARGS}}
+
+  build:all:
+    desc: Build editor, release template, and debug template for the current host
+    cmds:
+      - task: build:editor
+      - task: build:template-release
+      - task: build:template-debug
+
+  package:relink-kit:
+    desc: 'Package a Relink Kit from a .relink.json manifest (usage: task package:relink-kit -- --manifest bin/<name>.relink.json)'
+    cmds:
+      - uv run --project cafecito cafecito-build package-relink-kit {{.CLI_ARGS}}
+
+  clean:
+    desc: Remove bin/ build artifacts
+    cmds:
+      - uv run --project cafecito cafecito-build clean

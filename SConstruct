@@ -301,6 +301,18 @@ opts.Add("cache_path", "Path to a directory where SCons cache files will be stor
 opts.Add("cache_limit", "Max size (in GiB) for the SCons cache. 0 means no limit.", "0")
 opts.Add(
     BoolVariable(
+        "cafecito_relink_kit",
+        "Emit a portable relink manifest alongside built binaries for static extension relinking.",
+        False,
+    )
+)
+opts.Add(
+    "cafecito_ext_library",
+    "Optional path to a prebuilt static extension archive replacing libcafecito_ext_default.",
+    "",
+)
+opts.Add(
+    BoolVariable(
         "redirect_build_objects",
         "Enable redirecting built objects/libraries to `bin/obj/` to declutter the repository.",
         True,

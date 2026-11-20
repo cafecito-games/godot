@@ -170,6 +170,10 @@ def combine_libs_apple_embedded(target, source, env):
     env.Execute(
         libtool + ' -static -o "' + lib_path + '" ' + " ".join([('"' + lib.srcnode().abspath + '"') for lib in source])
     )
+    if env.get("cafecito_relink_kit"):
+        from cafecito.relink_manifest import write_apple_embedded_relink_kit
+
+        write_apple_embedded_relink_kit(target, source, env, libtool)
 
 
 def lipo_and_copy_apple_embedded(
