@@ -198,7 +198,6 @@ gen_encrypt = env.CommandNoCache(
     env.Value(encryption_key),
     env.Run(core_builders.encryption_key_builder),
 )
-env.add_source_files(env.core_sources, gen_encrypt)
 
 # Certificates
 env.CommandNoCache(
@@ -234,6 +233,9 @@ SConscript("string/SCsub")
 SConscript("config/SCsub")
 SConscript("error/SCsub")
 
+
+# Default static-link extension & security provider (placed to the right of libcore).
+SConscript("cafecito_ext_default/SCsub", exports=["env", "gen_encrypt"])
 
 # Build it all as a library
 lib = env.add_library("core", env.core_sources)

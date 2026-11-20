@@ -1,0 +1,31 @@
+#!/usr/bin/env python
+from misc.utility.scons_hints import *
+
+import os
+
+Import("env")
+Import("gen_encrypt")
+
+custom_ext_library = env.get("cafecito_ext_library", "").strip()
+if custom_ext_library:
+    ext_lib_node = env.File(os.path.abspath(custom_ext_library))
+    env["CAFECITO_EXT_DEFAULT_LIB"] = ext_lib_node
+    env.Prepend(LIBS=[ext_lib_node])
+else:
+    env_ext = env.Clone()
+
+    # Compile explicitly as a standalone archive outside SCU so relink tooling
+    # can substitute a private extension library without recompiling Godot.
+    ext_sources = []
+    env_ext.add_source_files(
+        ext_sources,
+        [
+            "cafecito_security_default.cpp",
+            "cafecito_extensions_default.cpp",
+        ],
+    )
+    env_ext.add_source_files(ext_sources, gen_encrypt)
+
+    ext_default_lib = env_ext.add_library("cafecito_ext_default", ext_sources)
+    env["CAFECITO_EXT_DEFAULT_LIB"] = ext_default_lib[0]
+    env.Prepend(LIBS=[ext_default_lib])

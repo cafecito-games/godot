@@ -2331,7 +2331,7 @@ Error EditorExportPlatform::save_pack(const Ref<EditorExportPreset> &p_preset, b
 	uint64_t file_base_ofs = 0;
 	uint64_t dir_base_ofs = 0;
 
-	_store_header(f, p_preset->get_enc_pck() && p_preset->get_enc_directory(), false, file_base_ofs, dir_base_ofs, String());
+	_store_header(f, p_preset->get_enc_pck() && (CafecitoSecurity::force_encrypt_pck_directory() || p_preset->get_enc_directory()), false, file_base_ofs, dir_base_ofs, String());
 
 	// Align for first file.
 	int file_padding = _get_pad(PCK_PADDING, f->get_position());
@@ -2377,7 +2377,7 @@ Error EditorExportPlatform::save_pack(const Ref<EditorExportPreset> &p_preset, b
 	f->seek(dir_offset);
 
 	Vector<uint8_t> key;
-	if (p_preset->get_enc_pck() && p_preset->get_enc_directory()) {
+	if (p_preset->get_enc_pck() && (CafecitoSecurity::force_encrypt_pck_directory() || p_preset->get_enc_directory())) {
 		key = _get_script_encryption_key_bytes(p_preset);
 	}
 

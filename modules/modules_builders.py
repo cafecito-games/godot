@@ -34,6 +34,7 @@ def register_module_types_builder(target, source, env):
             f"""\
 #include "register_module_types.h"
 
+#include "core/extension/cafecito_extensions.h"
 #include "modules/modules_enabled.gen.h"
 
 // IWYU pragma: begin_keep.
@@ -42,9 +43,11 @@ def register_module_types_builder(target, source, env):
 
 void initialize_modules(ModuleInitializationLevel p_level) {{
 {mod_init}
+	CafecitoExtensions::initialize_extensions(static_cast<int>(p_level));
 }}
 
 void uninitialize_modules(ModuleInitializationLevel p_level) {{
+	CafecitoExtensions::uninitialize_extensions(static_cast<int>(p_level));
 {mod_uninit}
 }}
 """

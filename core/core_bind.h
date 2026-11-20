@@ -606,6 +606,7 @@ public:
 	String get_license_text() const;
 
 	String get_architecture_name() const;
+	String get_encryption_key_fingerprint() const;
 
 	bool is_in_physics_frame() const;
 

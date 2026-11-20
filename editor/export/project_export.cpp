@@ -31,6 +31,7 @@
 #include "project_export.h"
 
 #include "core/config/project_settings.h"
+#include "core/crypto/cafecito_security.h"
 #include "core/object/callable_mp.h"
 #include "core/object/class_db.h"
 #include "core/os/os.h"
@@ -1548,7 +1549,12 @@ void ProjectExportDialog::_bind_methods() {
 }
 
 ProjectExportDialog::ProjectExportDialog() {
-	set_title(TTRC("Export"));
+	const char *export_title_override = CafecitoSecurity::get_export_dialog_title_override();
+	if (export_title_override && export_title_override[0] != '\0') {
+		set_title(TTRC(export_title_override));
+	} else {
+		set_title(TTRC("Export"));
+	}
 	set_flag(FLAG_MAXIMIZE_DISABLED, false);
 	set_clamp_to_embedder(true);
 

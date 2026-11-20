@@ -30,10 +30,11 @@
 
 #pragma once
 
+#include "core/crypto/cafecito_security.h"
 #include "core/crypto/crypto_core.h"
 #include "core/io/file_access.h"
 
-#define ENCRYPTED_HEADER_MAGIC 0x43454447
+#define ENCRYPTED_HEADER_MAGIC (CafecitoSecurity::get_encrypted_header_magic())
 
 class FileAccessEncrypted : public FileAccess {
 	GDSOFTCLASS(FileAccessEncrypted, FileAccess);

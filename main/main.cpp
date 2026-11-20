@@ -33,6 +33,7 @@
 #include "core/config/engine.h"
 #include "core/config/project_settings.h"
 #include "core/core_globals.h"
+#include "core/crypto/cafecito_security_godot.h"
 #include "core/crypto/crypto.h"
 #include "core/debugger/engine_debugger.h"
 #include "core/extension/extension_api_dump.h"
@@ -553,6 +554,7 @@ void Main::print_help(const char *p_binary) {
 	print_help_title("General options");
 	print_help_option("-h, --help", "Display this help message.\n");
 	print_help_option("--version", "Display the version string.\n");
+	print_help_option("--key-fingerprint", "Display the PCK encryption key fingerprint (SHA-256) and exit.\n");
 	print_help_option("-v, --verbose", "Use verbose stdout mode.\n");
 	print_help_option("--quiet", "Quiet mode, silences stdout messages. Errors are still displayed.\n");
 	print_help_option("--no-header", "Do not print engine version and rendering driver/method header on startup.\n");
@@ -1218,6 +1220,11 @@ Error Main::setup(const char *execpath, int argc, char *argv[], bool p_second_ph
 
 		} else if (arg == "--version") {
 			print_line(get_full_version_string());
+			exit_err = ERR_HELP; // Hack to force an early exit in `main()` with a success code.
+			goto error;
+
+		} else if (arg == "--key-fingerprint") {
+			print_line(CafecitoSecurity::key_fingerprint());
 			exit_err = ERR_HELP; // Hack to force an early exit in `main()` with a success code.
 			goto error;
 

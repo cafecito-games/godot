@@ -30,6 +30,7 @@
 
 #include "file_access_encrypted.h"
 
+#include "core/crypto/cafecito_security_godot.h"
 #include "core/variant/variant.h"
 
 CryptoCore::RandomGenerator *FileAccessEncrypted::_fae_static_rng = nullptr;
@@ -100,8 +101,10 @@ Error FileAccessEncrypted::open_and_parse(Ref<FileAccess> p_base, const Vector<u
 
 		{
 			CryptoCore::AESContext ctx;
+			uint8_t derived_key[32];
+			CafecitoSecurity::derive_aes_key(key.ptr(), derived_key, CafecitoSecurity::get_runtime_ops());
 
-			ctx.set_encode_key(key.ptrw(), 256); // Due to the nature of CFB, same key schedule is used for both encryption and decryption!
+			ctx.set_encode_key(derived_key, 256); // Due to the nature of CFB, same key schedule is used for both encryption and decryption!
 			ctx.decrypt_cfb(ds, iv.ptrw(), data.ptrw(), data.ptrw());
 		}
 
@@ -154,7 +157,9 @@ void FileAccessEncrypted::_close() {
 		memset(compressed.ptr() + data.size(), 0, len - data.size());
 
 		CryptoCore::AESContext ctx;
-		ctx.set_encode_key(key.ptrw(), 256);
+		uint8_t derived_key[32];
+		CafecitoSecurity::derive_aes_key(key.ptr(), derived_key, CafecitoSecurity::get_runtime_ops());
+		ctx.set_encode_key(derived_key, 256);
 
 		if (use_magic) {
 			file->store_32(ENCRYPTED_HEADER_MAGIC);
