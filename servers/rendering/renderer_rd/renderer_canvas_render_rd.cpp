@@ -568,7 +568,8 @@ void RendererCanvasRenderRD::canvas_render_items(RID p_to_render_target, Item *p
 
 			state.light_uniforms[index].flags = l->blend_mode << LIGHT_FLAGS_BLEND_SHIFT;
 			state.light_uniforms[index].flags |= l->shadow_filter << LIGHT_FLAGS_FILTER_SHIFT;
-			if (clight->shadow.enabled) {
+			// A light without a shadow band for this frame must not sample the atlas.
+			if (clight->shadow.enabled && l->shadow_index_cache >= 0) {
 				state.light_uniforms[index].flags |= LIGHT_FLAGS_HAS_SHADOW;
 			}
 
@@ -638,7 +639,8 @@ void RendererCanvasRenderRD::canvas_render_items(RID p_to_render_target, Item *p
 
 			state.light_uniforms[index].flags = l->blend_mode << LIGHT_FLAGS_BLEND_SHIFT;
 			state.light_uniforms[index].flags |= l->shadow_filter << LIGHT_FLAGS_FILTER_SHIFT;
-			if (clight->shadow.enabled) {
+			// A light without a shadow band for this frame must not sample the atlas.
+			if (clight->shadow.enabled && l->shadow_index_cache >= 0) {
 				state.light_uniforms[index].flags |= LIGHT_FLAGS_HAS_SHADOW;
 			}
 
@@ -1028,6 +1030,7 @@ void RendererCanvasRenderRD::_update_occluder_buffer(uint32_t p_size) {
 void RendererCanvasRenderRD::light_update_shadow(RID p_rid, int p_shadow_index, const Transform2D &p_light_xform, int p_light_mask, float p_near, float p_far, LightOccluderInstance *p_occluders, const Rect2 &p_light_rect) {
 	CanvasLight *cl = canvas_light_owner.get_or_null(p_rid);
 	ERR_FAIL_COND(!cl->shadow.enabled);
+	ERR_FAIL_INDEX(p_shadow_index, MAX_LIGHTS_PER_RENDER);
 
 	_update_shadow_atlas();
 
@@ -1133,6 +1136,7 @@ void RendererCanvasRenderRD::light_update_shadow(RID p_rid, int p_shadow_index, 
 void RendererCanvasRenderRD::light_update_directional_shadow(RID p_rid, int p_shadow_index, const Transform2D &p_light_xform, int p_light_mask, float p_cull_distance, const Rect2 &p_clip_rect, LightOccluderInstance *p_occluders) {
 	CanvasLight *cl = canvas_light_owner.get_or_null(p_rid);
 	ERR_FAIL_COND(!cl->shadow.enabled);
+	ERR_FAIL_INDEX(p_shadow_index, MAX_LIGHTS_PER_RENDER);
 
 	_update_shadow_atlas();
 

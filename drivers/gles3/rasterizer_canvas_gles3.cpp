@@ -192,7 +192,8 @@ void RasterizerCanvasGLES3::canvas_render_items(RID p_to_render_target, Item *p_
 			state.light_uniforms[index].flags = l->blend_mode << LIGHT_FLAGS_BLEND_SHIFT;
 			state.light_uniforms[index].flags |= l->shadow_filter << LIGHT_FLAGS_FILTER_SHIFT;
 
-			if (clight->shadow.enabled) {
+			// A light without a shadow band for this frame must not sample the atlas.
+			if (clight->shadow.enabled && l->shadow_index_cache >= 0) {
 				state.light_uniforms[index].flags |= LIGHT_FLAGS_HAS_SHADOW;
 			}
 
@@ -263,7 +264,8 @@ void RasterizerCanvasGLES3::canvas_render_items(RID p_to_render_target, Item *p_
 			state.light_uniforms[index].flags = l->blend_mode << LIGHT_FLAGS_BLEND_SHIFT;
 			state.light_uniforms[index].flags |= l->shadow_filter << LIGHT_FLAGS_FILTER_SHIFT;
 
-			if (clight->shadow.enabled) {
+			// A light without a shadow band for this frame must not sample the atlas.
+			if (clight->shadow.enabled && l->shadow_index_cache >= 0) {
 				state.light_uniforms[index].flags |= LIGHT_FLAGS_HAS_SHADOW;
 			}
 
@@ -1642,6 +1644,7 @@ void RasterizerCanvasGLES3::light_update_shadow(RID p_rid, int p_shadow_index, c
 
 	CanvasLight *cl = canvas_light_owner.get_or_null(p_rid);
 	ERR_FAIL_COND(!cl->shadow.enabled);
+	ERR_FAIL_INDEX(p_shadow_index, (int)data.max_lights_per_render);
 
 	_update_shadow_atlas();
 
@@ -1757,6 +1760,7 @@ void RasterizerCanvasGLES3::light_update_directional_shadow(RID p_rid, int p_sha
 
 	CanvasLight *cl = canvas_light_owner.get_or_null(p_rid);
 	ERR_FAIL_COND(!cl->shadow.enabled);
+	ERR_FAIL_INDEX(p_shadow_index, (int)data.max_lights_per_render);
 
 	_update_shadow_atlas();
 

@@ -459,7 +459,17 @@ void RendererViewport::_draw_viewport(Viewport *p_viewport) {
 
 		Rect2 shadow_rect;
 
+		// Shadow bands are handed out from a single atlas shared by point and
+		// directional 2D lights, so the two culling loops below draw from one budget.
+		// A light that does not get a band keeps shadow_index_cache == -1 and renders
+		// unshadowed for this frame.
+		const int max_shadow_lights = int(RSG::canvas_render->get_max_shadow_lights());
 		int shadow_count = 0;
+		// Bands are numbered in the order the shadow passes below walk their lists, not
+		// in culling order: RendererCanvasRenderRD::light_update_shadow() uploads the
+		// shared occluder transform buffer only for band 0, so band 0 must be rendered
+		// first. shadow_count bounds this, so it never reaches max_shadow_lights.
+		int shadow_index = 0;
 		int directional_light_count = 0;
 
 		RENDER_TIMESTAMP("Cull 2D Lights");
@@ -497,7 +507,9 @@ void RendererViewport::_draw_viewport(Viewport *p_viewport) {
 						scale.scale(local_rect.size);
 						scale.columns[2] = local_rect.position;
 						cl->light_shader_xform = cl->xform_cache * scale;
-						if (cl->use_shadow) {
+						cl->shadow_index_cache = -1;
+						if (cl->use_shadow && shadow_count < max_shadow_lights) {
+							shadow_count++;
 							cl->shadows_next_ptr = lights_with_shadow;
 							if (lights_with_shadow == nullptr) {
 								shadow_rect = cl->rect_cache;
@@ -524,7 +536,9 @@ void RendererViewport::_draw_viewport(Viewport *p_viewport) {
 						cl->xform_cache = xf * cl->xform_cache;
 					}
 					cl->xform_cache.columns[2] = Vector2(); //translation is pointless
-					if (cl->use_shadow) {
+					cl->shadow_index_cache = -1;
+					if (cl->use_shadow && shadow_count < max_shadow_lights) {
+						shadow_count++;
 						cl->shadows_next_ptr = directional_lights_with_shadow;
 						directional_lights_with_shadow = cl;
 					}
@@ -576,7 +590,8 @@ void RendererViewport::_draw_viewport(Viewport *p_viewport) {
 			while (light) {
 				RENDER_TIMESTAMP("Render PointLight2D Shadow");
 
-				RSG::canvas_render->light_update_shadow(light->light_internal, shadow_count++, light->xform_cache.affine_inverse(), light->item_shadow_mask, light->radius_cache / 1000.0, light->radius_cache * 1.1, occluders, light->rect_cache);
+				light->shadow_index_cache = shadow_index++;
+				RSG::canvas_render->light_update_shadow(light->light_internal, light->shadow_index_cache, light->xform_cache.affine_inverse(), light->item_shadow_mask, light->radius_cache / 1000.0, light->radius_cache * 1.1, occluders, light->rect_cache);
 				light = light->shadows_next_ptr;
 			}
 
@@ -662,7 +677,8 @@ void RendererViewport::_draw_viewport(Viewport *p_viewport) {
 					}
 				}
 
-				RSG::canvas_render->light_update_directional_shadow(light->light_internal, shadow_count++, light->xform_cache, light->item_shadow_mask, cull_distance, clip_rect, occluders);
+				light->shadow_index_cache = shadow_index++;
+				RSG::canvas_render->light_update_directional_shadow(light->light_internal, light->shadow_index_cache, light->xform_cache, light->item_shadow_mask, cull_distance, clip_rect, occluders);
 
 				light = light->shadows_next_ptr;
 			}

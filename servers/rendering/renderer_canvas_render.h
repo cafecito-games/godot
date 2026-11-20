@@ -97,6 +97,10 @@ public:
 		uint64_t version;
 
 		int32_t render_index_cache;
+		// Shadow atlas band assigned for the current frame, or -1 when this light was
+		// not given one. A light without a band must render unshadowed: the bands are
+		// packed into one atlas, so reusing a stale index samples another light's band.
+		int32_t shadow_index_cache;
 
 		Light() {
 			version = 0;
@@ -125,6 +129,7 @@ public:
 			shadow_filter = RSE::CANVAS_LIGHT_FILTER_NONE;
 			shadow_smooth = 0.0;
 			render_index_cache = -1;
+			shadow_index_cache = -1;
 			directional_distance = 10000.0;
 		}
 	};
@@ -538,6 +543,10 @@ public:
 	virtual void light_set_use_shadow(RID p_rid, bool p_enable) = 0;
 	virtual void light_update_shadow(RID p_rid, int p_shadow_index, const Transform2D &p_light_xform, int p_light_mask, float p_near, float p_far, LightOccluderInstance *p_occluders, const Rect2 &p_light_rect) = 0;
 	virtual void light_update_directional_shadow(RID p_rid, int p_shadow_index, const Transform2D &p_light_xform, int p_light_mask, float p_cull_distance, const Rect2 &p_clip_rect, LightOccluderInstance *p_occluders) = 0;
+	// Number of shadow bands this renderer's 2D shadow atlas can hold. Shadow indices
+	// handed to light_update_shadow() and light_update_directional_shadow() must be
+	// below it; lights past it render unshadowed.
+	virtual uint32_t get_max_shadow_lights() const = 0;
 
 	virtual void render_sdf(RID p_render_target, LightOccluderInstance *p_occluders) = 0;
 
