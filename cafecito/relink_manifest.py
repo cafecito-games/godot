@@ -161,17 +161,19 @@ def write_relink_manifest(target, source, env) -> None:
 
     internal_static_libs, external_libs, default_ext_rel = _classify_libraries(env, repo_root, default_ext_path)
 
+    is_msvc = bool(getattr(env, "msvc", False))
+    cxx_driver = str(env.subst("$CXX")).strip()
     library_type = str(env.get("library_type", "executable"))
     if str(target_path).endswith((".dylib", ".so", ".dll")):
         target_kind = "shared_library"
-        linker = str(env.subst("$SHLINK")).strip() or str(env.subst("$LINK")).strip()
+        linker = str(env.subst("$SHLINK")).strip() if is_msvc else (cxx_driver or str(env.subst("$SHLINK")).strip())
         link_flags = _normalize_sdk_tokens(
             _flatten_strings(env, env.get("SHLINKFLAGS", [])) + _flatten_strings(env, env.get("LINKFLAGS", [])),
             env,
         )
     else:
         target_kind = "executable" if library_type == "executable" else library_type
-        linker = str(env.subst("$LINK")).strip()
+        linker = str(env.subst("$LINK")).strip() if is_msvc else (cxx_driver or str(env.subst("$LINK")).strip())
         link_flags = _normalize_sdk_tokens(_flatten_strings(env, env.get("LINKFLAGS", [])), env)
 
     frameworks = [str(env.subst(str(fw))).strip() for fw in _flatten_raw_items(env.get("FRAMEWORKS", [])) if str(fw).strip()]
