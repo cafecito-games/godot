@@ -1,0 +1,130 @@
+name: PR Checks
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-checks-${{ github.event.pull_request.number || github.ref_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  SCONS_CACHE_DIR: ${{ github.workspace }}/.scons-cache
+
+jobs:
+  python-tests:
+    name: Python tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10.4.0
+
+      - name: Run cafecito-build tests
+        run: uv run --project cafecito --with pytest pytest cafecito/tests -q
+
+  cpp-tests:
+    name: C++ unit tests (Linux)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Detect engine or test changes
+        id: changes
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
+            echo "run=true" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          base_sha=""
+          if [ "${EVENT_NAME}" = "pull_request" ]; then
+            base_sha="${PR_BASE_SHA}"
+          elif [ "${EVENT_NAME}" = "push" ] && [ -n "${PUSH_BEFORE_SHA}" ] && [ "${PUSH_BEFORE_SHA}" != "0000000000000000000000000000000000000000" ]; then
+            base_sha="${PUSH_BEFORE_SHA}"
+          fi
+
+          if [ -z "${base_sha}" ] || ! git fetch --no-tags --filter=blob:none --depth=1 origin "${base_sha}"; then
+            echo "Could not resolve base commit; running C++ tests."
+            echo "run=true" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          changed_files="$(git diff --no-renames --name-only "${base_sha}" HEAD)"
+          echo "Changed files:"
+          echo "${changed_files}"
+
+          if printf '%s\n' "${changed_files}" | grep -qE '^(core|drivers|editor|main|modules|platform|scene|servers|tests|thirdparty)/|^(SConstruct|version\.py|methods\.py|platform_methods\.py|scu_builders\.py|gles3_builders\.py|glsl_builders\.py)$|^cafecito/(relink_manifest\.py|src/cafecito_build/scons\.py)$|^\.github/workflows/pr-checks\.yml$'; then
+            echo "run=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "No engine, test, or build-system files changed; skipping C++ tests."
+            echo "run=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Set up uv
+        if: steps.changes.outputs.run == 'true'
+        uses: astral-sh/setup-uv@v10.4.0
+
+      - name: Install Linux build dependencies
+        if: steps.changes.outputs.run == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential pkg-config scons mold yasm
+
+      - name: Restore SCons cache
+        id: restore-cache
+        if: steps.changes.outputs.run == 'true'
+        uses: actions/cache/restore@v6
+        continue-on-error: true
+        with:
+          path: ${{ env.SCONS_CACHE_DIR }}
+          key: pr-linux-tests-v1-${{ github.ref_name }}-${{ github.sha }}
+          restore-keys: |
+            pr-linux-tests-v1-${{ github.ref_name }}-
+            pr-linux-tests-v1-main-
+
+      - name: Build Godot with C++ unit tests
+        if: steps.changes.outputs.run == 'true'
+        run: |
+          uv run --project cafecito cafecito-build build \
+            --platform linuxbsd \
+            --target editor \
+            --arch x86_64 \
+            --tests \
+            --no-relink-kit \
+            --extra-flag optimize=none \
+            --extra-flag linker=mold \
+            --extra-flag use_static_cpp=no \
+            --extra-flag wayland=no \
+            --extra-flag accesskit=no \
+            --extra-flag "cache_path=${SCONS_CACHE_DIR}" \
+            --extra-flag cache_limit=5
+
+      - name: Save SCons cache
+        if: steps.changes.outputs.run == 'true' && steps.restore-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        continue-on-error: true
+        with:
+          path: ${{ env.SCONS_CACHE_DIR }}
+          key: pr-linux-tests-v1-${{ github.ref_name }}-${{ github.sha }}
+
+      - name: Run C++ unit tests
+        if: steps.changes.outputs.run == 'true'
+        run: |
+          ./bin/godot.linuxbsd.editor.x86_64 --version
+          ./bin/godot.linuxbsd.editor.x86_64 --headless --test --force-colors

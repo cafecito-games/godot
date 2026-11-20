@@ -184,8 +184,12 @@ string; it identifies the exact commit and extension archive.
 
 ### CI
 
-`.github/workflows/runner.yml` fans out to the per-platform workflows (Android,
-iOS, Linux, macOS, Windows, Web) plus static checks on every push and PR.
+`.github/workflows/pr-checks.yml` runs fast PR checks on `ubuntu-24.04` for
+pull requests and pushes to `main`: `cafecito` Python tests (`pytest`) plus
+cached Linux C++ doctests (`cafecito-build` trimmed 2D profile with
+`optimize=none`, `linker=mold`, and `tests=yes`, skipped automatically when no
+engine, test, or build-system files changed). Upstream `.github/workflows/runner.yml`
+is kept untouched in git for clean rebases and disabled in GitHub Actions.
 `release.yml` is the fork's own `workflow_dispatch` release pipeline: it builds
 selected platforms, packages templates and Relink Kits, and publishes them.
 iOS builds are fail-closed on the Xcode 27 / iOS 27 SDK floor via
