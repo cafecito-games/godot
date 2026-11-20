@@ -1353,11 +1353,10 @@ Error EditorExportPlatform::export_project_files(const Ref<EditorExportPreset> &
 				continue;
 			}
 
-			String autoload_path = get_project_setting(p_preset, pi.name);
-
-			if (autoload_path.begins_with("*")) {
-				autoload_path = autoload_path.substr(1);
-			}
+			const String autoload_value = get_project_setting(p_preset, pi.name);
+			String autoload_path;
+			bool is_singleton = false;
+			ProjectSettings::parse_autoload_value(autoload_value, autoload_path, is_singleton);
 
 			_export_find_dependencies(autoload_path, paths);
 		}

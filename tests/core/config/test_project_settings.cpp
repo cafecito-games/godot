@@ -32,14 +32,46 @@
 
 TEST_FORCE_LINK(test_project_settings)
 
+#include "core/config/engine.h"
 #include "core/config/project_settings.h"
 #include "core/io/dir_access.h"
+#include "core/io/resource_uid.h"
 #include "core/object/message_queue.h"
 #include "core/variant/variant.h"
 #include "tests/signal_watcher.h"
 #include "tests/test_utils.h"
 
 namespace TestProjectSettings {
+
+class ResourceUIDMappingCleanup {
+	ResourceUID *resource_uid = nullptr;
+	ResourceUID::ID uid = ResourceUID::INVALID_ID;
+
+public:
+	ResourceUIDMappingCleanup(ResourceUID *p_resource_uid, ResourceUID::ID p_uid) :
+			resource_uid(p_resource_uid), uid(p_uid) {}
+
+	~ResourceUIDMappingCleanup() {
+		if (resource_uid->has_id(uid)) {
+			resource_uid->remove_id(uid);
+		}
+	}
+};
+
+class ProjectSettingsAutoloadCleanup {
+	ProjectSettings *settings = nullptr;
+	LocalVector<StringName> settings_to_clear;
+
+public:
+	ProjectSettingsAutoloadCleanup(ProjectSettings *p_settings, const LocalVector<StringName> &p_settings_to_clear) :
+			settings(p_settings), settings_to_clear(p_settings_to_clear) {}
+
+	~ProjectSettingsAutoloadCleanup() {
+		for (const StringName &setting : settings_to_clear) {
+			settings->set_setting(setting, Variant());
+		}
+	}
+};
 
 TEST_CASE("[ProjectSettings] Get existing setting") {
 	CHECK(ProjectSettings::get_singleton()->has_setting("application/run/main_scene"));
@@ -226,6 +258,198 @@ TEST_CASE("[ProjectSettings] No tracking when setting same value") {
 	int count_after = ProjectSettings::get_singleton()->get_changed_settings().size();
 
 	CHECK_EQ(count_before, count_after);
+}
+
+TEST_CASE("[ProjectSettings][Autoload] Parses path, legacy UID, and combined values") {
+	String path;
+	bool is_singleton = false;
+
+	ProjectSettings::parse_autoload_value("res://plain.gd", path, is_singleton);
+	CHECK_EQ(path, "res://plain.gd");
+	CHECK_FALSE(is_singleton);
+
+	ProjectSettings::parse_autoload_value("*res://singleton.gd", path, is_singleton);
+	CHECK_EQ(path, "res://singleton.gd");
+	CHECK(is_singleton);
+
+	ResourceUID *resource_uid = ResourceUID::get_singleton();
+	const ResourceUID::ID uid = resource_uid->create_id();
+	ResourceUIDMappingCleanup uid_cleanup(resource_uid, uid);
+	const String uid_text = resource_uid->id_to_text(uid);
+	resource_uid->add_id(uid, "res://uid_target.gd");
+
+	ProjectSettings::parse_autoload_value("*" + uid_text, path, is_singleton);
+	CHECK_EQ(path, "res://uid_target.gd");
+	CHECK(is_singleton);
+
+	ProjectSettings::parse_autoload_value("res://fallback.gd::" + uid_text, path, is_singleton);
+	CHECK_EQ(path, "res://uid_target.gd");
+	CHECK_FALSE(is_singleton);
+
+	ProjectSettings::parse_autoload_value("*res://fallback.gd::uid://<invalid>", path, is_singleton);
+	CHECK_EQ(path, "res://fallback.gd");
+	CHECK(is_singleton);
+}
+
+TEST_CASE("[ProjectSettings][Autoload] Stringifies path values and singleton markers") {
+	CHECK_EQ(
+			ProjectSettings::stringify_autoload_value("res://autoload_without_uid.gd", false),
+			"res://autoload_without_uid.gd");
+	CHECK_EQ(
+			ProjectSettings::stringify_autoload_value("res://autoload_without_uid.gd", true),
+			"*res://autoload_without_uid.gd");
+
+	REQUIRE_FALSE(Engine::get_singleton()->is_editor_hint());
+	ResourceUID *resource_uid = ResourceUID::get_singleton();
+	const ResourceUID::ID uid = resource_uid->create_id();
+	REQUIRE_NE(uid, ResourceUID::INVALID_ID);
+	const String path = "res://autoload_with_uid.gd";
+	const String uid_text = resource_uid->id_to_text(uid);
+	resource_uid->enable_reverse_cache();
+	{
+		ResourceUIDMappingCleanup uid_cleanup(resource_uid, uid);
+		resource_uid->add_id(uid, path);
+		REQUIRE_EQ(resource_uid->get_path_id(path), uid);
+
+		CHECK_EQ(ProjectSettings::stringify_autoload_value(path, false), path + "::" + uid_text);
+		CHECK_EQ(ProjectSettings::stringify_autoload_value(path, true), "*" + path + "::" + uid_text);
+	}
+	CHECK_FALSE(resource_uid->has_id(uid));
+	CHECK_EQ(resource_uid->get_path_id(path), ResourceUID::INVALID_ID);
+}
+
+TEST_CASE("[ProjectSettings][Autoload] Resolves delayed entries and preserves prepend order") {
+	ProjectSettings *settings = ProjectSettings::get_singleton();
+	const StringName normal_setting = "autoload/AutoloadPathUidNormal";
+	const StringName prepended_setting = "autoload_prepend/AutoloadPathUidPrepended";
+	ResourceUID *resource_uid = ResourceUID::get_singleton();
+	const ResourceUID::ID uid = resource_uid->create_id();
+	ResourceUIDMappingCleanup uid_cleanup(resource_uid, uid);
+	ProjectSettingsAutoloadCleanup autoload_cleanup(settings, { normal_setting, prepended_setting });
+	const String uid_text = resource_uid->id_to_text(uid);
+
+	CHECK_FALSE(resource_uid->has_id(uid));
+	settings->set_setting(normal_setting, "*" + uid_text);
+	settings->set_setting(prepended_setting, "*res://prepended.gd");
+
+	CHECK(settings->has_autoload("AutoloadPathUidNormal"));
+	CHECK(settings->has_autoload("AutoloadPathUidPrepended"));
+
+	resource_uid->add_id(uid, "res://normal.gd");
+
+	CHECK_EQ(settings->get_autoload("AutoloadPathUidNormal").path, "res://normal.gd");
+
+	int normal_position = -1;
+	int prepended_position = -1;
+	int position = 0;
+	for (const KeyValue<StringName, ProjectSettings::AutoloadInfo> &E : settings->get_autoload_list()) {
+		if (E.key == StringName("AutoloadPathUidNormal")) {
+			normal_position = position;
+		} else if (E.key == StringName("AutoloadPathUidPrepended")) {
+			prepended_position = position;
+		}
+		position++;
+	}
+
+	CHECK_NE(normal_position, -1);
+	CHECK_NE(prepended_position, -1);
+	CHECK_LT(prepended_position, normal_position);
+}
+
+TEST_CASE("[ProjectSettings][Autoload] Resolves retained UID values after mapping changes") {
+	ProjectSettings *settings = ProjectSettings::get_singleton();
+	const StringName setting = "autoload/AutoloadPathUidRetarget";
+	ResourceUID *resource_uid = ResourceUID::get_singleton();
+	const ResourceUID::ID uid = resource_uid->create_id();
+	REQUIRE_NE(uid, ResourceUID::INVALID_ID);
+	ResourceUIDMappingCleanup uid_cleanup(resource_uid, uid);
+	ProjectSettingsAutoloadCleanup autoload_cleanup(settings, { setting });
+	const String uid_text = resource_uid->id_to_text(uid);
+
+	resource_uid->add_id(uid, "res://uid_target_a.gd");
+	settings->set_setting(setting, "*" + uid_text);
+	CHECK_EQ(settings->get_autoload("AutoloadPathUidRetarget").path, "res://uid_target_a.gd");
+
+	resource_uid->set_id(uid, "res://uid_target_b.gd");
+	CHECK_EQ(settings->get_autoload("AutoloadPathUidRetarget").path, "res://uid_target_b.gd");
+}
+
+TEST_CASE("[ProjectSettings][Autoload] Returns independent snapshots") {
+	using AutoloadMap = HashMap<StringName, ProjectSettings::AutoloadInfo>;
+
+	ProjectSettings *settings = ProjectSettings::get_singleton();
+	static_assert(std::is_same_v<decltype(settings->get_autoload_list()), AutoloadMap>);
+
+	const StringName setting = "autoload/AutoloadPathUidSnapshot";
+	const StringName name = "AutoloadPathUidSnapshot";
+	ProjectSettingsAutoloadCleanup autoload_cleanup(settings, { setting });
+
+	settings->set_setting(setting, "res://snapshot_a.gd");
+	const AutoloadMap first_snapshot = settings->get_autoload_list();
+	REQUIRE(first_snapshot.has(name));
+	CHECK_EQ(first_snapshot[name].path, "res://snapshot_a.gd");
+
+	settings->set_setting(setting, "res://snapshot_b.gd");
+	const AutoloadMap second_snapshot = settings->get_autoload_list();
+	REQUIRE(second_snapshot.has(name));
+	CHECK_EQ(first_snapshot[name].path, "res://snapshot_a.gd");
+	CHECK_EQ(second_snapshot[name].path, "res://snapshot_b.gd");
+}
+
+TEST_CASE("[ProjectSettings][Autoload] Preserves sequential normal and prepend ordering") {
+	ProjectSettings *settings = ProjectSettings::get_singleton();
+	const StringName name_a = "AutoloadPathUidOrderA";
+	const StringName name_b = "AutoloadPathUidOrderB";
+	const StringName name_c = "AutoloadPathUidOrderC";
+	const StringName normal_a = "autoload/AutoloadPathUidOrderA";
+	const StringName normal_b = "autoload/AutoloadPathUidOrderB";
+	const StringName normal_c = "autoload/AutoloadPathUidOrderC";
+	const StringName prepend_a = "autoload_prepend/AutoloadPathUidOrderA";
+	const StringName prepend_b = "autoload_prepend/AutoloadPathUidOrderB";
+	const StringName prepend_c = "autoload_prepend/AutoloadPathUidOrderC";
+	ProjectSettingsAutoloadCleanup autoload_cleanup(settings, { normal_a, normal_b, normal_c, prepend_a, prepend_b, prepend_c });
+
+	auto get_test_order = [settings, name_a, name_b, name_c]() {
+		LocalVector<StringName> order;
+		for (const KeyValue<StringName, ProjectSettings::AutoloadInfo> &E : settings->get_autoload_list()) {
+			if (E.key == name_a || E.key == name_b || E.key == name_c) {
+				order.push_back(E.key);
+			}
+		}
+		return order;
+	};
+
+	settings->set_setting(normal_a, "res://a.gd");
+	settings->set_setting(normal_b, "res://b.gd");
+	settings->set_setting(prepend_b, "res://b_prepend.gd");
+	settings->set_setting(prepend_a, "res://a_prepend.gd");
+
+	LocalVector<StringName> order = get_test_order();
+	REQUIRE_EQ(order.size(), 2);
+	CHECK_EQ(order[0], name_a);
+	CHECK_EQ(order[1], name_b);
+
+	settings->set_setting(normal_a, "res://a_replaced.gd");
+	settings->set_setting(normal_b, "res://b_replaced.gd");
+	order = get_test_order();
+	REQUIRE_EQ(order.size(), 2);
+	CHECK_EQ(order[0], name_a);
+	CHECK_EQ(order[1], name_b);
+
+	settings->set_setting(normal_c, "res://c.gd");
+	settings->set_setting(prepend_c, "res://c_prepend.gd");
+	order = get_test_order();
+	REQUIRE_EQ(order.size(), 3);
+	CHECK_EQ(order[0], name_c);
+	CHECK_EQ(order[1], name_a);
+	CHECK_EQ(order[2], name_b);
+
+	settings->set_setting(normal_c, "res://c_replaced.gd");
+	order = get_test_order();
+	REQUIRE_EQ(order.size(), 3);
+	CHECK_EQ(order[0], name_c);
+	CHECK_EQ(order[1], name_a);
+	CHECK_EQ(order[2], name_b);
 }
 
 } // namespace TestProjectSettings

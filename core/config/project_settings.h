@@ -66,7 +66,6 @@ public:
 #endif // TOOLS_ENABLED
 
 	struct AutoloadInfo {
-		StringName name;
 		String path;
 		bool is_singleton = false;
 	};
@@ -109,7 +108,10 @@ protected:
 	HashMap<StringName, LocalVector<Pair<StringName, StringName>>> feature_overrides;
 
 	LocalVector<String> hidden_prefixes;
-	HashMap<StringName, AutoloadInfo> autoloads;
+
+	// UIDs can't be used until ProjectSettings is set up.
+	// Store raw values as canonical data and parse them on demand.
+	HashMap<StringName, String> raw_autoloads;
 	HashMap<StringName, String> global_groups;
 	HashMap<StringName, HashSet<StringName>> scene_groups_cache;
 
@@ -219,12 +221,13 @@ public:
 	PackedStringArray get_changed_settings() const;
 	bool check_changed_settings_in_group(const String &p_setting_prefix) const;
 
-	const HashMap<StringName, AutoloadInfo> &get_autoload_list() const;
-	void add_autoload(const AutoloadInfo &p_autoload, bool p_front_insert = false);
-	void remove_autoload(const StringName &p_autoload);
+	HashMap<StringName, AutoloadInfo> get_autoload_list() const;
 	bool has_autoload(const StringName &p_autoload) const;
 	AutoloadInfo get_autoload(const StringName &p_name) const;
-	void fix_autoload_paths();
+
+	// These two methods are public for the autoload editor.
+	static void parse_autoload_value(const String &p_value, String &r_path, bool &r_is_singleton);
+	static String stringify_autoload_value(const String &p_path, bool p_is_singleton);
 
 	const HashMap<StringName, String> &get_global_groups_list() const;
 	void add_global_group(const StringName &p_name, const String &p_description);
