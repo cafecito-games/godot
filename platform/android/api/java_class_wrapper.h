@@ -252,7 +252,7 @@ class JavaClassWrapper : public Object {
 	friend class JavaClass;
 	jmethodID Class_getConstructors;
 	jmethodID Class_getDeclaredMethods;
-	jmethodID Class_getFields;
+	jmethodID Class_getDeclaredFields;
 	jmethodID Class_getInterfaces;
 	jmethodID Class_getName;
 	jmethodID Class_getSuperclass;
