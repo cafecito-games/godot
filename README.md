@@ -1,76 +1,200 @@
-# Godot Engine
-
 <p align="center">
-  <a href="https://godotengine.org">
-    <img src="misc/logo/logo_outlined.svg" width="400" alt="Godot Engine logo">
-  </a>
+  <img src="misc/logo/logo_outlined.svg" width="320" alt="Godot Engine logo">
 </p>
 
-## 2D and 3D cross-platform game engine
+<h1 align="center">Godot Engine — Cafecito Games Fork</h1>
 
-**[Godot Engine](https://godotengine.org) is a feature-packed, cross-platform
-game engine to create 2D and 3D games from a unified interface.** It provides a
-comprehensive set of [common tools](https://godotengine.org/features), so that
-users can focus on making games without having to reinvent the wheel. Games can
-be exported with one click to a number of platforms, including the major desktop
-platforms (Linux, macOS, Windows), mobile platforms (Android, iOS), as well as
-Web-based platforms and [consoles](https://godotengine.org/consoles).
+<p align="center">
+  <strong>The build of <a href="https://godotengine.org">Godot</a> we ship our games with.</strong><br>
+  Based on <code>4.7.2-stable</code> · tracks upstream <code>godotengine/godot</code>
+</p>
 
-## Free, open source and community-driven
+---
 
-Godot is completely free and open source under the very permissive [MIT license](https://godotengine.org/license).
-No strings attached, no royalties, nothing. The users' games are theirs, down
-to the last line of engine code. Godot's development is fully independent and
-community-driven, empowering users to help shape their engine to match their
-expectations. It is supported by the [Godot Foundation](https://godot.foundation/)
-not-for-profit.
+## What this is
 
-Before being open sourced in [February 2014](https://github.com/godotengine/godot/commit/0b806ee0fc9097fa7bda7ac0109191c9c5e0a1ac),
-Godot had been developed by [Juan Linietsky](https://github.com/reduz) and
-[Ariel Manzur](https://github.com/punto-) for several years as an in-house
-engine, used to publish several work-for-hire titles.
+This is [Cafecito Games](https://github.com/cafecito-games)' fork of the Godot
+Engine. It is the engine we build and ship our own games with, so everything in
+it exists because we hit a real problem in a real project: a crash on a device,
+a deadlock during loading, a platform integration that upstream does not cover
+yet, or a build step we needed to automate.
 
-![Screenshot of a 3D scene in the Godot Engine editor](https://raw.githubusercontent.com/godotengine/godot-design/master/screenshots/editor_tps_demo_1920x1080.jpg)
+The fork is a thin layer on top of a stable upstream release. It is not a
+re-architecture, a rename, or a competing engine — it is Godot, plus a set of
+bug fixes, small enhancements, and a few extension points. We rebase onto new
+upstream releases and we upstream fixes where it makes sense.
 
-## Getting the engine
+**It is built primarily to serve our own use cases.** We make no promises of
+general-purpose support, and we will prioritize what our games need. That said,
+every change here is MIT-licensed just like upstream Godot, and if any of it is
+useful to you, you are very welcome to it.
 
-### Binary downloads
+## Should you use it?
 
-Official binaries for the Godot editor and the export templates can be found
-[on the Godot website](https://godotengine.org/download).
+| You are… | Recommendation |
+| --- | --- |
+| Starting a new Godot project | Use [official Godot](https://godotengine.org/download). |
+| Hitting one of the bugs fixed below | Grab this fork, or cherry-pick the commit — they are small and self-contained. |
+| Embedding Godot in an Apple app (LibGodot) | This fork may save you a lot of time. |
+| Shipping to iOS/Android and seeing platform crashes | Worth a look; most of our fixes are mobile-related. |
 
-### Compiling from source
+## Changes in this fork
 
-[See the official docs](https://docs.godotengine.org/en/latest/engine_details/development/compiling)
-for compilation instructions for every supported platform.
+Every fork commit is prefixed `cafecito(<topic>)`, so
+`git log --oneline --grep "^cafecito"` always gives you the exact delta against
+upstream.
 
-## Community and contributing
+### Apple platforms
 
-Godot is not only an engine but an ever-growing community of users and engine
-developers. The main community channels are listed [on the homepage](https://godotengine.org/community).
+- **LibGodot embedding ABI for Apple** — ports the SwiftGodotKit embedding
+  surface: native render surfaces, iOS app lifecycle integration, embedded
+  display servers, and headless display-server selection on macOS. This is what
+  lets us host Godot inside a native Swift app.
+- **iOS `UIScene` URL forwarding** — restores delivery of incoming URLs to
+  plugin services under the `UIScene` lifecycle.
+- **CoreHaptics lifecycle safety** — correct haptic player retention, transient
+  pulse selection, and stop-on-focus-loss/teardown, instead of leaking or
+  crashing players.
+- **Bundle-relative resource packs** — Apple embedded platforms resolve packs
+  against `mainBundle.resourcePath`, and relative `.pck`/`.zip` paths are
+  canonicalized at registration time.
 
-The best way to get in touch with the core engine developers is to join the
-[Godot Contributors Chat](https://chat.godotengine.org).
+### Android
 
-To get started contributing to the project, see the [contributing guide](CONTRIBUTING.md).
-This document also includes guidelines for reporting bugs.
+- **`JavaClassWrapper` field lookup** — uses `getDeclaredFields` instead of
+  `getFields`, which crashed on API 26 devices.
+- **Nullable Java arguments** — `null` can be passed to Java methods expecting
+  strings, boxed primitives, or arrays.
+- **Correct boolean returns** — Java `boolean`/`Boolean` returns arrive as
+  `Variant::BOOL` instead of `Variant::INT`.
 
-## Documentation and demos
+### Rendering
 
-The official documentation is hosted on [Read the Docs](https://docs.godotengine.org).
-It is maintained by the Godot community in its own [GitHub repository](https://github.com/godotengine/godot-docs).
+- **2D shadow atlas bounds** — atlas indices are clamped to the canvas
+  renderer's real capacity; lights beyond capacity render unshadowed rather
+  than corrupting the atlas.
+- **GLES3 canvas shadow sampling** — point-samples the 2D shadow atlas and
+  clamps its band axis instead of repeating it, removing shadow bleed on mobile
+  GL devices.
+- **Texture encoders everywhere** — Basis Universal, ASTC, ETC/S3TC, and BPTC
+  encoders are built and registered in *every* build target, not just the
+  editor, so runtime imports and tooling behave identically.
 
-The [class reference](https://docs.godotengine.org/en/latest/classes/)
-is also accessible from the Godot editor.
+### Stability and threading
 
-We also maintain official demos in their own [GitHub repository](https://github.com/godotengine/godot-demo-projects)
-as well as a list of [awesome Godot community resources](https://github.com/godotengine/awesome-godot).
+- **ResourceLoader ↔ GDScript deadlock** — releases `WorkerThreadPool`
+  unlock-allowance-zone mutexes across `ResourceLoader` waits and guards
+  in-flight `GDScriptCache` reloads. This was a hard hang during threaded
+  loading.
+- **`ClassDB` default-property cache** — initialization and access are
+  serialized, fixing a data race.
+- **Rotating file logger** — initialization and backup rotation no longer race
+  or crash on startup.
+- **Editor shutdown** — deferred GDExtension documentation generation no longer
+  crashes the editor on exit.
 
-There are also a number of other
-[learning resources](https://docs.godotengine.org/en/latest/community/tutorials.html)
-provided by the community, such as text and video tutorials, demos, etc.
-Consult the [community channels](https://godotengine.org/community)
-for more information.
+### Core and editor
 
-[![Code Triagers Badge](https://www.codetriage.com/godotengine/godot/badges/users.svg)](https://www.codetriage.com/godotengine/godot)
-[![Translate on Weblate](https://hosted.weblate.org/widgets/godot-engine/-/godot/svg-badge.svg)](https://hosted.weblate.org/engage/godot-engine/?utm_source=widget)
+- **`DirAccessUnix::change_dir`** — uses `stat`/`access`/`realpath` probing
+  instead of process-wide `chdir`, which was mutating global process state from
+  worker threads.
+- **Autoload UIDs** — fallback paths are stored alongside autoload UIDs and
+  resolved after UID setup, so renamed/moved autoloads keep resolving.
+- **Mobile text context menus** — touch long-press brings up copy/paste context
+  menus in text controls.
+- **Namespaced script classes** — namespaced global script classes are ranked
+  and labelled by their simple name in the Create Node dialog.
+
+### Build, packaging, and extension seams
+
+- **`cafecito-build` + Taskfile** — a small Python package and `task` front end
+  wrapping SCons, so editor, templates, and Apple LibGodot SDK slices build
+  with one command and a reproducible build identity.
+- **Relink Kits** — each build emits a portable `.relink.json` manifest (with
+  SDK and toolchain paths normalized to placeholders) that can be packaged into
+  a kit and re-linked elsewhere without rebuilding the whole engine.
+- **Multi-platform CI on free runners** — Android, iOS, Linux, macOS, Windows,
+  and Web builds plus a release workflow that publishes templates and Relink
+  Kits.
+- **Extension and security seams** — a small set of hook points
+  (`CafecitoExtensions`, `CafecitoSecurity`) that let a private static library
+  be linked into the engine to customize pack/encryption behavior. The default
+  implementation shipped here is a no-op that behaves exactly like upstream
+  Godot. Builds report their identity as `cafecito.<sha>[.<ext_id>]`.
+
+## Building
+
+Prerequisites are the same as upstream Godot — see the
+[official compiling docs](https://docs.godotengine.org/en/latest/engine_details/development/compiling).
+On top of those you need [`uv`](https://docs.astral.sh/uv/) and
+[`task`](https://taskfile.dev).
+
+```bash
+task                        # list all available tasks
+task info                   # host, Godot version, and build identity
+task build:editor           # editor for the current host
+task build:template-release # release export template
+task build:all              # editor + release + debug templates
+task clean                  # remove bin/ artifacts
+```
+
+Each of those emits a `bin/<binary>.relink.json` manifest alongside the binary.
+To turn one into a portable kit:
+
+```bash
+task package:relink-kit -- --manifest bin/<name>.relink.json
+```
+
+Apple LibGodot SDK slices (macOS dylibs + iOS static libraries):
+
+```bash
+task build:libgodot:release
+```
+
+Plain SCons still works exactly as it does upstream if you'd rather skip the
+wrapper.
+
+## Staying current with upstream
+
+```bash
+git remote add upstream https://github.com/godotengine/godot.git
+git fetch upstream
+git log --oneline --grep "^cafecito"   # the fork's delta
+```
+
+We rebase the fork onto new upstream stable releases rather than carrying long
+divergent branches, which keeps each change reviewable in isolation and easy to
+drop once upstream fixes it.
+
+## Contributing and bug reports
+
+**If your bug is not specific to this fork, please report it
+[upstream](https://github.com/godotengine/godot/issues)** — that helps everyone,
+including us.
+
+For issues with the changes listed above, the build tooling, or the Apple
+embedding layer, open an issue here. Pull requests are welcome; be aware that we
+weigh them against the needs of our own shipping projects, and we may ask you to
+take a change upstream instead.
+
+## About Godot
+
+Godot is a feature-packed, cross-platform 2D and 3D game engine, completely free
+and open source under the [MIT license](https://godotengine.org/license), with
+development funded and governed independently through the
+[Godot Foundation](https://godot.foundation/). Nothing in this fork changes that
+— the users' games are theirs, down to the last line of engine code.
+
+- [Official website](https://godotengine.org) and [downloads](https://godotengine.org/download)
+- [Documentation](https://docs.godotengine.org) and [class reference](https://docs.godotengine.org/en/latest/classes/)
+- [Community channels](https://godotengine.org/community)
+- [Demo projects](https://github.com/godotengine/godot-demo-projects) and [awesome-godot](https://github.com/godotengine/awesome-godot)
+
+Enormous thanks to [Juan Linietsky](https://github.com/reduz),
+[Ariel Manzur](https://github.com/punto-), and the many hundreds of
+[contributors](AUTHORS.md) whose work this fork is built on.
+
+## License
+
+MIT, same as upstream Godot. See [LICENSE.txt](LICENSE.txt) and
+[COPYRIGHT.txt](COPYRIGHT.txt).
