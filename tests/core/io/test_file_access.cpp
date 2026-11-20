@@ -32,8 +32,14 @@
 
 TEST_FORCE_LINK(test_file_access)
 
+#include "core/config/project_settings.h"
 #include "core/io/dir_access.h"
 #include "core/io/file_access.h"
+#include "core/os/os.h"
+#ifdef THREADS_ENABLED
+#include "core/os/thread.h"
+#include "core/templates/safe_refcount.h"
+#endif
 #include "tests/test_utils.h"
 
 namespace TestFileAccess {
@@ -296,5 +302,254 @@ TEST_CASE("[FileAccess] Cursor positioning") {
 		CHECK(f->get_position() == 5);
 	}
 }
+
+namespace {
+
+void _remove_directory_tree_if_exists(const String &p_directory_path) {
+	if (p_directory_path.is_empty() || !DirAccess::dir_exists_absolute(p_directory_path)) {
+		return;
+	}
+
+	Ref<DirAccess> filesystem_access = DirAccess::create(DirAccess::ACCESS_FILESYSTEM);
+	if (filesystem_access.is_valid() && filesystem_access->is_link(p_directory_path)) {
+		filesystem_access->remove(p_directory_path);
+		return;
+	}
+
+	Ref<DirAccess> directory_access = DirAccess::open(p_directory_path);
+	if (directory_access.is_valid()) {
+		directory_access->erase_contents_recursive();
+	}
+	DirAccess::remove_absolute(p_directory_path);
+}
+
+struct ScopedUserDataTestSetup {
+	String previous_working_directory;
+	String previous_resource_path;
+	Variant previous_application_name;
+	bool had_application_name = false;
+	Variant previous_use_custom_user_directory;
+	bool had_use_custom_user_directory = false;
+	String user_data_directory;
+	String sibling_directory;
+	Vector<String> extra_cleanup_paths;
+
+	ScopedUserDataTestSetup(const String &p_application_name) {
+		previous_working_directory = OS::get_singleton()->get_cwd();
+		previous_resource_path = TestProjectSettingsInternalsAccessor::resource_path();
+
+		ProjectSettings *project_settings = ProjectSettings::get_singleton();
+		had_application_name = project_settings->has_setting("application/config/name");
+		if (had_application_name) {
+			previous_application_name = project_settings->get_setting("application/config/name");
+		}
+		had_use_custom_user_directory = project_settings->has_setting("application/config/use_custom_user_dir");
+		if (had_use_custom_user_directory) {
+			previous_use_custom_user_directory = project_settings->get_setting("application/config/use_custom_user_dir");
+		}
+
+		project_settings->set_setting("application/config/use_custom_user_dir", false);
+		project_settings->set_setting("application/config/name", p_application_name);
+
+		user_data_directory = OS::get_singleton()->get_user_data_dir();
+		sibling_directory = user_data_directory + "_sibling";
+	}
+
+	~ScopedUserDataTestSetup() {
+		if (!previous_working_directory.is_empty()) {
+			OS::get_singleton()->set_cwd(previous_working_directory);
+		}
+		TestProjectSettingsInternalsAccessor::resource_path() = previous_resource_path;
+
+		ProjectSettings *project_settings = ProjectSettings::get_singleton();
+		if (had_application_name) {
+			project_settings->set_setting("application/config/name", previous_application_name);
+		} else {
+			project_settings->set_setting("application/config/name", Variant());
+		}
+		if (had_use_custom_user_directory) {
+			project_settings->set_setting("application/config/use_custom_user_dir", previous_use_custom_user_directory);
+		} else {
+			project_settings->set_setting("application/config/use_custom_user_dir", Variant());
+		}
+
+		for (int index = extra_cleanup_paths.size() - 1; index >= 0; index--) {
+			_remove_directory_tree_if_exists(extra_cleanup_paths[index]);
+		}
+		_remove_directory_tree_if_exists(sibling_directory);
+		_remove_directory_tree_if_exists(user_data_directory);
+	}
+};
+
+#if defined(THREADS_ENABLED)
+struct WorkingDirectoryStressSharedState {
+	static constexpr uint32_t ITERATION_COUNT = 2500;
+	String relative_probe_path;
+	String expected_text;
+	SafeFlag navigator_ready{ false };
+	SafeFlag reader_ready{ false };
+	SafeFlag start_signal{ false };
+	SafeNumeric<uint32_t> failed_open_count{ 0 };
+	SafeNumeric<uint32_t> payload_mismatch_count{ 0 };
+	SafeNumeric<uint32_t> completed_reads{ 0 };
+
+	static void navigate_user_directories(void *p_userdata) {
+		WorkingDirectoryStressSharedState *state = static_cast<WorkingDirectoryStressSharedState *>(p_userdata);
+		state->navigator_ready.set();
+		while (!state->start_signal.is_set()) {
+			Thread::yield();
+		}
+
+		for (uint32_t iteration_index = 0; iteration_index < ITERATION_COUNT; iteration_index++) {
+			Ref<DirAccess> user_directory = DirAccess::open("user://");
+			if (user_directory.is_valid()) {
+				user_directory->change_dir("branch_alpha");
+				user_directory->change_dir("..");
+				user_directory->change_dir("branch_beta");
+				user_directory->change_dir("../..");
+			}
+			DirAccess::dir_exists_absolute("user://branch_alpha");
+		}
+	}
+
+	static void read_relative_file(void *p_userdata) {
+		WorkingDirectoryStressSharedState *state = static_cast<WorkingDirectoryStressSharedState *>(p_userdata);
+		state->reader_ready.set();
+		while (!state->start_signal.is_set()) {
+			Thread::yield();
+		}
+
+		for (uint32_t iteration_index = 0; iteration_index < ITERATION_COUNT; iteration_index++) {
+			Error open_error = FAILED;
+			Ref<FileAccess> probe_reader = FileAccess::open(state->relative_probe_path, FileAccess::READ, &open_error);
+			if (open_error != OK || probe_reader.is_null()) {
+				state->failed_open_count.increment();
+				continue;
+			}
+			if (probe_reader->get_as_utf8_string() != state->expected_text) {
+				state->payload_mismatch_count.increment();
+			}
+			state->completed_reads.increment();
+		}
+	}
+};
+#endif // THREADS_ENABLED
+
+} // namespace
+
+TEST_CASE("[FileAccess] DirAccess::change_dir preserves CWD and clamps at root") {
+	ScopedUserDataTestSetup setup("godot_dir_access_cwd_clamp_test");
+
+	const String initial_working_directory = OS::get_singleton()->get_cwd();
+	REQUIRE(!initial_working_directory.is_empty());
+
+	REQUIRE(DirAccess::make_dir_recursive_absolute(setup.user_data_directory.path_join("nested")) == OK);
+	REQUIRE(DirAccess::make_dir_recursive_absolute(setup.sibling_directory) == OK);
+	CHECK(OS::get_singleton()->get_cwd() == initial_working_directory);
+
+	Error open_error = FAILED;
+	Ref<DirAccess> user_directory = DirAccess::open("user://", &open_error);
+	REQUIRE(open_error == OK);
+	REQUIRE(user_directory.is_valid());
+	CHECK(user_directory->get_current_dir() == "user://");
+	CHECK(OS::get_singleton()->get_cwd() == initial_working_directory);
+
+	CHECK(DirAccess::dir_exists_absolute("user://nested"));
+	CHECK_FALSE(DirAccess::dir_exists_absolute("user://missing_directory"));
+	CHECK(OS::get_singleton()->get_cwd() == initial_working_directory);
+
+	CHECK(user_directory->change_dir("nested") == OK);
+	CHECK(user_directory->get_current_dir() == "user://nested");
+	CHECK(OS::get_singleton()->get_cwd() == initial_working_directory);
+
+	CHECK(user_directory->change_dir("missing_directory") == ERR_INVALID_PARAMETER);
+	CHECK(user_directory->get_current_dir() == "user://nested");
+	CHECK(OS::get_singleton()->get_cwd() == initial_working_directory);
+
+	CHECK(user_directory->change_dir("..") == OK);
+	CHECK(user_directory->get_current_dir() == "user://");
+	CHECK(OS::get_singleton()->get_cwd() == initial_working_directory);
+
+	CHECK(user_directory->change_dir("..") == OK);
+	CHECK(user_directory->get_current_dir() == "user://");
+	CHECK(OS::get_singleton()->get_cwd() == initial_working_directory);
+
+	const String sibling_escape = String("../") + setup.sibling_directory.get_file();
+	CHECK(user_directory->change_dir(sibling_escape) == OK);
+	CHECK(user_directory->get_current_dir() == "user://");
+	CHECK(OS::get_singleton()->get_cwd() == initial_working_directory);
+
+#if defined(UNIX_ENABLED)
+	const String real_resource_directory = TestUtils::get_temp_path("dir_access_real_resource_root");
+	const String symlink_resource_directory = TestUtils::get_temp_path("dir_access_symlink_resource_root");
+	setup.extra_cleanup_paths.push_back(real_resource_directory);
+	setup.extra_cleanup_paths.push_back(symlink_resource_directory);
+
+	_remove_directory_tree_if_exists(symlink_resource_directory);
+	_remove_directory_tree_if_exists(real_resource_directory);
+
+	REQUIRE(DirAccess::make_dir_recursive_absolute(real_resource_directory.path_join("subdir")) == OK);
+	Ref<DirAccess> filesystem_access = DirAccess::create(DirAccess::ACCESS_FILESYSTEM);
+	REQUIRE(filesystem_access.is_valid());
+	if (filesystem_access->create_link(real_resource_directory, symlink_resource_directory) == OK) {
+		TestProjectSettingsInternalsAccessor::resource_path() = symlink_resource_directory;
+
+		Ref<DirAccess> resource_directory = DirAccess::open("res://", &open_error);
+		REQUIRE(open_error == OK);
+		REQUIRE(resource_directory.is_valid());
+		CHECK(resource_directory->get_current_dir() == "res://");
+
+		CHECK(resource_directory->change_dir(real_resource_directory.path_join("subdir")) == OK);
+		CHECK(resource_directory->get_current_dir() == "res://subdir");
+		CHECK(OS::get_singleton()->get_cwd() == initial_working_directory);
+	}
+#endif // UNIX_ENABLED
+}
+
+#if defined(THREADS_ENABLED)
+TEST_CASE("[FileAccess] Concurrent DirAccess::open(user://) preserves relative FileAccess::open") {
+	ScopedUserDataTestSetup setup("godot_dir_access_cwd_thread_stress_test");
+
+	const String working_directory = TestUtils::get_temp_path("dir_access_cwd_race_working_dir");
+	setup.extra_cleanup_paths.push_back(working_directory);
+	_remove_directory_tree_if_exists(working_directory);
+	REQUIRE(DirAccess::make_dir_recursive_absolute(working_directory) == OK);
+
+	REQUIRE(DirAccess::make_dir_recursive_absolute(setup.user_data_directory.path_join("branch_alpha")) == OK);
+	REQUIRE(DirAccess::make_dir_recursive_absolute(setup.user_data_directory.path_join("branch_beta")) == OK);
+
+	const String probe_file_name = "relative_cwd_probe.txt";
+	const String expected_payload = "cwd-thread-safety-payload";
+	{
+		Ref<FileAccess> probe_writer = FileAccess::open(working_directory.path_join(probe_file_name), FileAccess::WRITE);
+		REQUIRE(probe_writer.is_valid());
+		probe_writer->store_string(expected_payload);
+		probe_writer->close();
+	}
+
+	REQUIRE(OS::get_singleton()->set_cwd(working_directory) == OK);
+
+	WorkingDirectoryStressSharedState shared_state;
+	shared_state.relative_probe_path = String("./") + probe_file_name;
+	shared_state.expected_text = expected_payload;
+
+	Thread navigator_thread;
+	Thread reader_thread;
+	navigator_thread.start(&WorkingDirectoryStressSharedState::navigate_user_directories, &shared_state);
+	reader_thread.start(&WorkingDirectoryStressSharedState::read_relative_file, &shared_state);
+
+	while (!shared_state.navigator_ready.is_set() || !shared_state.reader_ready.is_set()) {
+		Thread::yield();
+	}
+	shared_state.start_signal.set();
+
+	navigator_thread.wait_to_finish();
+	reader_thread.wait_to_finish();
+
+	CHECK(shared_state.failed_open_count.get() == 0);
+	CHECK(shared_state.payload_mismatch_count.get() == 0);
+	CHECK(shared_state.completed_reads.get() == WorkingDirectoryStressSharedState::ITERATION_COUNT);
+}
+#endif // THREADS_ENABLED
 
 } // namespace TestFileAccess

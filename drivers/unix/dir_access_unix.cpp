@@ -340,48 +340,71 @@ Error DirAccessUnix::make_dir(String p_dir) {
 	return ERR_CANT_CREATE;
 }
 
+static bool _is_within_base(const String &p_candidate_path, const String &p_root_path) {
+	if (p_root_path == "/") {
+		return p_candidate_path.begins_with("/");
+	}
+	return p_candidate_path == p_root_path || p_candidate_path.begins_with(p_root_path + "/");
+}
+
+static bool _resolve_real_path(const String &p_path, String &r_resolved_path) {
+	char *resolved_buffer = ::realpath(p_path.utf8().get_data(), nullptr);
+	if (!resolved_buffer) {
+		return false;
+	}
+
+	String parsed_path;
+	if (parsed_path.append_utf8(resolved_buffer) != OK) {
+		parsed_path = resolved_buffer;
+	}
+	::free(resolved_buffer);
+
+	r_resolved_path = parsed_path.simplify_path();
+	return true;
+}
+
 Error DirAccessUnix::change_dir(String p_dir) {
 	GLOBAL_LOCK_FUNCTION
 
 	p_dir = fix_path(p_dir);
 
-	// prev_dir is the directory we are changing out of
-	String prev_dir;
-	char real_current_dir_name[2048];
-	ERR_FAIL_NULL_V(getcwd(real_current_dir_name, 2048), ERR_BUG);
-	if (prev_dir.append_utf8(real_current_dir_name) != OK) {
-		prev_dir = real_current_dir_name; //no utf8, maybe latin?
-	}
-
-	// try_dir is the directory we are trying to change into
-	String try_dir = "";
+	String target_directory;
 	if (p_dir.is_relative_path()) {
-		String next_dir = current_dir.path_join(p_dir);
-		next_dir = next_dir.simplify_path();
-		try_dir = next_dir;
+		target_directory = current_dir.path_join(p_dir).simplify_path();
 	} else {
-		try_dir = p_dir;
+		target_directory = p_dir;
 	}
 
-	bool worked = (chdir(try_dir.utf8().get_data()) == 0); // we can only give this utf8
-	if (!worked) {
+	CharString target_directory_utf8 = target_directory.utf8();
+	struct stat directory_stat = {};
+	if (stat(target_directory_utf8.get_data(), &directory_stat) != 0 || !S_ISDIR(directory_stat.st_mode) || access(target_directory_utf8.get_data(), X_OK) != 0) {
 		return ERR_INVALID_PARAMETER;
 	}
 
-	String base = _get_root_path();
-	if (!base.is_empty() && !try_dir.begins_with(base)) {
-		ERR_FAIL_NULL_V(getcwd(real_current_dir_name, 2048), ERR_BUG);
-		String new_dir;
-		new_dir.append_utf8(real_current_dir_name);
-
-		if (!new_dir.begins_with(base)) {
-			try_dir = current_dir; //revert
+	String base_directory = _get_root_path();
+	if (!base_directory.is_empty()) {
+		String normalized_base = base_directory.simplify_path();
+		if (!_is_within_base(target_directory, normalized_base)) {
+			String resolved_target_directory;
+			String resolved_base;
+			if (_resolve_real_path(target_directory, resolved_target_directory) &&
+					_resolve_real_path(normalized_base, resolved_base) &&
+					_is_within_base(resolved_target_directory, resolved_base)) {
+				String relative_suffix = resolved_base == "/" ? resolved_target_directory : resolved_target_directory.substr(resolved_base.length());
+				if (relative_suffix.is_empty() || relative_suffix == "/") {
+					target_directory = normalized_base;
+				} else if (normalized_base == "/") {
+					target_directory = relative_suffix;
+				} else {
+					target_directory = normalized_base + relative_suffix;
+				}
+			} else {
+				target_directory = current_dir; // revert
+			}
 		}
 	}
 
-	// the directory exists, so set current_dir to try_dir
-	current_dir = try_dir;
-	ERR_FAIL_COND_V(chdir(prev_dir.utf8().get_data()) != 0, ERR_BUG);
+	current_dir = target_directory;
 	return OK;
 }
 
