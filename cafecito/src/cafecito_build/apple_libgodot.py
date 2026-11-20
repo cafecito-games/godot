@@ -1,10 +1,13 @@
-"""Apple LibGodot SDK slice builder for SwiftGodotKit with Relink Kit support."""
+"""Apple LibGodot SDK slice builder and packager for SwiftGodotKit with Relink Kit support."""
 
 from __future__ import annotations
 
+import json
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from cafecito_build.identity import resolve_build_identity
 from cafecito_build.scons import BuildRequest, run_scons_build
 
 SHARED_APPLE_LIBGODOT_FLAGS: tuple[str, ...] = (
@@ -64,6 +67,11 @@ APPLE_LIBGODOT_SLICES: dict[str, tuple[str, tuple[AppleLibGodotSlice, ...]]] = {
     ),
 }
 
+SDK_HEADERS: dict[str, str] = {
+    "include/gdextension_interface.h": "core/extension/gdextension_interface.h",
+    "include/libgodot.h": "core/extension/libgodot.h",
+}
+
 
 def build_apple_libgodot_slices(
     repository_root: Path,
@@ -93,3 +101,44 @@ def build_apple_libgodot_slices(
         )
         built_outputs.append(repository_root / "bin" / slice_spec.output_filename)
     return built_outputs
+
+
+def package_apple_libgodot_sdk(
+    repository_root: Path,
+    configuration: str,
+    output_zip: Path,
+) -> Path:
+    """Package built Apple LibGodot slices and C headers into apple-libgodot-<config>.zip."""
+    if configuration not in APPLE_LIBGODOT_SLICES:
+        raise ValueError(f"Unsupported Apple LibGodot configuration: {configuration!r}")
+
+    _target, slices = APPLE_LIBGODOT_SLICES[configuration]
+    identity = resolve_build_identity(repository_root)
+    bin_directory = repository_root / "bin"
+
+    output_zip.parent.mkdir(parents=True, exist_ok=True)
+    if output_zip.exists():
+        output_zip.unlink()
+
+    manifest = {
+        "configuration": configuration,
+        "godot_version": identity.template_version,
+        "build_name": identity.build_name,
+        "slices": [slice_spec.output_filename for slice_spec in slices],
+    }
+
+    with zipfile.ZipFile(output_zip, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for slice_spec in slices:
+            binary_path = bin_directory / slice_spec.output_filename
+            if not binary_path.is_file():
+                raise FileNotFoundError(f"Apple LibGodot slice missing: {binary_path}")
+            archive.write(binary_path, arcname=f"bin/{slice_spec.output_filename}")
+
+        for archive_path, relative_source in SDK_HEADERS.items():
+            source_file = repository_root / relative_source
+            if source_file.is_file():
+                archive.write(source_file, arcname=archive_path)
+
+        archive.writestr("manifest.json", json.dumps(manifest, indent=2) + "\n")
+
+    return output_zip
