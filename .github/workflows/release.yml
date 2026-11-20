@@ -207,6 +207,7 @@ jobs:
           restore-keys: |
             apple-libgodot-sdk-${{ steps.xcode.outputs.ios_sdk_version }}-
             ios-sdk-${{ steps.xcode.outputs.ios_sdk_version }}-
+            macos-arm64-
 
       - name: Build and package Apple LibGodot SDK + Relink Kits
         run: |
@@ -215,6 +216,7 @@ jobs:
           uv run --project cafecito cafecito-build package-apple-libgodot \
             --configuration release \
             --output release-out/apple-libgodot-release.zip
+          unzip -l release-out/apple-libgodot-release.zip
           for manifest in bin/libgodot.*.relink.json; do
             uv run --project cafecito cafecito-build package-relink-kit --manifest "$manifest" --output-dir release-out
           done

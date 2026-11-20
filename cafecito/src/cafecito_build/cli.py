@@ -133,10 +133,18 @@ def _command_build_apple_libgodot(arguments: argparse.Namespace) -> int:
 
 def _command_package_apple_libgodot(arguments: argparse.Namespace) -> int:
     repository_root = Path(arguments.repo_root).resolve()
+    output_path = (
+        Path(arguments.output).resolve()
+        if arguments.output
+        else (repository_root / "bin" / f"apple-libgodot-{arguments.configuration}.zip")
+    )
     output = package_apple_libgodot_sdk(
         repository_root,
         arguments.configuration,
-        Path(arguments.output).resolve(),
+        output_path,
+        editor_binary=Path(arguments.editor_binary).resolve() if arguments.editor_binary else None,
+        extension_api_path=Path(arguments.extension_api).resolve() if arguments.extension_api else None,
+        jobs=arguments.jobs,
     )
     print(f"[cafecito-build] Packaged Apple LibGodot SDK: {output}")
     return 0
@@ -171,7 +179,9 @@ def build_argument_parser() -> argparse.ArgumentParser:
     info_parser.set_defaults(handler=_command_info)
 
     build_parser = subparsers.add_parser("build", help="Compile Godot via SCons")
-    build_parser.add_argument("--platform", default=None, help="Godot platform (macos, linuxbsd, windows, ios, android)")
+    build_parser.add_argument(
+        "--platform", default=None, help="Godot platform (macos, linuxbsd, windows, ios, android)"
+    )
     build_parser.add_argument("--target", default="editor", choices=("editor", "template_release", "template_debug"))
     build_parser.add_argument("--arch", default=None, help="Target architecture (arm64, x86_64, universal)")
     build_parser.add_argument(
@@ -231,7 +241,28 @@ def build_argument_parser() -> argparse.ArgumentParser:
         help="Package Apple LibGodot SDK archive",
     )
     apple_pkg_parser.add_argument("--configuration", default="release", choices=("release", "debug"))
-    apple_pkg_parser.add_argument("--output", default="bin/apple-libgodot-release.zip")
+    apple_pkg_parser.add_argument(
+        "--output",
+        default=None,
+        help="Output zip path (default: bin/apple-libgodot-<configuration>.zip)",
+    )
+    apple_pkg_parser.add_argument(
+        "--editor-binary",
+        default=None,
+        help="Optional path to a macOS editor binary used to dump extension_api.json",
+    )
+    apple_pkg_parser.add_argument(
+        "--extension-api",
+        default=None,
+        help="Optional path to a pre-dumped extension_api.json",
+    )
+    apple_pkg_parser.add_argument(
+        "-j",
+        "--jobs",
+        type=int,
+        default=None,
+        help="Parallel compile jobs when building the macOS editor for extension_api.json",
+    )
     apple_pkg_parser.set_defaults(handler=_command_package_apple_libgodot)
 
     checksums_parser = subparsers.add_parser("checksums", help="Write SHA256SUMS.txt for a release directory")
@@ -254,7 +285,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_argument_parser()
     arguments = parser.parse_args(argv)
-    return arguments.handler(arguments)
+    return int(arguments.handler(arguments))
 
 
 if __name__ == "__main__":

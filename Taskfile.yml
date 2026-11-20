@@ -43,6 +43,16 @@ tasks:
     cmds:
       - uv run --project cafecito cafecito-build build-apple-libgodot --configuration debug {{.CLI_ARGS}}
 
+  package:libgodot:release:
+    desc: Package release Apple LibGodot SDK archive (apple-libgodot-release.zip)
+    cmds:
+      - uv run --project cafecito cafecito-build package-apple-libgodot --configuration release {{.CLI_ARGS}}
+
+  package:libgodot:debug:
+    desc: Package debug Apple LibGodot SDK archive (apple-libgodot-debug.zip)
+    cmds:
+      - uv run --project cafecito cafecito-build package-apple-libgodot --configuration debug {{.CLI_ARGS}}
+
   package:relink-kit:
     desc: 'Package a Relink Kit from a .relink.json manifest (usage: task package:relink-kit -- --manifest bin/<name>.relink.json)'
     cmds:
