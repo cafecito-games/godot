@@ -90,6 +90,7 @@ public:
 	static const String &get_path_field(const GDScript *p_script) { return p_script->path; }
 	static bool get_path_valid(const GDScript *p_script) { return p_script->path_valid; }
 	static GDScriptFunction *get_initializer(const GDScript *p_script) { return p_script->initializer; }
+	static GDScriptFunction *get_static_initializer(const GDScript *p_script) { return p_script->static_initializer; }
 
 #ifdef DEBUG_ENABLED
 	static const Vector<String> &get_operator_names(const GDScriptFunction *p_function) { return p_function->operator_names; }
@@ -1602,6 +1603,265 @@ class Derived extends Base:
 			derived_members[StringName("a")].property_info.type = orig_prop_type;
 
 			REQUIRE(GDScriptBytecodeVerifier::verify_class(derived.ptr()) == OK);
+		}
+
+		// 10. OPCODE_SET_STATIC_VARIABLE / OPCODE_GET_STATIC_VARIABLE target & bounds checks.
+		{
+			Ref<GDScript> static_script = compile_source(R"(
+extends RefCounted
+class Other:
+	static var other_val: int = 10
+static var own_val: int = 5
+static func read_both() -> int:
+	return own_val + Other.other_val
+)",
+					"res://static_var_verify.gd");
+			const Vector<uint8_t> static_bytes = export_script_bytes(static_script);
+			Ref<GDScript> static_loaded = load_script_bytes(static_bytes, "res://static_var_verify.gd");
+			GDScriptFunction *static_init = GDScriptBytecodeTestAccessor::get_static_initializer(static_loaded.ptr());
+			REQUIRE(static_init != nullptr);
+			REQUIRE(GDScriptBytecodeVerifier::verify_function(static_init, static_loaded.ptr()) == OK);
+
+			Vector<int> &init_code = GDScriptBytecodeTestAccessor::mutable_code(static_init);
+			int own_set_ip = -1;
+			for (int ip = 0; ip < init_code.size();) {
+				const int raw_op = init_code[ip];
+				if (raw_op == GDScriptFunction::OPCODE_SET_STATIC_VARIABLE && init_code[ip + 2] == GDScriptFunction::ADDR_CLASS) {
+					own_set_ip = ip;
+					break;
+				}
+				const auto &layout = GDScriptFunction::get_opcode_layout(static_cast<GDScriptFunction::Opcode>(raw_op));
+				ip += layout.is_vararg ? (2 + init_code[ip + 1] + layout.word_count) : layout.word_count;
+			}
+			REQUIRE(own_set_ip >= 0);
+
+			// Out-of-bounds static index on ADDR_CLASS rejected.
+			if (own_set_ip >= 0) {
+				init_code.write[own_set_ip + 3] = 1;
+				CHECK(GDScriptBytecodeVerifier::verify_function(static_init, static_loaded.ptr()) != OK);
+				init_code.write[own_set_ip + 3] = 0;
+				REQUIRE(GDScriptBytecodeVerifier::verify_function(static_init, static_loaded.ptr()) == OK);
+			}
+
+			GDScriptFunction *read_both = static_loaded->get_member_functions()[StringName("read_both")];
+			REQUIRE(read_both != nullptr);
+			REQUIRE(GDScriptBytecodeVerifier::verify_function(read_both, static_loaded.ptr()) == OK);
+
+			Vector<int> &code = GDScriptBytecodeTestAccessor::mutable_code(read_both);
+			int other_get_ip = -1;
+			for (int ip = 0; ip < code.size();) {
+				const int raw_op = code[ip];
+				if (raw_op == GDScriptFunction::OPCODE_GET_STATIC_VARIABLE) {
+					other_get_ip = ip;
+					break;
+				}
+				const auto &layout = GDScriptFunction::get_opcode_layout(static_cast<GDScriptFunction::Opcode>(raw_op));
+				ip += layout.is_vararg ? (2 + code[ip + 1] + layout.word_count) : layout.word_count;
+			}
+			REQUIRE(other_get_ip >= 0);
+
+			if (other_get_ip >= 0) {
+				// Out-of-bounds static index on constant GDScript rejected.
+				code.write[other_get_ip + 3] = 1;
+				CHECK(GDScriptBytecodeVerifier::verify_function(read_both, static_loaded.ptr()) != OK);
+				code.write[other_get_ip + 3] = 0;
+
+				// Non-GDScript target address (ADDR_NIL) rejected.
+				const int orig_class_addr = code[other_get_ip + 2];
+				code.write[other_get_ip + 2] = GDScriptFunction::ADDR_NIL;
+				CHECK(GDScriptBytecodeVerifier::verify_function(read_both, static_loaded.ptr()) != OK);
+				code.write[other_get_ip + 2] = orig_class_addr;
+
+				REQUIRE(GDScriptBytecodeVerifier::verify_function(read_both, static_loaded.ptr()) == OK);
+			}
+		}
+
+		// 11. Instance-only opcodes and ADDR_TYPE_MEMBER rejected in static functions and non-self lambdas.
+		{
+			Ref<GDScript> instanceless_script = compile_source(R"(
+extends RefCounted
+var inst_member: int = 1
+static func static_fn(x: int) -> int:
+	var lam = func(y: int) -> int:
+		return y + 1
+	return lam.call(x)
+)",
+					"res://instanceless_verify.gd");
+			const Vector<uint8_t> instanceless_bytes = export_script_bytes(instanceless_script);
+			Ref<GDScript> instanceless_loaded = load_script_bytes(instanceless_bytes, "res://instanceless_verify.gd");
+			GDScriptFunction *static_fn = instanceless_loaded->get_member_functions()[StringName("static_fn")];
+			REQUIRE(static_fn != nullptr);
+			REQUIRE(GDScriptBytecodeVerifier::verify_function(static_fn, instanceless_loaded.ptr()) == OK);
+
+			// Inject ADDR_TYPE_MEMBER into static_fn -> rejected.
+			{
+				Vector<int> &code = GDScriptBytecodeTestAccessor::mutable_code(static_fn);
+				Vector<int> saved_code = code;
+				Vector<int> bad_code;
+				bad_code.push_back(GDScriptFunction::OPCODE_ASSIGN_NULL);
+				bad_code.push_back(0 | (GDScriptFunction::ADDR_TYPE_MEMBER << GDScriptFunction::ADDR_BITS));
+				bad_code.push_back(GDScriptFunction::OPCODE_END);
+				code = bad_code;
+				GDScriptBytecodeTestAccessor::mutable_code_size(static_fn) = code.size();
+				GDScriptBytecodeTestAccessor::mutable_code_ptr(static_fn) = code.ptrw();
+				CHECK(GDScriptBytecodeVerifier::verify_function(static_fn, instanceless_loaded.ptr()) != OK);
+
+				// Inject OPCODE_GET_MEMBER into static_fn -> rejected.
+				Vector<int> bad_member_op;
+				bad_member_op.push_back(GDScriptFunction::OPCODE_GET_MEMBER);
+				bad_member_op.push_back(GDScriptFunction::ADDR_NIL);
+				bad_member_op.push_back(0);
+				bad_member_op.push_back(GDScriptFunction::OPCODE_END);
+				code = bad_member_op;
+				GDScriptBytecodeTestAccessor::mutable_code_size(static_fn) = code.size();
+				GDScriptBytecodeTestAccessor::mutable_code_ptr(static_fn) = code.ptrw();
+				CHECK(GDScriptBytecodeVerifier::verify_function(static_fn, instanceless_loaded.ptr()) != OK);
+
+				code = saved_code;
+				GDScriptBytecodeTestAccessor::mutable_code_size(static_fn) = code.size();
+				GDScriptBytecodeTestAccessor::mutable_code_ptr(static_fn) = code.ptrw();
+			}
+
+			// Inject ADDR_TYPE_MEMBER into non-self lambda -> rejected.
+			{
+				const Vector<GDScriptFunction *> &lambdas = GDScriptBytecodeTestAccessor::mutable_lambdas(static_fn);
+				REQUIRE(lambdas.size() == 1);
+				GDScriptFunction *non_self_lambda = lambdas[0];
+				Vector<int> &lambda_code = GDScriptBytecodeTestAccessor::mutable_code(non_self_lambda);
+				Vector<int> saved_lambda_code = lambda_code;
+				Vector<int> bad_lambda_code;
+				bad_lambda_code.push_back(GDScriptFunction::OPCODE_ASSIGN_NULL);
+				bad_lambda_code.push_back(0 | (GDScriptFunction::ADDR_TYPE_MEMBER << GDScriptFunction::ADDR_BITS));
+				bad_lambda_code.push_back(GDScriptFunction::OPCODE_END);
+				lambda_code = bad_lambda_code;
+				GDScriptBytecodeTestAccessor::mutable_code_size(non_self_lambda) = lambda_code.size();
+				GDScriptBytecodeTestAccessor::mutable_code_ptr(non_self_lambda) = lambda_code.ptrw();
+				CHECK(GDScriptBytecodeVerifier::verify_function(static_fn, instanceless_loaded.ptr()) != OK);
+
+				lambda_code = saved_lambda_code;
+				GDScriptBytecodeTestAccessor::mutable_code_size(non_self_lambda) = lambda_code.size();
+				GDScriptBytecodeTestAccessor::mutable_code_ptr(non_self_lambda) = lambda_code.ptrw();
+			}
+		}
+
+		// 12. *_NATIVE and *_SCRIPT opcodes reject non-GDScriptNativeClass / non-Script type operands.
+		{
+			Ref<GDScript> cast_script = compile_source(R"(
+extends RefCounted
+class CustomType:
+	pass
+func cast_both(value) -> Array:
+	var as_native = value as RefCounted
+	var as_script = value as CustomType
+	var is_script: bool = value is CustomType
+	return [as_native, as_script, is_script]
+)",
+					"res://cast_verify.gd");
+			const Vector<uint8_t> cast_bytes = export_script_bytes(cast_script);
+			Ref<GDScript> cast_loaded = load_script_bytes(cast_bytes, "res://cast_verify.gd");
+			GDScriptFunction *cast_fn = cast_loaded->get_member_functions()[StringName("cast_both")];
+			REQUIRE(cast_fn != nullptr);
+			REQUIRE(GDScriptBytecodeVerifier::verify_function(cast_fn, cast_loaded.ptr()) == OK);
+
+			Vector<int> &code = GDScriptBytecodeTestAccessor::mutable_code(cast_fn);
+			int cast_native_ip = -1;
+			int cast_script_ip = -1;
+			int test_script_ip = -1;
+			for (int ip = 0; ip < code.size();) {
+				const int raw_op = code[ip];
+				if (raw_op == GDScriptFunction::OPCODE_CAST_TO_NATIVE) {
+					cast_native_ip = ip;
+				} else if (raw_op == GDScriptFunction::OPCODE_CAST_TO_SCRIPT) {
+					cast_script_ip = ip;
+				} else if (raw_op == GDScriptFunction::OPCODE_TYPE_TEST_SCRIPT) {
+					test_script_ip = ip;
+				}
+				const auto &layout = GDScriptFunction::get_opcode_layout(static_cast<GDScriptFunction::Opcode>(raw_op));
+				ip += layout.is_vararg ? (2 + code[ip + 1] + layout.word_count) : layout.word_count;
+			}
+			REQUIRE(cast_native_ip >= 0);
+			REQUIRE(cast_script_ip >= 0);
+			REQUIRE(test_script_ip >= 0);
+
+			// Replace OPCODE_CAST_TO_NATIVE type operand with ADDR_NIL and with a Script constant -> both rejected.
+			const int orig_native_operand = code[cast_native_ip + 3];
+			const int orig_script_operand = code[cast_script_ip + 3];
+			code.write[cast_native_ip + 3] = GDScriptFunction::ADDR_NIL;
+			CHECK(GDScriptBytecodeVerifier::verify_function(cast_fn, cast_loaded.ptr()) != OK);
+			code.write[cast_native_ip + 3] = orig_script_operand;
+			CHECK(GDScriptBytecodeVerifier::verify_function(cast_fn, cast_loaded.ptr()) != OK);
+			code.write[cast_native_ip + 3] = orig_native_operand;
+
+			// Replace OPCODE_CAST_TO_SCRIPT and OPCODE_TYPE_TEST_SCRIPT type operands with a GDScriptNativeClass constant -> rejected.
+			code.write[cast_script_ip + 3] = orig_native_operand;
+			CHECK(GDScriptBytecodeVerifier::verify_function(cast_fn, cast_loaded.ptr()) != OK);
+			code.write[cast_script_ip + 3] = orig_script_operand;
+
+			const int orig_test_operand = code[test_script_ip + 3];
+			code.write[test_script_ip + 3] = orig_native_operand;
+			CHECK(GDScriptBytecodeVerifier::verify_function(cast_fn, cast_loaded.ptr()) != OK);
+			code.write[test_script_ip + 3] = orig_test_operand;
+
+			REQUIRE(GDScriptBytecodeVerifier::verify_function(cast_fn, cast_loaded.ptr()) == OK);
+		}
+
+		// 13. Cyclic local base classes fail cleanly and clear base references without leaking Ref<GDScript> cycles.
+		{
+			RawBufferBuilder builder;
+			builder.write_valid_header(0);
+			// String table: 0="res://cycle.gd", 1="", 2="RefCounted", 3="SubA", 4="SubB"
+			builder.u32(GDScriptBytecodeFormat::SECTION_STRING_TABLE);
+			builder.u32(5);
+			builder.utf8("res://cycle.gd");
+			builder.utf8("");
+			builder.utf8("RefCounted");
+			builder.utf8("SubA");
+			builder.utf8("SubB");
+			builder.u32(GDScriptBytecodeFormat::SECTION_DEPENDENCIES);
+			builder.u32(0);
+			// Skeleton: 3 classes (0=root, 1=SubA extends 2, 2=SubB extends 1).
+			builder.u32(GDScriptBytecodeFormat::SECTION_SKELETON);
+			builder.u32(3);
+			// Root (index 0)
+			builder.u32(0);
+			builder.u32(1);
+			builder.u32(1);
+			builder.u32(1);
+			builder.u32(2);
+			builder.u8(0);
+			builder.u8(GDScriptBytecodeFormat::BASE_CLASS_NATIVE_ONLY);
+			builder.u32(2); // 2 subclasses
+			// SubA (index 1, base = local 2)
+			builder.u32(3); // key "SubA"
+			builder.u32(3); // fqcn
+			builder.u32(3); // local_name
+			builder.u32(1); // global_name
+			builder.u32(1); // icon
+			builder.u32(2); // native
+			builder.u8(0);
+			builder.u8(GDScriptBytecodeFormat::BASE_CLASS_LOCAL);
+			builder.u32(2);
+			builder.u32(0); // 0 subclasses
+			// SubB (index 2, base = local 1)
+			builder.u32(4); // key "SubB"
+			builder.u32(4); // fqcn
+			builder.u32(4); // local_name
+			builder.u32(1); // global_name
+			builder.u32(1); // icon
+			builder.u32(2); // native
+			builder.u8(0);
+			builder.u8(GDScriptBytecodeFormat::BASE_CLASS_LOCAL);
+			builder.u32(1);
+			builder.u32(0); // 0 subclasses
+
+			Ref<GDScript> cyclic_target = memnew(GDScript);
+			String cycle_error;
+			CHECK(GDScriptBytecodeLoader::load_skeleton(builder.get_bytes(), cyclic_target, "res://cycle.gd", nullptr, &cycle_error) == ERR_INVALID_DATA);
+			CHECK(cycle_error.contains("Cyclic base class"));
+			CHECK(cyclic_target->get_base().is_null());
+			for (const KeyValue<StringName, Ref<GDScript>> &subclass_entry : cyclic_target->get_subclasses()) {
+				CHECK(subclass_entry.value->get_base().is_null());
+			}
 		}
 	}
 }

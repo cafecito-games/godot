@@ -46,6 +46,7 @@ struct GDScriptBytecodeVerifier::Impl {
 			int32_t p_stack_size,
 			int32_t p_constant_count,
 			int32_t p_member_count,
+			bool p_allow_member_address,
 			String *r_error_message) {
 		const uint32_t raw_unsigned = static_cast<uint32_t>(p_raw_address);
 		const uint32_t address_type = raw_unsigned >> GDScriptFunction::ADDR_BITS;
@@ -67,6 +68,9 @@ struct GDScriptBytecodeVerifier::Impl {
 				}
 				break;
 			case GDScriptFunction::ADDR_TYPE_MEMBER:
+				if (!p_allow_member_address) {
+					return Impl::fail_verify(r_error_message, "Member address is illegal in a function without an instance.");
+				}
 				if (address_index >= static_cast<uint32_t>(p_member_count)) {
 					return Impl::fail_verify(r_error_message, vformat("Member address index %d out of range (member_count=%d).", address_index, p_member_count));
 				}
@@ -76,6 +80,28 @@ struct GDScriptBytecodeVerifier::Impl {
 		}
 
 		return OK;
+	}
+
+	template <typename TargetClassT>
+	static TargetClassT *resolve_constant_object_operand(
+			int32_t p_raw_address,
+			const GDScriptFunction *p_function) {
+		const uint32_t raw_unsigned = static_cast<uint32_t>(p_raw_address);
+		const uint32_t address_type = raw_unsigned >> GDScriptFunction::ADDR_BITS;
+		const uint32_t address_index = raw_unsigned & static_cast<uint32_t>(GDScriptFunction::ADDR_MASK);
+		if (address_type != GDScriptFunction::ADDR_TYPE_CONSTANT || address_index >= static_cast<uint32_t>(p_function->_constant_count)) {
+			return nullptr;
+		}
+		const Variant &constant_value = p_function->_constants_ptr[address_index];
+		if (constant_value.get_type() != Variant::OBJECT) {
+			return nullptr;
+		}
+		bool was_freed = false;
+		Object *object = constant_value.get_validated_object_with_check(was_freed);
+		if (was_freed || object == nullptr) {
+			return nullptr;
+		}
+		return Object::cast_to<TargetClassT>(object);
 	}
 
 	static Error verify_contiguous_member_indices(
@@ -115,6 +141,7 @@ struct GDScriptBytecodeVerifier::Impl {
 			int32_t p_stack_size,
 			int32_t p_constant_count,
 			int32_t p_member_count,
+			bool p_allow_member_address,
 			int32_t p_global_array_size,
 			LocalVector<int> &r_jump_targets,
 			LocalVector<uint8_t> r_used_fixups[GDScriptBytecodeFormat::FIXUP_TABLE_COUNT],
@@ -124,7 +151,7 @@ struct GDScriptBytecodeVerifier::Impl {
 		using namespace GDScriptBytecodeFormat;
 		switch (p_kind) {
 			case OPERAND_ADDRESS:
-				return Impl::verify_packed_address(p_value, p_stack_size, p_constant_count, p_member_count, r_error_message);
+				return Impl::verify_packed_address(p_value, p_stack_size, p_constant_count, p_member_count, p_allow_member_address, r_error_message);
 			case OPERAND_JUMP_TARGET:
 				r_jump_targets.push_back(p_value);
 				return OK;
@@ -152,9 +179,18 @@ struct GDScriptBytecodeVerifier::Impl {
 				if (p_value < 0) {
 					return Impl::fail_verify(r_error_message, vformat("Negative static variable index %d.", p_value));
 				}
-				const int32_t class_address = p_function->code[p_instruction_ip + 2];
-				if (class_address == GDScriptFunction::ADDR_CLASS && p_value >= p_owning_script->static_variables.size()) {
-					return Impl::fail_verify(r_error_message, vformat("Static variable index %d out of range for class \"%s\" (size=%d).", p_value, p_owning_script->fully_qualified_name, p_owning_script->static_variables.size()));
+				const int32_t class_address = p_function->_code_ptr[p_instruction_ip + 2];
+				const GDScript *target_script = nullptr;
+				if (class_address == GDScriptFunction::ADDR_CLASS) {
+					target_script = p_owning_script;
+				} else {
+					target_script = Impl::resolve_constant_object_operand<GDScript>(class_address, p_function);
+					if (target_script == nullptr) {
+						return Impl::fail_verify(r_error_message, vformat("Static variable access at offset %d must target ADDR_CLASS or a constant GDScript.", p_instruction_ip));
+					}
+				}
+				if (p_value >= target_script->static_variables.size()) {
+					return Impl::fail_verify(r_error_message, vformat("Static variable index %d out of range for class \"%s\" (size=%d).", p_value, target_script->fully_qualified_name, target_script->static_variables.size()));
 				}
 				return OK;
 			}
@@ -479,6 +515,14 @@ Error GDScriptBytecodeVerifier::verify_function(
 
 	HashSet<int> seen_global_store_offsets;
 
+	// Functions executing without a GDScriptInstance (static functions and non-self lambdas)
+	// cannot safely reference ADDR_TYPE_MEMBER or instance-only opcodes under release builds.
+	bool has_instance = !p_function->_static;
+	if (has_instance && p_lambda_depth > 0) {
+		HashMap<GDScriptFunction *, GDScript::LambdaInfo>::ConstIterator self_lambda_entry = p_owning_script->lambda_info.find(const_cast<GDScriptFunction *>(p_function));
+		has_instance = self_lambda_entry && self_lambda_entry->value.use_self;
+	}
+
 	// Pass 1: linear decode driven by gdscript_opcode_layout.inc.
 	int instruction_pointer = 0;
 	bool saw_terminal_end = false;
@@ -500,6 +544,10 @@ Error GDScriptBytecodeVerifier::verify_function(
 			saw_terminal_end = true;
 			instruction_pointer += 1;
 			break;
+		}
+
+		if (!has_instance && (opcode == GDScriptFunction::OPCODE_SET_MEMBER || opcode == GDScriptFunction::OPCODE_GET_MEMBER || opcode == GDScriptFunction::OPCODE_CALL_SELF_BASE || opcode == GDScriptFunction::OPCODE_CREATE_SELF_LAMBDA)) {
+			return Impl::fail_verify(r_error_message, vformat("Function \"%s\" uses instance-only opcode %d without an instance.", String(p_function->name), raw_opcode));
 		}
 
 		if (opcode == GDScriptFunction::OPCODE_JUMP_TO_DEF_ARGUMENT) {
@@ -527,6 +575,7 @@ Error GDScriptBytecodeVerifier::verify_function(
 						p_function->_stack_size,
 						p_function->_constant_count,
 						member_count,
+						has_instance,
 						global_array_size,
 						jump_targets,
 						used_fixups,
@@ -536,6 +585,35 @@ Error GDScriptBytecodeVerifier::verify_function(
 				if (operand_error != OK) {
 					return operand_error;
 				}
+			}
+
+			// Validate constant type operands for *_NATIVE and *_SCRIPT opcodes that dereference unconditionally in release builds.
+			switch (opcode) {
+				case GDScriptFunction::OPCODE_CAST_TO_NATIVE:
+				case GDScriptFunction::OPCODE_ASSIGN_TYPED_NATIVE:
+					if (Impl::resolve_constant_object_operand<GDScriptNativeClass>(p_function->_code_ptr[instruction_pointer + 3], p_function) == nullptr) {
+						return Impl::fail_verify(r_error_message, vformat("Function \"%s\" opcode %d at offset %d requires a constant GDScriptNativeClass operand.", String(p_function->name), raw_opcode, instruction_pointer));
+					}
+					break;
+				case GDScriptFunction::OPCODE_RETURN_TYPED_NATIVE:
+					if (Impl::resolve_constant_object_operand<GDScriptNativeClass>(p_function->_code_ptr[instruction_pointer + 2], p_function) == nullptr) {
+						return Impl::fail_verify(r_error_message, vformat("Function \"%s\" OPCODE_RETURN_TYPED_NATIVE at offset %d requires a constant GDScriptNativeClass operand.", String(p_function->name), instruction_pointer));
+					}
+					break;
+				case GDScriptFunction::OPCODE_TYPE_TEST_SCRIPT:
+				case GDScriptFunction::OPCODE_CAST_TO_SCRIPT:
+				case GDScriptFunction::OPCODE_ASSIGN_TYPED_SCRIPT:
+					if (Impl::resolve_constant_object_operand<Script>(p_function->_code_ptr[instruction_pointer + 3], p_function) == nullptr) {
+						return Impl::fail_verify(r_error_message, vformat("Function \"%s\" opcode %d at offset %d requires a constant Script operand.", String(p_function->name), raw_opcode, instruction_pointer));
+					}
+					break;
+				case GDScriptFunction::OPCODE_RETURN_TYPED_SCRIPT:
+					if (Impl::resolve_constant_object_operand<Script>(p_function->_code_ptr[instruction_pointer + 2], p_function) == nullptr) {
+						return Impl::fail_verify(r_error_message, vformat("Function \"%s\" OPCODE_RETURN_TYPED_SCRIPT at offset %d requires a constant Script operand.", String(p_function->name), instruction_pointer));
+					}
+					break;
+				default:
+					break;
 			}
 
 			instruction_pointer += layout.word_count;
@@ -564,6 +642,7 @@ Error GDScriptBytecodeVerifier::verify_function(
 						p_function->_stack_size,
 						p_function->_constant_count,
 						member_count,
+						has_instance,
 						r_error_message);
 				if (address_error != OK) {
 					return address_error;
@@ -594,6 +673,7 @@ Error GDScriptBytecodeVerifier::verify_function(
 						p_function->_stack_size,
 						p_function->_constant_count,
 						member_count,
+						has_instance,
 						global_array_size,
 						jump_targets,
 						used_fixups,
@@ -742,6 +822,7 @@ Error GDScriptBytecodeVerifier::verify_class(
 	}
 
 	// Member functions key == function->name, plus initializer consistency.
+	const StringName init_function_name = GDScriptLanguage::get_singleton() != nullptr ? GDScriptLanguage::get_singleton()->strings._init : SNAME("_init");
 	const GDScriptFunction *expected_initializer = nullptr;
 	for (const KeyValue<StringName, GDScriptFunction *> &function_entry : p_script->member_functions) {
 		const GDScriptFunction *function = function_entry.value;
@@ -751,7 +832,7 @@ Error GDScriptBytecodeVerifier::verify_class(
 		if (function->get_name() != function_entry.key) {
 			return Impl::fail_verify(r_error_message, vformat("Class \"%s\" member_functions key \"%s\" does not match function->name \"%s\".", p_script->fully_qualified_name, String(function_entry.key), String(function->get_name())));
 		}
-		if (function_entry.key == GDScriptLanguage::get_singleton()->strings._init) {
+		if (function_entry.key == init_function_name) {
 			expected_initializer = function;
 		}
 		Error function_error = verify_function(function, p_script, p_global_store_offsets, 0, r_error_message);

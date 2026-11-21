@@ -390,12 +390,12 @@ class GDScriptBytecodeLoader::LoadContext {
 	}
 
 	Error read_string_name_index(StringName &r_out) {
-		String str;
-		Error error = read_string_index(str);
+		String value;
+		Error error = read_string_index(value);
 		if (error != OK) {
 			return error;
 		}
-		r_out = StringName(str);
+		r_out = StringName(value);
 		return OK;
 	}
 
@@ -1876,6 +1876,9 @@ class GDScriptBytecodeLoader::LoadContext {
 			Vector<int> store_offsets;
 			store_offsets.resize(static_cast<int>(global_store_count));
 			GDScriptLanguage *language = GDScriptLanguage::get_singleton();
+			if (language == nullptr) {
+				return reader.fail(ERR_UNAVAILABLE, "GDScriptLanguage singleton is unavailable.");
+			}
 			const HashMap<StringName, int> &global_map = language->get_global_map();
 			for (uint32_t index = 0; index < global_store_count; index++) {
 				int32_t code_offset = 0;
@@ -2178,13 +2181,20 @@ class GDScriptBytecodeLoader::LoadContext {
 		for (const KeyValue<StringName, GDScriptFunction *> &entry : decoded_member_functions) {
 			p_script->member_functions.insert(entry.key, entry.value);
 		}
-		HashMap<StringName, GDScriptFunction *>::ConstIterator init_entry = p_script->member_functions.find(GDScriptLanguage::get_singleton()->strings._init);
+		const StringName init_function_name = GDScriptLanguage::get_singleton() != nullptr ? GDScriptLanguage::get_singleton()->strings._init : SNAME("_init");
+		HashMap<StringName, GDScriptFunction *>::ConstIterator init_entry = p_script->member_functions.find(init_function_name);
 		p_script->initializer = init_entry ? init_entry->value : nullptr;
 
 		return OK;
 	}
 
 	Error link_base_classes(bool p_resolve_external_bases) {
+		auto clear_all_bases = [&]() {
+			for (int clear_index = 0; clear_index < local_classes.size(); clear_index++) {
+				local_classes[clear_index]->base = Ref<GDScript>();
+			}
+		};
+
 		for (int index = 0; index < local_classes.size(); index++) {
 			GDScript *script = local_classes[index].ptr();
 			const DecodedSkeletonBase &base_descriptor = skeleton_bases[index];
@@ -2194,9 +2204,11 @@ class GDScriptBytecodeLoader::LoadContext {
 					break;
 				case BASE_CLASS_LOCAL:
 					if (base_descriptor.local_class_index >= static_cast<uint32_t>(local_classes.size())) {
+						clear_all_bases();
 						return reader.fail(ERR_INVALID_DATA, vformat("Local base class index %d out of range.", base_descriptor.local_class_index));
 					}
 					if (base_descriptor.local_class_index == static_cast<uint32_t>(index)) {
+						clear_all_bases();
 						return reader.fail(ERR_INVALID_DATA, vformat("Class \"%s\" cannot inherit from itself.", script->fully_qualified_name));
 					}
 					script->base = local_classes[base_descriptor.local_class_index];
@@ -2204,27 +2216,33 @@ class GDScriptBytecodeLoader::LoadContext {
 				case BASE_CLASS_EXTERNAL:
 					if (p_resolve_external_bases) {
 						if (resolver == nullptr) {
+							clear_all_bases();
 							return reader.fail(ERR_CANT_RESOLVE, vformat("Cannot resolve external base script \"%s\" without resolver.", base_descriptor.external_path));
 						}
 						Error resolve_error = OK;
 						bool is_local = false;
 						Ref<GDScript> external_base = resolver->resolve_script(base_descriptor.external_path, base_descriptor.external_fqcn, is_local, resolve_error);
 						if (resolve_error != OK || external_base.is_null()) {
+							clear_all_bases();
 							return reader.fail(resolve_error != OK ? resolve_error : ERR_CANT_RESOLVE, vformat("Failed to resolve external base script \"%s\" (%s).", base_descriptor.external_path, base_descriptor.external_fqcn));
 						}
 						script->base = external_base;
+					} else {
+						script->base = Ref<GDScript>();
 					}
 					break;
 			}
 		}
 
-		// Reject any cycle in the base-class chain.
+		// Reject any cycle in the base-class chain and clear bases on failure to prevent Ref<GDScript> leaks.
 		for (int index = 0; index < local_classes.size(); index++) {
 			HashSet<const GDScript *> visited;
 			const GDScript *cursor = local_classes[index].ptr();
 			while (cursor != nullptr) {
 				if (visited.has(cursor)) {
-					return reader.fail(ERR_INVALID_DATA, vformat("Cyclic base class inheritance detected at \"%s\".", cursor->fully_qualified_name));
+					const String cyclic_name = cursor->fully_qualified_name;
+					clear_all_bases();
+					return reader.fail(ERR_INVALID_DATA, vformat("Cyclic base class inheritance detected at \"%s\".", cyclic_name));
 				}
 				visited.insert(cursor);
 				cursor = cursor->base.ptr();
