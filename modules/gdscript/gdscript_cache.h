@@ -33,9 +33,13 @@
 #include "gdscript.h"
 
 #include "core/object/ref_counted.h"
+#include "core/object/worker_thread_pool.h"
+#include "core/os/condition_variable.h"
 #include "core/os/safe_binary_mutex.h"
+#include "core/os/thread.h"
 #include "core/templates/hash_map.h"
 #include "core/templates/hash_set.h"
+#include "core/templates/vector.h"
 
 class GDScriptAnalyzer;
 class GDScriptParser;
@@ -99,6 +103,34 @@ class GDScriptCache {
 	HashMap<String, HashSet<String>> dependencies;
 	HashMap<String, HashSet<String>> parser_inverse_dependencies;
 
+	struct InFlightBytecodeLoad {
+		uint32_t ref_count = 1;
+		uint64_t load_id = 0;
+		String path;
+		Ref<GDScript> script;
+		Thread::ID owner_thread_id = 0;
+		WorkerThreadPool::TaskID owner_wtp_task_id = WorkerThreadPool::INVALID_TASK_ID;
+		String owner_resource_load_path;
+		bool in_resource_transaction = false;
+		bool has_static_data = false;
+		bool annotated_static_unload = false;
+		bool staged_under_direct_root = false;
+		bool finalized = false;
+		bool committed = false;
+		Error result_error = OK;
+		Ref<GDScript> result_script;
+		Vector<InFlightBytecodeLoad *> direct_cycle_dependents;
+		ConditionVariable cond_var;
+	};
+
+	HashMap<String, InFlightBytecodeLoad *> in_flight_bytecode_loads;
+	uint64_t next_bytecode_load_id = 1;
+	static thread_local Vector<InFlightBytecodeLoad *> active_direct_bytecode_loads;
+
+	static bool _is_same_bytecode_load_chain(const InFlightBytecodeLoad *p_in_flight);
+	static void _finalize_bytecode_load_locked(InFlightBytecodeLoad *p_in_flight, bool p_committed, Error p_error, bool p_publish_resource_cache);
+	static void _on_bytecode_transaction_finalize(bool p_committed, const String &p_path, uint64_t p_load_id);
+
 	friend class GDScript;
 	friend class GDScriptParserRef;
 	friend class GDScriptInstance;
@@ -141,6 +173,8 @@ public:
 	static void remove_parser(const String &p_path);
 	static String get_source_code(const String &p_path);
 	static Vector<uint8_t> get_binary_tokens(const String &p_path);
+	static Vector<uint8_t> get_bytecode_buffer(const String &p_path, Error &r_error);
+	static bool is_script_loading_on_current_chain(const String &p_path, const GDScript *p_script = nullptr);
 	static Ref<GDScript> get_shallow_script(const String &p_path, Error &r_error, const String &p_owner = String());
 	/**
 	 * Returns a fully loaded GDScript using an already cached script if one exists.

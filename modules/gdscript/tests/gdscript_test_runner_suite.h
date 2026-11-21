@@ -52,6 +52,10 @@ public:
 	static bool has_full(String p_path) {
 		return GDScriptCache::singleton->full_gdscript_cache.has(p_path);
 	}
+
+	static bool has_static(String p_fqcn) {
+		return GDScriptCache::singleton->static_gdscript_cache.has(p_fqcn);
+	}
 };
 
 // TODO: Handle some cases failing on release builds. See: https://github.com/godotengine/godot/pull/88452
@@ -60,7 +64,8 @@ TEST_SUITE("[Modules][GDScript]") {
 	TEST_CASE("Script compilation and runtime") {
 		bool print_filenames = OS::get_singleton()->get_cmdline_args().find("--print-filenames") != nullptr;
 		bool use_binary_tokens = OS::get_singleton()->get_cmdline_args().find("--use-binary-tokens") != nullptr;
-		GDScriptTestRunner runner("modules/gdscript/tests/scripts", true, print_filenames, use_binary_tokens);
+		bool use_bytecode = OS::get_singleton()->get_cmdline_args().find("--use-bytecode") != nullptr;
+		GDScriptTestRunner runner("modules/gdscript/tests/scripts", true, print_filenames, use_binary_tokens, use_bytecode);
 		int fail_count = runner.run_tests();
 		INFO("Make sure `*.out` files have expected results.");
 		REQUIRE_MESSAGE(fail_count == 0, "All GDScript tests should pass.");

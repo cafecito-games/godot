@@ -366,6 +366,7 @@ public:
 	static bool add_current_load_transaction_callback(const Callable &p_callback);
 	static String get_current_load_path();
 	static bool is_current_load_in_cycle_transaction();
+	static bool is_path_ancestor_of_current_load(const String &p_path);
 
 	static bool is_cleaning_tasks();
 

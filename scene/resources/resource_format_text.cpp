@@ -629,7 +629,8 @@ Error ResourceLoaderText::load() {
 
 		int_resources[id] = res; // Always assign int resources.
 		if (do_assign) {
-			if (cache_mode != ResourceFormatLoader::CACHE_MODE_IGNORE) {
+			const bool defer_cache_publication = (cache_mode == ResourceFormatLoader::CACHE_MODE_IGNORE) || ResourceLoader::is_current_load_in_cycle_transaction();
+			if (!defer_cache_publication) {
 				res->set_path(path, cache_mode == ResourceFormatLoader::CACHE_MODE_REPLACE);
 			} else {
 				res->set_path_cache(path);
@@ -781,7 +782,8 @@ Error ResourceLoaderText::load() {
 				}
 				// EOF, Done parsing.
 				error = OK;
-				if (cache_mode != ResourceFormatLoader::CACHE_MODE_IGNORE) {
+				const bool defer_cache_publication = (cache_mode == ResourceFormatLoader::CACHE_MODE_IGNORE) || ResourceLoader::is_current_load_in_cycle_transaction();
+				if (!defer_cache_publication) {
 					if (!ResourceCache::has(res_path)) {
 						resource->set_path(res_path);
 					}
@@ -884,7 +886,8 @@ Error ResourceLoaderText::load() {
 		error = OK;
 		//get it here
 		resource = packed_scene;
-		if (cache_mode != ResourceFormatLoader::CACHE_MODE_IGNORE) {
+		const bool defer_cache_publication = (cache_mode == ResourceFormatLoader::CACHE_MODE_IGNORE) || ResourceLoader::is_current_load_in_cycle_transaction();
+		if (!defer_cache_publication) {
 			if (!ResourceCache::has(res_path)) {
 				packed_scene->set_path(res_path);
 			}

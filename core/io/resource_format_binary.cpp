@@ -736,7 +736,8 @@ Error ResourceLoaderBinary::load() {
 
 		if (r) {
 			if (!path.is_empty()) {
-				if (cache_mode != ResourceFormatLoader::CACHE_MODE_IGNORE) {
+				const bool defer_cache_publication = (cache_mode == ResourceFormatLoader::CACHE_MODE_IGNORE) || ResourceLoader::is_current_load_in_cycle_transaction();
+				if (!defer_cache_publication) {
 					r->set_path(path, cache_mode == ResourceFormatLoader::CACHE_MODE_REPLACE); // If got here because the resource with same path has different type, replace it.
 				} else {
 					r->set_path_cache(path);

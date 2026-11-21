@@ -32,6 +32,9 @@
 
 #include "../gdscript.h"
 #include "../gdscript_analyzer.h"
+#include "../gdscript_bytecode_export.h"
+#include "../gdscript_bytecode_loader.h"
+#include "../gdscript_cache.h"
 #include "../gdscript_compiler.h"
 #include "../gdscript_parser.h"
 #include "../gdscript_tokenizer_buffer.h"
@@ -133,11 +136,12 @@ void finish_language() {
 
 StringName GDScriptTestRunner::test_function_name;
 
-GDScriptTestRunner::GDScriptTestRunner(const String &p_source_dir, bool p_init_language, bool p_print_filenames, bool p_use_binary_tokens) {
+GDScriptTestRunner::GDScriptTestRunner(const String &p_source_dir, bool p_init_language, bool p_print_filenames, bool p_use_binary_tokens, bool p_use_bytecode) {
 	test_function_name = StringName("test");
 	do_init_languages = p_init_language;
 	print_filenames = p_print_filenames;
 	binary_tokens = p_use_binary_tokens;
+	bytecode_mode = p_use_bytecode;
 
 	source_dir = p_source_dir;
 	if (!source_dir.ends_with("/")) {
@@ -312,16 +316,19 @@ bool GDScriptTestRunner::make_tests_for_dir(const String &p_dir) {
 				if (next.ends_with(".bin.gd")) {
 					// Test text mode first.
 					GDScriptTest text_test(current_dir.path_join(next), current_dir.path_join(out_file), source_dir);
+					text_test.set_bytecode_mode(bytecode_mode);
 					tests.push_back(text_test);
 					// Test binary mode even without `--use-binary-tokens`.
 					GDScriptTest bin_test(current_dir.path_join(next), current_dir.path_join(out_file), source_dir);
 					bin_test.set_tokenizer_mode(GDScriptTest::TOKENIZER_BUFFER);
+					bin_test.set_bytecode_mode(bytecode_mode);
 					tests.push_back(bin_test);
 				} else {
 					GDScriptTest test(current_dir.path_join(next), current_dir.path_join(out_file), source_dir);
 					if (binary_tokens) {
 						test.set_tokenizer_mode(GDScriptTest::TOKENIZER_BUFFER);
 					}
+					test.set_bytecode_mode(bytecode_mode);
 					tests.push_back(test);
 				}
 			}
@@ -620,6 +627,52 @@ GDScriptTest::TestResult GDScriptTest::execute_test_code(bool p_is_generating) {
 		return result;
 	}
 
+#ifdef GDSCRIPT_BYTECODE_EXPORT_ENABLED
+	if (bytecode_mode) {
+		GDScriptBytecodeExporter::Options export_options;
+		export_options.annotated_static_unload = parser.get_tree() != nullptr && parser.get_tree()->annotated_static_unload;
+		export_options.release_profile = false;
+		export_options.emit_line_opcodes = true;
+
+		Vector<uint8_t> bytecode_buffer;
+		String export_error;
+		err = GDScriptBytecodeExporter::serialize(script, bytecode_buffer, export_options, &export_error);
+		if (err != OK) {
+			enable_stdout();
+			result.status = GDTEST_LOAD_ERROR;
+			result.output = "Bytecode export failed: " + export_error + "\n";
+			result.passed = false;
+			ERR_FAIL_V_MSG(result, "\nCould not export bytecode for: '" + source_file + "': " + export_error);
+		}
+
+		const String script_fqcn = script->get_fully_qualified_name();
+		GDScriptCache::remove_script(source_file);
+		GDScriptCache::remove_static_script(script_fqcn);
+		script->clear();
+		script.unref();
+
+		Ref<GDScript> bytecode_script;
+		bytecode_script.instantiate();
+		bytecode_script->set_path_cache(source_file);
+
+		GDScriptBytecodeLoader::HeaderInfo header_info;
+		String load_error;
+		GDScriptBytecodeCacheResolver resolver(source_file);
+		err = GDScriptBytecodeLoader::load_full(bytecode_buffer, bytecode_script, source_file, &resolver, &header_info, &load_error);
+		if (err != OK) {
+			enable_stdout();
+			result.status = GDTEST_LOAD_ERROR;
+			result.output = "Bytecode load failed: " + load_error + "\n";
+			result.passed = false;
+			ERR_FAIL_V_MSG(result, "\nCould not load bytecode for: '" + source_file + "': " + load_error);
+		}
+
+		bytecode_script->set_path_cache(String());
+		bytecode_script->set_path(source_file, true);
+		script = bytecode_script;
+	}
+#endif // GDSCRIPT_BYTECODE_EXPORT_ENABLED
+
 	// `*.norun.gd` files are allowed to not contain a `test()` function (no runtime testing).
 	if (source_file.ends_with(".norun.gd")) {
 		enable_stdout();
@@ -628,6 +681,7 @@ GDScriptTest::TestResult GDScriptTest::execute_test_code(bool p_is_generating) {
 		if (!p_is_generating) {
 			result.passed = check_output(result.output);
 		}
+		GDScriptCache::remove_script(script->get_path());
 		return result;
 	}
 
@@ -649,7 +703,11 @@ GDScriptTest::TestResult GDScriptTest::execute_test_code(bool p_is_generating) {
 	add_print_handler(&_print_handler);
 	add_error_handler(&_error_handler);
 
-	err = script->reload();
+	if (bytecode_mode) {
+		err = GDScriptBytecodeLoader::initialize_static_data(script);
+	} else {
+		err = script->reload();
+	}
 	if (err) {
 		enable_stdout();
 		result.status = GDTEST_LOAD_ERROR;

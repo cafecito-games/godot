@@ -44,6 +44,17 @@ public:
 	virtual Ref<GDScript> resolve_script(const String &p_path, const String &p_fully_qualified_name, bool &r_is_local_class, Error &r_error) = 0;
 };
 
+class GDScriptBytecodeCacheResolver : public GDScriptBytecodeExternalResolver {
+	String owner_path;
+
+public:
+	explicit GDScriptBytecodeCacheResolver(const String &p_owner_path = String()) :
+			owner_path(p_owner_path) {}
+
+	virtual Ref<Resource> resolve_resource(const String &p_path, const String &p_type_hint, Error &r_error) override;
+	virtual Ref<GDScript> resolve_script(const String &p_path, const String &p_fully_qualified_name, bool &r_is_local_class, Error &r_error) override;
+};
+
 class GDScriptBytecodeLoader {
 	class LoadContext;
 

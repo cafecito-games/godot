@@ -32,6 +32,8 @@
 
 #include "gdscript.h"
 #include "gdscript_analyzer.h"
+#include "gdscript_bytecode_format.h"
+#include "gdscript_bytecode_loader.h"
 #include "gdscript_compiler.h"
 #if defined(TOOLS_ENABLED) || defined(TESTS_ENABLED)
 #include "gdscript_export_compile_session.h"
@@ -40,6 +42,8 @@
 
 #include "core/io/file_access.h"
 #include "core/io/resource_loader.h"
+#include "core/object/callable_mp.h"
+#include "core/object/message_queue.h"
 #include "core/templates/vector.h"
 
 GDScriptParserRef::Status GDScriptParserRef::get_status() const {
@@ -84,7 +88,11 @@ Error GDScriptParserRef::raise_status(Status p_new_status) {
 				get_parser()->clear();
 				status = PARSED;
 				String remapped_path = ResourceLoader::path_remap(path);
-				if (remapped_path.has_extension("gdc")) {
+				if (remapped_path.has_extension("gdb")) {
+					status = EMPTY;
+					result = ERR_UNAVAILABLE;
+					return result;
+				} else if (remapped_path.has_extension("gdc")) {
 					Vector<uint8_t> tokens = GDScriptCache::get_binary_tokens(remapped_path);
 					source_hash = hash_djb2_buffer(tokens.ptr(), tokens.size());
 					result = get_parser()->parse_binary(tokens, path);
@@ -151,6 +159,7 @@ GDScriptParserRef::~GDScriptParserRef() {
 }
 
 GDScriptCache *GDScriptCache::singleton = nullptr;
+thread_local Vector<GDScriptCache::InFlightBytecodeLoad *> GDScriptCache::active_direct_bytecode_loads;
 #if defined(TOOLS_ENABLED) || defined(TESTS_ENABLED)
 thread_local GDScriptExportCompileSession *GDScriptCache::active_export_session = nullptr;
 
@@ -349,6 +358,198 @@ Vector<uint8_t> GDScriptCache::get_binary_tokens(const String &p_path) {
 	return buffer;
 }
 
+Vector<uint8_t> GDScriptCache::get_bytecode_buffer(const String &p_path, Error &r_error) {
+	Vector<uint8_t> buffer;
+	r_error = OK;
+	Ref<FileAccess> file = FileAccess::open(p_path, FileAccess::READ, &r_error);
+	if (r_error != OK || file.is_null()) {
+		if (r_error == OK) {
+			r_error = ERR_FILE_CANT_OPEN;
+		}
+		return buffer;
+	}
+
+	const uint64_t length = file->get_length();
+	buffer.resize(static_cast<int>(length));
+	if (length > 0) {
+		const uint64_t read_bytes = file->get_buffer(buffer.ptrw(), length);
+		if (read_bytes != length) {
+			r_error = ERR_FILE_CANT_READ;
+			return Vector<uint8_t>();
+		}
+	}
+
+	return buffer;
+}
+
+bool GDScriptCache::_is_same_bytecode_load_chain(const InFlightBytecodeLoad *p_in_flight) {
+	if (p_in_flight == nullptr) {
+		return false;
+	}
+
+	if (!p_in_flight->owner_resource_load_path.is_empty() && ResourceLoader::is_path_ancestor_of_current_load(p_in_flight->owner_resource_load_path)) {
+		return true;
+	}
+
+	const WorkerThreadPool::TaskID caller_task_id =
+			WorkerThreadPool::get_singleton() != nullptr
+			? WorkerThreadPool::get_singleton()->get_caller_task_id()
+			: WorkerThreadPool::INVALID_TASK_ID;
+
+	if (p_in_flight->owner_wtp_task_id != WorkerThreadPool::INVALID_TASK_ID) {
+		return caller_task_id == p_in_flight->owner_wtp_task_id;
+	}
+
+	if (caller_task_id != WorkerThreadPool::INVALID_TASK_ID) {
+		return false;
+	}
+
+	if (p_in_flight->owner_thread_id != Thread::get_caller_id()) {
+		return false;
+	}
+
+	// If the in-flight load started inside ResourceLoader, do not treat main-thread pumped callbacks
+	// (which temporarily clear ResourceLoader::load_nesting to 0) as part of the same load chain.
+	if (!p_in_flight->owner_resource_load_path.is_empty() && !ResourceLoader::is_within_load()) {
+		return false;
+	}
+
+	return true;
+}
+
+bool GDScriptCache::is_script_loading_on_current_chain(const String &p_path, const GDScript *p_script) {
+	if (singleton == nullptr) {
+		return false;
+	}
+
+	MutexLock lock(singleton->mutex);
+	HashMap<String, InFlightBytecodeLoad *>::ConstIterator entry = singleton->in_flight_bytecode_loads.find(p_path);
+	if (entry) {
+		const InFlightBytecodeLoad *in_flight = entry->value;
+		if ((p_script == nullptr || in_flight->script.ptr() == p_script) && _is_same_bytecode_load_chain(in_flight)) {
+			return true;
+		}
+	}
+
+	if (p_script != nullptr && p_script->reloading) {
+		if (ResourceLoader::is_path_ancestor_of_current_load(p_path)) {
+			return true;
+		}
+		Ref<GDScript> cached = get_cached_script(p_path);
+		if (cached.ptr() == p_script && cached->reloading) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+void GDScriptCache::_finalize_bytecode_load_locked(InFlightBytecodeLoad *p_in_flight, bool p_committed, Error p_error, bool p_publish_resource_cache) {
+	if (p_in_flight == nullptr || p_in_flight->finalized) {
+		return;
+	}
+
+	const String script_path = p_in_flight->path;
+	Ref<GDScript> script = p_in_flight->script;
+
+	// Hold an extra reference while finalizing so the struct cannot be freed before notify_all().
+	p_in_flight->ref_count++;
+
+	Vector<InFlightBytecodeLoad *> direct_dependents;
+	SWAP(direct_dependents, p_in_flight->direct_cycle_dependents);
+
+	if (p_committed && p_error == OK && script.is_valid() && script->is_valid()) {
+		script->reloading = false;
+		singleton->full_gdscript_cache[script_path] = script;
+		singleton->shallow_gdscript_cache.erase(script_path);
+
+		if (p_in_flight->has_static_data && !p_in_flight->annotated_static_unload) {
+			GDScriptCache::add_static_script(script);
+		}
+
+		if (p_publish_resource_cache) {
+			script->set_path_cache(String());
+			script->set_path(script_path, true);
+		}
+
+		if (ScriptServer::is_scripting_enabled() || script->is_tool()) {
+			uint32_t allowance_id = WorkerThreadPool::thread_enter_unlock_allowance_zone(singleton->mutex);
+			GDScriptBytecodeLoader::initialize_static_data(script);
+			WorkerThreadPool::thread_exit_unlock_allowance_zone(allowance_id);
+		}
+
+		p_in_flight->committed = true;
+		p_in_flight->result_error = OK;
+		p_in_flight->result_script = script;
+	} else {
+		if (script.is_valid()) {
+			script->valid = false;
+			script->reloading = false;
+			script->clear();
+		}
+
+		HashMap<String, Ref<GDScript>>::Iterator shallow_entry = singleton->shallow_gdscript_cache.find(script_path);
+		if (shallow_entry && shallow_entry->value == script) {
+			singleton->shallow_gdscript_cache.erase(script_path);
+		}
+
+		HashMap<String, Ref<GDScript>>::Iterator full_entry = singleton->full_gdscript_cache.find(script_path);
+		if (full_entry && full_entry->value == script) {
+			singleton->full_gdscript_cache.erase(script_path);
+		}
+
+		p_in_flight->committed = false;
+		p_in_flight->result_error = p_error != OK ? p_error : FAILED;
+		p_in_flight->result_script = Ref<GDScript>();
+	}
+
+	p_in_flight->finalized = true;
+
+	HashMap<String, InFlightBytecodeLoad *>::Iterator map_entry = singleton->in_flight_bytecode_loads.find(script_path);
+	if (map_entry && map_entry->value == p_in_flight) {
+		singleton->in_flight_bytecode_loads.erase(script_path);
+		p_in_flight->ref_count--;
+	}
+
+	p_in_flight->cond_var.notify_all();
+
+	for (int index = 0; index < direct_dependents.size(); index++) {
+		InFlightBytecodeLoad *dependent = direct_dependents[index];
+		_finalize_bytecode_load_locked(dependent, p_committed, p_committed ? OK : p_in_flight->result_error, p_publish_resource_cache);
+		if (--dependent->ref_count == 0) {
+			memdelete(dependent);
+		}
+	}
+
+	if (--p_in_flight->ref_count == 0) {
+		memdelete(p_in_flight);
+	}
+}
+
+void GDScriptCache::_on_bytecode_transaction_finalize(bool p_committed, const String &p_path, uint64_t p_load_id) {
+	if (singleton == nullptr) {
+		return;
+	}
+
+	MutexLock lock(singleton->mutex);
+	if (singleton->cleared) {
+		return;
+	}
+
+	HashMap<String, InFlightBytecodeLoad *>::Iterator entry = singleton->in_flight_bytecode_loads.find(p_path);
+	if (!entry) {
+		return;
+	}
+
+	InFlightBytecodeLoad *in_flight = entry->value;
+	if (in_flight->load_id != p_load_id || in_flight->finalized) {
+		return;
+	}
+
+	const Error final_error = p_committed ? in_flight->result_error : (in_flight->result_error != OK ? in_flight->result_error : FAILED);
+	_finalize_bytecode_load_locked(in_flight, p_committed && final_error == OK, final_error, false);
+}
+
 Ref<GDScript> GDScriptCache::get_shallow_script(const String &p_path, Error &r_error, const String &p_owner) {
 #if defined(TOOLS_ENABLED) || defined(TESTS_ENABLED)
 	if (active_export_session != nullptr) {
@@ -356,6 +557,7 @@ Ref<GDScript> GDScriptCache::get_shallow_script(const String &p_path, Error &r_e
 	}
 #endif
 	MutexLock lock(singleton->mutex);
+	r_error = OK;
 
 	if (!p_owner.is_empty() && p_path != p_owner) {
 		singleton->dependencies[p_owner].insert(p_path);
@@ -368,6 +570,27 @@ Ref<GDScript> GDScriptCache::get_shallow_script(const String &p_path, Error &r_e
 	}
 
 	const String remapped_path = ResourceLoader::path_remap(p_path);
+
+	if (remapped_path.has_extension("gdb")) {
+		const Vector<uint8_t> bytecode_buffer = get_bytecode_buffer(remapped_path, r_error);
+		if (r_error != OK) {
+			return Ref<GDScript>();
+		}
+
+		Ref<GDScript> script;
+		script.instantiate();
+		script->set_path_cache(p_path);
+
+		String skeleton_error;
+		r_error = GDScriptBytecodeLoader::load_skeleton(bytecode_buffer, script, p_path, nullptr, &skeleton_error);
+		if (r_error != OK) {
+			ERR_PRINT(vformat("Failed to load GDScript bytecode skeleton \"%s\": %s", p_path, skeleton_error));
+			return Ref<GDScript>();
+		}
+
+		singleton->shallow_gdscript_cache[p_path] = script;
+		return script;
+	}
 
 	Ref<GDScript> script;
 	script.instantiate();
@@ -418,6 +641,165 @@ Ref<GDScript> GDScriptCache::get_full_script(const String &p_path, Error &r_erro
 		}
 	}
 
+	// Coordinate with any in-flight bytecode load for the same logical path.
+	if (HashMap<String, InFlightBytecodeLoad *>::Iterator in_flight_entry = singleton->in_flight_bytecode_loads.find(p_path)) {
+		InFlightBytecodeLoad *in_flight = in_flight_entry->value;
+		if (_is_same_bytecode_load_chain(in_flight)) {
+			// If we are loading directly (outside ResourceLoader) and referencing a true ancestor on the active
+			// direct load stack, enroll our current direct load under that ancestor so cycle-dependent scripts
+			// commit or roll back atomically with the cycle root.
+			if (!in_flight->in_resource_transaction && active_direct_bytecode_loads.size() >= 2) {
+				const int64_t ancestor_index = active_direct_bytecode_loads.find(in_flight);
+				const int64_t current_index = active_direct_bytecode_loads.size() - 1;
+				if (ancestor_index >= 0 && ancestor_index < current_index) {
+					InFlightBytecodeLoad *current_direct = active_direct_bytecode_loads[current_index];
+					if (current_direct != in_flight && !current_direct->staged_under_direct_root) {
+						current_direct->staged_under_direct_root = true;
+						current_direct->ref_count++;
+						in_flight->direct_cycle_dependents.push_back(current_direct);
+					}
+				}
+			}
+			r_error = OK;
+			return in_flight->script;
+		}
+
+		in_flight->ref_count++;
+		while (!in_flight->finalized && !singleton->cleared) {
+			if (Thread::is_main_thread()) {
+				uint32_t allowance_id = WorkerThreadPool::thread_enter_unlock_allowance_zone(singleton->mutex);
+				WorkerThreadPool::thread_delay_usec_unlocked(1000);
+				if (MessageQueue::get_singleton() != nullptr) {
+					MessageQueue::get_singleton()->flush();
+				}
+				WorkerThreadPool::thread_exit_unlock_allowance_zone(allowance_id);
+			} else {
+				in_flight->cond_var.wait(lock);
+			}
+		}
+
+		const bool committed = in_flight->committed;
+		const Error waited_error = in_flight->result_error;
+		Ref<GDScript> waited_script = in_flight->result_script;
+		if (--in_flight->ref_count == 0) {
+			memdelete(in_flight);
+		}
+
+		if (committed && waited_script.is_valid()) {
+			r_error = OK;
+			return waited_script;
+		}
+		r_error = waited_error != OK ? waited_error : FAILED;
+		return Ref<GDScript>();
+	}
+
+	const String remapped_path = ResourceLoader::path_remap(p_path);
+
+	if (remapped_path.has_extension("gdb")) {
+		const Vector<uint8_t> bytecode_buffer = get_bytecode_buffer(remapped_path, r_error);
+		if (r_error != OK) {
+			return Ref<GDScript>();
+		}
+
+		if (script.is_null()) {
+			HashMap<String, Ref<GDScript>>::Iterator shallow_entry = singleton->shallow_gdscript_cache.find(p_path);
+			if (shallow_entry) {
+				script = shallow_entry->value;
+			} else {
+				script.instantiate();
+				script->set_path_cache(p_path);
+
+				String skeleton_error;
+				r_error = GDScriptBytecodeLoader::load_skeleton(bytecode_buffer, script, p_path, nullptr, &skeleton_error);
+				if (r_error != OK) {
+					ERR_PRINT(vformat("Failed to load GDScript bytecode skeleton \"%s\": %s", p_path, skeleton_error));
+					return Ref<GDScript>();
+				}
+
+				singleton->shallow_gdscript_cache[p_path] = script;
+			}
+		}
+
+		script->reloading = true;
+		script->valid = false;
+
+		InFlightBytecodeLoad *in_flight = memnew(InFlightBytecodeLoad);
+		in_flight->ref_count = 1;
+		in_flight->load_id = singleton->next_bytecode_load_id++;
+		in_flight->path = p_path;
+		in_flight->script = script;
+		in_flight->owner_thread_id = Thread::get_caller_id();
+		in_flight->owner_wtp_task_id =
+				WorkerThreadPool::get_singleton() != nullptr
+				? WorkerThreadPool::get_singleton()->get_caller_task_id()
+				: WorkerThreadPool::INVALID_TASK_ID;
+		singleton->in_flight_bytecode_loads[p_path] = in_flight;
+
+		const bool registered_partial = ResourceLoader::register_current_load_partial_resource(script, p_path);
+		if (registered_partial) {
+			in_flight->owner_resource_load_path = ResourceLoader::get_current_load_path();
+			in_flight->in_resource_transaction = ResourceLoader::add_current_load_transaction_callback(
+					callable_mp_static(&GDScriptCache::_on_bytecode_transaction_finalize).bind(p_path, in_flight->load_id));
+		}
+
+		if (!in_flight->in_resource_transaction) {
+			active_direct_bytecode_loads.push_back(in_flight);
+		}
+
+		GDScriptBytecodeLoader::HeaderInfo header_info;
+		String load_error_message;
+		GDScriptBytecodeCacheResolver resolver(p_path);
+		{
+			uint32_t allowance_id = WorkerThreadPool::thread_enter_unlock_allowance_zone(singleton->mutex);
+			r_error = GDScriptBytecodeLoader::load_full(bytecode_buffer, script, p_path, &resolver, &header_info, &load_error_message);
+			WorkerThreadPool::thread_exit_unlock_allowance_zone(allowance_id);
+		}
+
+		if (!in_flight->in_resource_transaction && !active_direct_bytecode_loads.is_empty() && active_direct_bytecode_loads[active_direct_bytecode_loads.size() - 1] == in_flight) {
+			active_direct_bytecode_loads.resize(active_direct_bytecode_loads.size() - 1);
+		}
+
+		if (r_error != OK) {
+			ERR_PRINT(vformat("Failed to load GDScript bytecode \"%s\": %s", p_path, load_error_message));
+			in_flight->result_error = r_error;
+
+			script->valid = false;
+			script->reloading = false;
+			script->clear();
+
+			HashMap<String, Ref<GDScript>>::Iterator shallow_entry = singleton->shallow_gdscript_cache.find(p_path);
+			if (shallow_entry && shallow_entry->value == script) {
+				singleton->shallow_gdscript_cache.erase(p_path);
+			}
+			HashMap<String, Ref<GDScript>>::Iterator full_entry = singleton->full_gdscript_cache.find(p_path);
+			if (full_entry && full_entry->value == script) {
+				singleton->full_gdscript_cache.erase(p_path);
+			}
+
+			if (!in_flight->in_resource_transaction) {
+				_finalize_bytecode_load_locked(in_flight, false, r_error, false);
+			}
+			return Ref<GDScript>();
+		}
+
+		in_flight->has_static_data = (header_info.script_flags & GDScriptBytecodeFormat::SCRIPT_FLAG_HAS_STATIC_DATA) != 0;
+		in_flight->annotated_static_unload = (header_info.script_flags & GDScriptBytecodeFormat::SCRIPT_FLAG_ANNOTATED_STATIC_UNLOAD) != 0;
+
+		if (in_flight->in_resource_transaction) {
+			// Defer ResourceCache publication, full_gdscript_cache promotion, static_init, and waiter notification
+			// to ResourceLoader's atomic CycleTransaction commit/rollback callback.
+			return script;
+		}
+
+		if (in_flight->staged_under_direct_root) {
+			// Direct A <-> B cycle outside ResourceLoader: commit atomically when the cycle root finishes.
+			return script;
+		}
+
+		_finalize_bytecode_load_locked(in_flight, true, OK, true);
+		return script;
+	}
+
 	if (script.is_null()) {
 		script = get_shallow_script(p_path, r_error);
 		// Only exit early if script failed to load, otherwise let reload report errors.
@@ -429,8 +811,6 @@ Ref<GDScript> GDScriptCache::get_full_script(const String &p_path, Error &r_erro
 	if (script->reloading) {
 		return script;
 	}
-
-	const String remapped_path = ResourceLoader::path_remap(p_path);
 
 	if (p_update_from_disk) {
 		if (remapped_path.has_extension("gdc")) {
@@ -578,6 +958,33 @@ void GDScriptCache::clear() {
 	}
 
 	parser_map_refs.clear();
+
+	Vector<InFlightBytecodeLoad *> remaining_in_flight;
+	remaining_in_flight.reserve(singleton->in_flight_bytecode_loads.size());
+	for (const KeyValue<String, InFlightBytecodeLoad *> &entry : singleton->in_flight_bytecode_loads) {
+		remaining_in_flight.push_back(entry.value);
+	}
+	singleton->in_flight_bytecode_loads.clear();
+	for (int index = 0; index < remaining_in_flight.size(); index++) {
+		InFlightBytecodeLoad *in_flight = remaining_in_flight[index];
+		in_flight->committed = false;
+		in_flight->result_error = FAILED;
+		in_flight->result_script = Ref<GDScript>();
+		in_flight->script = Ref<GDScript>();
+		for (int dep_index = 0; dep_index < in_flight->direct_cycle_dependents.size(); dep_index++) {
+			InFlightBytecodeLoad *dependent = in_flight->direct_cycle_dependents[dep_index];
+			if (--dependent->ref_count == 0) {
+				memdelete(dependent);
+			}
+		}
+		in_flight->direct_cycle_dependents.clear();
+		in_flight->finalized = true;
+		in_flight->cond_var.notify_all();
+		if (--in_flight->ref_count == 0) {
+			memdelete(in_flight);
+		}
+	}
+
 	singleton->shallow_gdscript_cache.clear();
 	singleton->full_gdscript_cache.clear();
 	singleton->static_gdscript_cache.clear();

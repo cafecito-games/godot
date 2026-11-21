@@ -1355,6 +1355,24 @@ Ref<ResourceLoader::LoadToken> ResourceLoader::_load_start(const String &p_path,
 			}
 		}
 
+		if (!ignoring_cache) {
+			// If a previous failed load with no remaining user tokens is still releasing its
+			// worker-side LoadToken reference, wait briefly for it to clear so a fresh load
+			// does not spuriously inherit the stale failure.
+			while (thread_load_tasks.has(local_path) &&
+					thread_load_tasks[local_path].status == THREAD_LOAD_FAILED &&
+					thread_load_tasks[local_path].load_token != nullptr &&
+					thread_load_tasks[local_path].load_token->user_rc == 0) {
+				if (thread_load_tasks[local_path].load_token->get_reference_count() == 0) {
+					thread_load_tasks[local_path].load_token->clear();
+					break;
+				}
+				thread_load_lock.temp_unlock();
+				_wait_tick();
+				thread_load_lock.temp_relock();
+			}
+		}
+
 		if (!ignoring_cache && thread_load_tasks.has(local_path)) {
 			load_token = Ref<LoadToken>(thread_load_tasks[local_path].load_token);
 			if (load_token.is_valid()) {
@@ -1973,6 +1991,19 @@ bool ResourceLoader::is_current_load_in_cycle_transaction() {
 	MutexLock thread_load_lock(thread_load_mutex);
 	CycleTransaction *active_transaction = _resolve_cycle_transaction(curr_load_task->staged_transaction.ptr());
 	return active_transaction != nullptr && active_transaction->state == CycleTransaction::STATE_IN_PROGRESS;
+}
+
+bool ResourceLoader::is_path_ancestor_of_current_load(const String &p_path) {
+	if (p_path.is_empty() || curr_load_task == nullptr) {
+		return false;
+	}
+	const String local_path = _validate_local_path(p_path);
+	MutexLock thread_load_lock(thread_load_mutex);
+	const ThreadLoadTask *ancestor_task = thread_load_tasks.getptr(local_path);
+	if (ancestor_task == nullptr) {
+		return false;
+	}
+	return _is_ancestor_of_current_task(ancestor_task);
 }
 
 bool ResourceLoader::exists(const String &p_path, const String &p_type_hint) {
