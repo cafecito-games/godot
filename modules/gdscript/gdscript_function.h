@@ -255,6 +255,7 @@ private:
 	friend class GDScriptBytecodeVerifier;
 #ifdef TESTS_ENABLED
 	friend class GDScriptBytecodeAbiTestAccessor;
+	friend class GDScriptBytecodeTestAccessor;
 #endif
 
 	StringName name;

@@ -59,5 +59,7 @@ public:
 	int get_argument_count(bool &r_is_valid) const override;
 	void call(const Variant **p_arguments, int p_argcount, Variant &r_return_value, Callable::CallError &r_call_error) const override;
 
+	static const GDScriptUtilityCallable *get_from_callable(const Callable &p_callable);
+
 	GDScriptUtilityCallable(const StringName &p_function_name);
 };

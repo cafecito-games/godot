@@ -61,6 +61,7 @@ class GDScript : public Script {
 	bool valid = false;
 	bool reloading = false;
 	bool _is_abstract = false;
+	bool bytecode_backed = false;
 #if defined(TOOLS_ENABLED) || defined(TESTS_ENABLED)
 	bool detached_export_script = false;
 #endif
@@ -91,6 +92,12 @@ class GDScript : public Script {
 	friend class GDScriptLambdaCallable;
 	friend class GDScriptLambdaSelfCallable;
 	friend class GDScriptLanguage;
+	friend class GDScriptBytecodeExporter;
+	friend class GDScriptBytecodeLoader;
+	friend class GDScriptBytecodeVerifier;
+#ifdef TESTS_ENABLED
+	friend class GDScriptBytecodeTestAccessor;
+#endif
 	friend struct GDScriptUtilityFunctionsDefinitions;
 
 	Ref<GDScriptNativeClass> native;
@@ -244,6 +251,8 @@ public:
 	void cancel_pending_functions(bool warn);
 
 	virtual bool is_valid() const override { return valid; }
+	void set_bytecode_backed(bool p_backed) { bytecode_backed = p_backed; }
+	bool is_bytecode_backed() const { return bytecode_backed; }
 #if defined(TOOLS_ENABLED) || defined(TESTS_ENABLED)
 	void set_detached_export_script(bool p_detached) { detached_export_script = p_detached; }
 	bool is_detached_export_script() const { return detached_export_script; }
