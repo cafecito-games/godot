@@ -42,6 +42,7 @@
 
 #include "core/config/engine.h"
 #include "core/config/project_settings.h"
+#include "core/io/compression.h"
 #include "core/io/dir_access.h"
 #include "core/io/file_access.h"
 #include "core/io/marshalls.h"
@@ -180,7 +181,10 @@ public:
 		u32(static_cast<uint32_t>(utf8_bytes.length()));
 		raw(reinterpret_cast<const uint8_t *>(utf8_bytes.get_data()), utf8_bytes.length());
 	}
-	void write_valid_header(uint32_t p_script_flags = 0) {
+	void write_valid_header(
+			uint32_t p_script_flags = 0,
+			uint8_t p_compression_mode = GDScriptBytecodeFormat::COMPRESSION_NONE,
+			uint32_t p_uncompressed_payload_size = 0) {
 		raw(GDScriptBytecodeFormat::MAGIC, 4);
 		u32(GDScriptBytecodeFormat::FORMAT_VERSION);
 		raw(GDSCRIPT_BYTECODE_ABI_ID, 16);
@@ -189,6 +193,8 @@ public:
 		utf8(String(GODOT_VERSION_FULL_CONFIG));
 		utf8(String(GODOT_VERSION_HASH));
 		u32(p_script_flags);
+		u8(p_compression_mode);
+		u32(p_uncompressed_payload_size);
 	}
 	const Vector<uint8_t> &get_bytes() const { return bytes; }
 };
@@ -268,7 +274,7 @@ static void collect_opcodes_recursive(const GDScriptFunction *p_function, HashSe
 }
 
 static size_t find_section_offset(const Vector<uint8_t> &p_buffer, GDScriptBytecodeFormat::SectionId p_target_section) {
-	// Walk Header + ScriptFlags to Section 0.
+	// Walk Header + ScriptFlags + CompressionEnvelope to Section 0.
 	size_t offset = 4 + 4 + 16 + 1 + 4; // magic + version + abi + real_t + opcode_end
 	REQUIRE(offset + 4 <= static_cast<size_t>(p_buffer.size()));
 	uint32_t diag_config_len = decode_uint32(p_buffer.ptr() + offset);
@@ -277,6 +283,7 @@ static size_t find_section_offset(const Vector<uint8_t> &p_buffer, GDScriptBytec
 	uint32_t diag_hash_len = decode_uint32(p_buffer.ptr() + offset);
 	offset += 4 + diag_hash_len;
 	offset += 4; // ScriptFlags
+	offset += 1 + 4; // compression_mode + uncompressed_payload_size
 
 	if (p_target_section == GDScriptBytecodeFormat::SECTION_STRING_TABLE) {
 		return offset;
@@ -347,7 +354,7 @@ TEST_SUITE("[Modules][GDScript][Bytecode]") {
 		{
 			Vector<uint8_t> mutated = valid_bytes;
 			const size_t section0_offset = find_section_offset(mutated, GDScriptBytecodeFormat::SECTION_STRING_TABLE);
-			encode_uint32(1u << 2, mutated.ptrw() + section0_offset - 4);
+			encode_uint32(1u << 2, mutated.ptrw() + section0_offset - 9);
 			CHECK(GDScriptBytecodeLoader::check_header(mutated) != OK);
 		}
 	}
@@ -1865,6 +1872,174 @@ func cast_both(value) -> Array:
 			for (const KeyValue<StringName, Ref<GDScript>> &subclass_entry : cyclic_target->get_subclasses()) {
 				CHECK(subclass_entry.value->get_base().is_null());
 			}
+		}
+	}
+
+	TEST_CASE("Zstd compression round-trip, determinism, zero-source-leak, and hostile envelope bounds") {
+		Ref<GDScript> external_dep = compile_source("extends RefCounted\nconst EXT_VALUE: int = 19\n", "res://zstd_ext_dep.gd");
+		Ref<GDScript> script = compile_source(R"(
+extends RefCounted
+
+# SECRET_COMMENT_ZSTD_NEVER_LEAK
+const TAG_LABEL: String = "zstd_roundtrip_payload"
+const NUMBERS = [10, 20, 30, 40, 50, 60, 70, 80]
+
+class Helper extends RefCounted:
+	var scale: int = 3
+	func compute(input_value: int) -> int:
+		var secret_local_zstd_var: int = input_value * scale
+		return secret_local_zstd_var + 7
+
+func evaluate(base_value: int) -> Dictionary:
+	var helper := Helper.new()
+	var total: int = helper.compute(base_value)
+	for entry in NUMBERS:
+		total += entry
+	return {
+		"label": TAG_LABEL,
+		"total": total,
+	}
+)",
+				"res://zstd_roundtrip.gd");
+		GDScriptBytecodeTestAccessor::mutable_script_constants(script.ptr())[StringName("EXT_DEP")] = external_dep;
+
+		GDScriptBytecodeExporter::Options uncompressed_options;
+		uncompressed_options.release_profile = true;
+		uncompressed_options.emit_line_opcodes = false;
+		uncompressed_options.compression_mode = GDScriptBytecodeFormat::COMPRESSION_NONE;
+		const Vector<uint8_t> uncompressed_bytes = export_script_bytes(script, uncompressed_options);
+
+		GDScriptBytecodeExporter::Options compressed_options = uncompressed_options;
+		compressed_options.compression_mode = GDScriptBytecodeFormat::COMPRESSION_ZSTD;
+		const Vector<uint8_t> compressed_bytes_a = export_script_bytes(script, compressed_options);
+		const Vector<uint8_t> compressed_bytes_b = export_script_bytes(script, compressed_options);
+
+		// Deterministic output and meaningful compression savings.
+		CHECK(compressed_bytes_a == compressed_bytes_b);
+		CHECK(compressed_bytes_a.size() < uncompressed_bytes.size());
+
+		// Header check succeeds without decompressing and reports compression metadata.
+		GDScriptBytecodeLoader::HeaderInfo header;
+		String error_message;
+		REQUIRE(GDScriptBytecodeLoader::check_header(compressed_bytes_a, &header, &error_message) == OK);
+		CHECK(header.compression_mode == GDScriptBytecodeFormat::COMPRESSION_ZSTD);
+		const size_t payload_offset = find_section_offset(uncompressed_bytes, GDScriptBytecodeFormat::SECTION_STRING_TABLE);
+		CHECK(header.uncompressed_payload_size == static_cast<uint32_t>(uncompressed_bytes.size() - payload_offset));
+
+		// Decompressed payload preserves release-profile zero-source-leak guarantees.
+		Vector<uint8_t> decompressed_payload;
+		decompressed_payload.resize(static_cast<int>(header.uncompressed_payload_size));
+		const int64_t raw_decompressed_size = Compression::decompress(
+				decompressed_payload.ptrw(),
+				static_cast<int64_t>(header.uncompressed_payload_size),
+				compressed_bytes_a.ptr() + payload_offset,
+				static_cast<int64_t>(compressed_bytes_a.size() - payload_offset),
+				Compression::MODE_ZSTD);
+		REQUIRE(raw_decompressed_size == static_cast<int64_t>(header.uncompressed_payload_size));
+		CHECK_FALSE(buffer_contains_ascii(decompressed_payload, "SECRET_COMMENT_ZSTD_NEVER_LEAK"));
+		CHECK_FALSE(buffer_contains_ascii(decompressed_payload, "secret_local_zstd_var"));
+
+		// Dependency scan, skeleton load, and full load + execution all work on compressed bytecode.
+		Vector<String> dependencies;
+		REQUIRE(GDScriptBytecodeLoader::read_dependencies(compressed_bytes_a, dependencies, &error_message) == OK);
+		REQUIRE(dependencies.size() == 1);
+		CHECK(dependencies[0] == "res://zstd_ext_dep.gd");
+
+		Ref<GDScript> skeleton_script = memnew(GDScript);
+		REQUIRE(GDScriptBytecodeLoader::load_skeleton(compressed_bytes_a, skeleton_script, "res://zstd_roundtrip.gd", nullptr, &error_message) == OK);
+		CHECK(skeleton_script->get_subclasses().has(StringName("Helper")));
+
+		StubExternalResolver resolver;
+		resolver.scripts["res://zstd_ext_dep.gd"] = external_dep;
+		Ref<GDScript> loaded = load_script_bytes(compressed_bytes_a, "res://zstd_roundtrip.gd", &resolver);
+		Ref<RefCounted> instance = memnew(RefCounted);
+		instance->set_script(loaded);
+		Variant result_variant = instance->call(StringName("evaluate"), 10);
+		REQUIRE(result_variant.get_type() == Variant::DICTIONARY);
+		Dictionary result = result_variant;
+		CHECK(String(result["label"]) == "zstd_roundtrip_payload");
+		CHECK(int(result["total"]) == (10 * 3 + 7 + 360));
+
+		// Exporter rejects unknown compression mode.
+		{
+			GDScriptBytecodeExporter::Options invalid_options;
+			invalid_options.compression_mode = GDScriptBytecodeFormat::COMPRESSION_MAX;
+			Vector<uint8_t> ignored_output;
+			String export_error;
+			CHECK(GDScriptBytecodeExporter::serialize(script, ignored_output, invalid_options, &export_error) == ERR_INVALID_PARAMETER);
+			CHECK(ignored_output.is_empty());
+		}
+
+		// Hostile compression envelope tests.
+		{
+			// Unknown compression_mode byte.
+			RawBufferBuilder builder;
+			builder.write_valid_header(0, GDScriptBytecodeFormat::COMPRESSION_MAX, 16);
+			builder.u32(0);
+			CHECK(GDScriptBytecodeLoader::check_header(builder.get_bytes()) == ERR_INVALID_DATA);
+		}
+		{
+			// Non-zero uncompressed_payload_size with COMPRESSION_NONE.
+			RawBufferBuilder builder;
+			builder.write_valid_header(0, GDScriptBytecodeFormat::COMPRESSION_NONE, 16);
+			builder.u32(0);
+			CHECK(GDScriptBytecodeLoader::check_header(builder.get_bytes()) == ERR_INVALID_DATA);
+		}
+		{
+			// Zero uncompressed_payload_size with COMPRESSION_ZSTD.
+			RawBufferBuilder builder;
+			builder.write_valid_header(0, GDScriptBytecodeFormat::COMPRESSION_ZSTD, 0);
+			builder.u32(0x12345678u);
+			CHECK(GDScriptBytecodeLoader::check_header(builder.get_bytes()) == ERR_INVALID_DATA);
+		}
+		{
+			// Empty compressed payload with COMPRESSION_ZSTD.
+			RawBufferBuilder builder;
+			builder.write_valid_header(0, GDScriptBytecodeFormat::COMPRESSION_ZSTD, 64);
+			CHECK(GDScriptBytecodeLoader::check_header(builder.get_bytes()) == ERR_FILE_EOF);
+		}
+		{
+			// Declared uncompressed_payload_size exceeding MAX_UNCOMPRESSED_PAYLOAD_BYTES.
+			RawBufferBuilder builder;
+			builder.write_valid_header(0, GDScriptBytecodeFormat::COMPRESSION_ZSTD, GDScriptBytecodeFormat::MAX_UNCOMPRESSED_PAYLOAD_BYTES + 1u);
+			builder.u32(0x12345678u);
+			CHECK(GDScriptBytecodeLoader::check_header(builder.get_bytes()) == ERR_INVALID_DATA);
+		}
+		{
+			// Zip-bomb ratio rejection (declared uncompressed size > MAX(MIN_DECOMPRESSION_ALLOWANCE, compressed_size * MAX_DECOMPRESSION_RATIO)).
+			RawBufferBuilder builder;
+			builder.write_valid_header(0, GDScriptBytecodeFormat::COMPRESSION_ZSTD, static_cast<uint32_t>(GDScriptBytecodeFormat::MIN_DECOMPRESSION_ALLOWANCE + 1u));
+			builder.u32(0x12345678u);
+			CHECK(GDScriptBytecodeLoader::check_header(builder.get_bytes()) == ERR_INVALID_DATA);
+		}
+		{
+			// Corrupted zstd payload bytes.
+			Vector<uint8_t> corrupted = compressed_bytes_a;
+			corrupted.write[payload_offset] ^= 0xFF;
+			corrupted.write[payload_offset + 1] ^= 0xAA;
+			Ref<GDScript> target = memnew(GDScript);
+			CHECK(GDScriptBytecodeLoader::load_full(corrupted, target, "res://zstd_corrupt.gd", &resolver) == ERR_FILE_CORRUPT);
+		}
+		{
+			// Truncated zstd payload.
+			Vector<uint8_t> truncated = compressed_bytes_a.slice(0, compressed_bytes_a.size() - 4);
+			Ref<GDScript> target = memnew(GDScript);
+			CHECK(GDScriptBytecodeLoader::load_full(truncated, target, "res://zstd_trunc.gd", &resolver) == ERR_FILE_CORRUPT);
+		}
+		{
+			// Declared uncompressed_payload_size mismatch (larger than actual decompressed output).
+			Vector<uint8_t> mismatched = compressed_bytes_a;
+			encode_uint32(header.uncompressed_payload_size + 16u, mismatched.ptrw() + payload_offset - 4);
+			Ref<GDScript> target = memnew(GDScript);
+			CHECK(GDScriptBytecodeLoader::load_full(mismatched, target, "res://zstd_size_mismatch.gd", &resolver) == ERR_FILE_CORRUPT);
+		}
+		{
+			// Trailing garbage bytes appended after a valid zstd frame.
+			Vector<uint8_t> with_trailing = compressed_bytes_a;
+			with_trailing.push_back(0xDE);
+			with_trailing.push_back(0xAD);
+			Ref<GDScript> target = memnew(GDScript);
+			CHECK(GDScriptBytecodeLoader::load_full(with_trailing, target, "res://zstd_trailing.gd", &resolver) == ERR_FILE_CORRUPT);
 		}
 	}
 }

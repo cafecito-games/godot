@@ -67,6 +67,8 @@ public:
 		String diag_version_full_config;
 		String diag_version_hash;
 		uint32_t script_flags = 0;
+		uint8_t compression_mode = 0;
+		uint32_t uncompressed_payload_size = 0;
 	};
 
 	static Error check_header(

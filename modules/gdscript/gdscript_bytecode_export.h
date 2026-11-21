@@ -49,6 +49,7 @@ public:
 		bool release_profile = false;
 		bool emit_line_opcodes = true;
 		bool auto_detect_static_data = true;
+		GDScriptBytecodeFormat::CompressionMode compression_mode = GDScriptBytecodeFormat::COMPRESSION_NONE;
 	};
 
 	static bool detect_static_data(const Ref<GDScript> &p_script);

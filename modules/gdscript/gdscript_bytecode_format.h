@@ -50,6 +50,12 @@ enum ScriptFlags : uint32_t {
 	SCRIPT_FLAG_KNOWN_MASK = SCRIPT_FLAG_HAS_STATIC_DATA | SCRIPT_FLAG_ANNOTATED_STATIC_UNLOAD,
 };
 
+enum CompressionMode : uint8_t {
+	COMPRESSION_NONE = 0,
+	COMPRESSION_ZSTD = 1,
+	COMPRESSION_MAX = 2,
+};
+
 enum ClassFlags : uint8_t {
 	CLASS_FLAG_TOOL = 1u << 0,
 	CLASS_FLAG_ABSTRACT = 1u << 1,
@@ -115,6 +121,9 @@ inline constexpr uint32_t MAX_FRAME_ALLOCA_BYTES = 256 * 1024;
 inline constexpr uint32_t MAX_CLASS_DEPTH = 64;
 inline constexpr uint32_t MAX_TYPE_DEPTH = 32;
 inline constexpr uint32_t MAX_LAMBDA_DEPTH = 32;
+inline constexpr uint32_t MAX_UNCOMPRESSED_PAYLOAD_BYTES = 64u * 1024u * 1024u;
+inline constexpr uint64_t MIN_DECOMPRESSION_ALLOWANCE = 64u * 1024u;
+inline constexpr uint64_t MAX_DECOMPRESSION_RATIO = 64u;
 
 inline constexpr int MAX_OPCODE_OPERANDS = 8;
 

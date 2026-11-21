@@ -49,6 +49,7 @@ class EditorExportGDScript : public EditorExportPlugin {
 	String _format_compile_error(const String &p_path, Error p_fallback_error) const;
 	void _export_file_compiled_bytecode(const String &p_path);
 
+	static bool _is_compiled_bytecode_mode(EditorExportPreset::ScriptExportMode p_mode);
 	static bool _is_gdscript_class_name(const StringName &p_class_name);
 	static bool _classes_contain_gdscript(const HashSet<StringName> &p_classes);
 	static bool _contains_embedded_gdscript(const String &p_exported_path, const Vector<uint8_t> *p_in_memory_data);

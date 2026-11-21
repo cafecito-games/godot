@@ -110,7 +110,10 @@ static String make_temp_suite_dir(const String &p_name) {
 	return base_dir;
 }
 
-static void export_scripts_to_bytecode_and_delete_sources(const Vector<String> &p_script_paths, bool p_write_remaps = true) {
+static void export_scripts_to_bytecode_and_delete_sources(
+		const Vector<String> &p_script_paths,
+		bool p_write_remaps = true,
+		GDScriptBytecodeFormat::CompressionMode p_compression_mode = GDScriptBytecodeFormat::COMPRESSION_NONE) {
 	GDScriptExportCompileSession session(false);
 	Vector<Vector<uint8_t>> serialized_buffers;
 	serialized_buffers.resize(p_script_paths.size());
@@ -126,6 +129,7 @@ static void export_scripts_to_bytecode_and_delete_sources(const Vector<String> &
 		export_options.annotated_static_unload = session.has_annotated_static_unload(p_script_paths[index]);
 		export_options.release_profile = false;
 		export_options.emit_line_opcodes = true;
+		export_options.compression_mode = p_compression_mode;
 
 		String export_error;
 		Error serialize_error = GDScriptBytecodeExporter::serialize(compiled_script, serialized_buffers.write[index], export_options, &export_error);
@@ -1013,6 +1017,50 @@ TEST_CASE("[Modules][GDScript][BytecodeCache] Concurrent unrelated loads of cycl
 	}
 }
 #endif // THREADS_ENABLED
+
+TEST_CASE("[GDScript][BytecodeCache] Compressed zstd .gdb scripts load through ResourceLoader and GDScriptCache with dependencies") {
+	ensure_gdscript_language_initialized();
+	const String dir = make_temp_suite_dir("gdscript_bytecode_cache_zstd");
+	const String base_path = dir.path_join("base.gd");
+	const String child_path = dir.path_join("child.gd");
+
+	write_text_file(
+			base_path,
+			"extends RefCounted\n"
+			"static var shared_offset: int = 12\n"
+			"func base_value() -> int:\n"
+			"\treturn 30 + shared_offset\n");
+	write_text_file(
+			child_path,
+			vformat("extends \"%s\"\n"
+					"func total(delta: int) -> int:\n"
+					"\treturn base_value() + delta\n",
+					base_path));
+
+	Vector<String> scripts;
+	scripts.push_back(base_path);
+	scripts.push_back(child_path);
+	export_scripts_to_bytecode_and_delete_sources(scripts, true, GDScriptBytecodeFormat::COMPRESSION_ZSTD);
+
+	List<String> dependencies;
+	ResourceLoader::get_dependencies(child_path, &dependencies, false);
+	CHECK(dependencies.size() >= 1);
+
+	Ref<GDScript> loaded_child = ResourceLoader::load(child_path, "GDScript");
+	REQUIRE(loaded_child.is_valid());
+	CHECK(loaded_child->is_valid());
+	CHECK(loaded_child->is_bytecode_backed());
+
+	Ref<RefCounted> instance = memnew(RefCounted);
+	instance->set_script(loaded_child);
+	CHECK(int(instance->call(StringName("total"), 8)) == 50);
+
+	instance.unref();
+	loaded_child.unref();
+	cleanup_cached_scripts(scripts);
+	CHECK(wait_for_resource_cache_eviction(child_path));
+	CHECK(wait_for_resource_cache_eviction(base_path));
+}
 
 } // namespace TestGDScriptBytecodeCache
 

@@ -276,6 +276,7 @@ def extract_format_schema(format_header_text: str) -> list[str]:
 
     for enum_name in (
         "ScriptFlags",
+        "CompressionMode",
         "ClassFlags",
         "ScriptRefLocality",
         "BaseClassKind",

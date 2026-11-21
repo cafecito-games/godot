@@ -1261,6 +1261,68 @@ TEST_CASE("[Editor][Export][GDScript] Headless CLI --export-pack returns 0 on va
 	}
 }
 
+TEST_CASE("[Editor][Export][GDScript] Compressed compiled bytecode mode exports zstd .gdb and still rejects built-in scripts") {
+	BytecodeExportTestEnvironment env("compressed_bytecode_mode");
+	env.write_project_text_file(
+			"worker.gd",
+			"extends RefCounted\n"
+			"const TITLE: String = \"compressed_worker_title\"\n"
+			"func compute(value: int) -> int:\n"
+			"\tvar accumulator: int = value\n"
+			"\tfor step in range(10):\n"
+			"\t\taccumulator += step * 3\n"
+			"\treturn accumulator\n");
+	env.write_project_text_file(
+			"embedded.tscn",
+			"[gd_scene load_steps=2 format=3]\n"
+			"[sub_resource type=\"GDScript\" id=\"GDScript_zstd\"]\n"
+			"script/source = \"extends Node\\n\"\n"
+			"[node name=\"Root\" type=\"Node\"]\n"
+			"script = SubResource(\"GDScript_zstd\")\n");
+
+	Vector<String> valid_files;
+	valid_files.push_back("res://worker.gd");
+
+	Ref<EditorExportPreset> uncompressed_preset = env.create_preset(valid_files, EditorExportPreset::MODE_SCRIPT_COMPILED_BYTECODE);
+	const String uncompressed_pck = env.output_dir.path_join("worker_raw.pck");
+	REQUIRE(env.platform->export_pack(uncompressed_preset, false, uncompressed_pck) == OK);
+
+	Ref<EditorExportPreset> compressed_preset = env.create_preset(valid_files, EditorExportPreset::MODE_SCRIPT_COMPILED_BYTECODE_COMPRESSED);
+	const String compressed_pck = env.output_dir.path_join("worker_zstd.pck");
+	REQUIRE(env.platform->export_pack(compressed_preset, false, compressed_pck) == OK);
+
+	HashMap<String, Vector<uint8_t>> raw_entries = read_pck_entries(uncompressed_pck);
+	HashMap<String, Vector<uint8_t>> zstd_entries = read_pck_entries(compressed_pck);
+	REQUIRE(raw_entries.has("res://worker.gdb"));
+	REQUIRE(zstd_entries.has("res://worker.gdb"));
+	CHECK(zstd_entries.has("res://worker.gd.remap"));
+	CHECK_FALSE(zstd_entries.has("res://worker.gd"));
+
+	CHECK(zstd_entries["res://worker.gdb"].size() < raw_entries["res://worker.gdb"].size());
+
+	GDScriptBytecodeLoader::HeaderInfo header;
+	REQUIRE(GDScriptBytecodeLoader::check_header(zstd_entries["res://worker.gdb"], &header) == OK);
+	CHECK(header.compression_mode == GDScriptBytecodeFormat::COMPRESSION_ZSTD);
+	CHECK(header.uncompressed_payload_size > 0);
+
+	Ref<GDScript> loaded = memnew(GDScript);
+	REQUIRE(GDScriptBytecodeLoader::load_full(zstd_entries["res://worker.gdb"], loaded, "res://worker.gd", nullptr) == OK);
+	Ref<RefCounted> instance = memnew(RefCounted);
+	instance->set_script(loaded);
+	CHECK(int(instance->call(StringName("compute"), 5)) == 5 + 135);
+
+	// Built-in GDScript rejection remains active in compressed bytecode mode.
+	Vector<String> embedded_files;
+	embedded_files.push_back("res://embedded.tscn");
+	Ref<EditorExportPreset> embedded_preset = env.create_preset(embedded_files, EditorExportPreset::MODE_SCRIPT_COMPILED_BYTECODE_COMPRESSED);
+	const String embedded_pck = env.output_dir.path_join("embedded_zstd.pck");
+	ERR_PRINT_OFF;
+	const Error embedded_err = env.platform->export_pack(embedded_preset, false, embedded_pck);
+	ERR_PRINT_ON;
+	CHECK(embedded_err == ERR_INVALID_DATA);
+	CHECK_FALSE(FileAccess::exists(embedded_pck));
+}
+
 } // namespace TestGDScriptBytecodeExportPlugin
 
 #endif // defined(TOOLS_ENABLED) && defined(MODULE_GDSCRIPT_ENABLED)

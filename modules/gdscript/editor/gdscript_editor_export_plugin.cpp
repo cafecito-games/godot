@@ -98,6 +98,10 @@ String EditorExportGDScript::_format_compile_error(const String &p_path, Error p
 	return TTR("script is not valid");
 }
 
+bool EditorExportGDScript::_is_compiled_bytecode_mode(EditorExportPreset::ScriptExportMode p_mode) {
+	return p_mode == EditorExportPreset::MODE_SCRIPT_COMPILED_BYTECODE || p_mode == EditorExportPreset::MODE_SCRIPT_COMPILED_BYTECODE_COMPRESSED;
+}
+
 bool EditorExportGDScript::_is_gdscript_class_name(const StringName &p_class_name) {
 	if (p_class_name == StringName()) {
 		return false;
@@ -194,7 +198,7 @@ void EditorExportGDScript::_export_begin(const HashSet<String> &p_features, bool
 		script_mode = preset->get_script_export_mode();
 	}
 
-	if (script_mode == EditorExportPreset::MODE_SCRIPT_COMPILED_BYTECODE) {
+	if (_is_compiled_bytecode_mode(script_mode)) {
 		compile_session = memnew(GDScriptExportCompileSession(!export_debug));
 	}
 }
@@ -239,6 +243,9 @@ void EditorExportGDScript::_export_file_compiled_bytecode(const String &p_path) 
 	export_options.release_profile = compile_session->is_release_profile();
 	export_options.emit_line_opcodes = compile_session->should_emit_line_opcodes();
 	export_options.auto_detect_static_data = true;
+	export_options.compression_mode = (script_mode == EditorExportPreset::MODE_SCRIPT_COMPILED_BYTECODE_COMPRESSED)
+			? GDScriptBytecodeFormat::COMPRESSION_ZSTD
+			: GDScriptBytecodeFormat::COMPRESSION_NONE;
 
 	Vector<uint8_t> bytecode_buffer;
 	String serialize_error_message;
@@ -256,7 +263,7 @@ void EditorExportGDScript::_export_file_compiled_bytecode(const String &p_path) 
 }
 
 void EditorExportGDScript::_export_file(const String &p_path, const String &p_type, const HashSet<String> &p_features) {
-	if (script_mode == EditorExportPreset::MODE_SCRIPT_COMPILED_BYTECODE) {
+	if (_is_compiled_bytecode_mode(script_mode)) {
 		_export_file_compiled_bytecode(p_path);
 		return;
 	}
@@ -281,7 +288,7 @@ void EditorExportGDScript::_export_file(const String &p_path, const String &p_ty
 }
 
 void EditorExportGDScript::_validate_exported_file(const String &p_source_path, const String &p_exported_path, const String &p_type, const Vector<uint8_t> *p_in_memory_data) {
-	if (script_mode != EditorExportPreset::MODE_SCRIPT_COMPILED_BYTECODE) {
+	if (!_is_compiled_bytecode_mode(script_mode)) {
 		return;
 	}
 

@@ -131,7 +131,7 @@
 		<method name="get_script_export_mode" qualifiers="const">
 			<return type="int" enum="EditorExportPreset.ScriptExportMode" />
 			<description>
-				Returns the export mode used by GDScript files. [code]0[/code] for "Text", [code]1[/code] for "Binary tokens", and [code]2[/code] for "Compressed binary tokens (smaller files)".
+				Returns the export mode used by GDScript files. [code]0[/code] for "Text", [code]1[/code] for "Binary tokens", [code]2[/code] for "Compressed binary tokens (smaller files)", [code]3[/code] for "Compiled bytecode", and [code]4[/code] for "Compressed compiled bytecode".
 			</description>
 		</method>
 		<method name="get_version" qualifiers="const">
@@ -194,6 +194,10 @@
 		<constant name="MODE_SCRIPT_BINARY_TOKENS" value="1" enum="ScriptExportMode">
 		</constant>
 		<constant name="MODE_SCRIPT_BINARY_TOKENS_COMPRESSED" value="2" enum="ScriptExportMode">
+		</constant>
+		<constant name="MODE_SCRIPT_COMPILED_BYTECODE" value="3" enum="ScriptExportMode">
+		</constant>
+		<constant name="MODE_SCRIPT_COMPILED_BYTECODE_COMPRESSED" value="4" enum="ScriptExportMode">
 		</constant>
 	</constants>
 </class>

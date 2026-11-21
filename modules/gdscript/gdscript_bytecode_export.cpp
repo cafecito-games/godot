@@ -36,6 +36,7 @@
 #include "gdscript_utility_callable.h"
 
 #include "core/config/engine.h"
+#include "core/io/compression.h"
 #include "core/io/marshalls.h"
 #include "core/object/class_db.h"
 #include "core/templates/hash_map.h"
@@ -1039,6 +1040,9 @@ public:
 		if (root_script == nullptr || !root_script->is_valid()) {
 			return fail(ERR_INVALID_PARAMETER, "Cannot serialize null or invalid GDScript.");
 		}
+		if (options.compression_mode != COMPRESSION_NONE && options.compression_mode != COMPRESSION_ZSTD) {
+			return fail(ERR_INVALID_PARAMETER, vformat("Unsupported GDScript bytecode compression mode %d.", static_cast<uint32_t>(options.compression_mode)));
+		}
 
 		Error collect_error = collect_local_classes(root_script, 0);
 		if (collect_error != OK) {
@@ -1078,7 +1082,28 @@ public:
 			dependency_string_indices.write[index] = intern_string(sorted_dependencies[index]);
 		}
 
-		// Assemble final container: Header -> ScriptFlags -> Section 0 -> Section 1 -> Section 2 -> Section 3.
+		// Assemble payload (Section 0 -> Section 1 -> Section 2 -> Section 3).
+		BytecodeWriter payload;
+
+		// Section 0: SECTION_STRING_TABLE.
+		payload.write_u32(SECTION_STRING_TABLE);
+		payload.write_u32(static_cast<uint32_t>(string_table.size()));
+		for (int index = 0; index < string_table.size(); index++) {
+			payload.write_utf8_string(string_table[index]);
+		}
+
+		// Section 1: SECTION_DEPENDENCIES.
+		payload.write_u32(SECTION_DEPENDENCIES);
+		payload.write_u32(static_cast<uint32_t>(dependency_string_indices.size()));
+		for (int index = 0; index < dependency_string_indices.size(); index++) {
+			payload.write_u32(dependency_string_indices[index]);
+		}
+
+		// Section 2 & 3 from scratch buffer.
+		const Vector<uint8_t> &scratch_bytes = body_scratch.get_bytes();
+		payload.write_raw(scratch_bytes.ptr(), scratch_bytes.size());
+
+		// Assemble final container: Header -> ScriptFlags -> CompressionEnvelope -> Payload.
 		BytecodeWriter output;
 		output.write_raw(MAGIC, 4);
 		output.write_u32(FORMAT_VERSION);
@@ -1101,23 +1126,33 @@ public:
 		}
 		output.write_u32(script_flags);
 
-		// Section 0: SECTION_STRING_TABLE.
-		output.write_u32(SECTION_STRING_TABLE);
-		output.write_u32(static_cast<uint32_t>(string_table.size()));
-		for (int index = 0; index < string_table.size(); index++) {
-			output.write_utf8_string(string_table[index]);
+		const Vector<uint8_t> &payload_bytes = payload.get_bytes();
+		if (options.compression_mode == COMPRESSION_NONE) {
+			output.write_u8(COMPRESSION_NONE);
+			output.write_u32(0);
+			output.write_raw(payload_bytes.ptr(), payload_bytes.size());
+		} else {
+			if (payload_bytes.is_empty() || static_cast<uint64_t>(payload_bytes.size()) > MAX_UNCOMPRESSED_PAYLOAD_BYTES) {
+				return fail(ERR_INVALID_DATA, vformat("GDScript bytecode payload size %d exceeds compression ceiling %d.", payload_bytes.size(), MAX_UNCOMPRESSED_PAYLOAD_BYTES));
+			}
+			const int64_t max_compressed_size = Compression::get_max_compressed_buffer_size(payload_bytes.size(), Compression::MODE_ZSTD);
+			if (max_compressed_size <= 0 || max_compressed_size > INT32_MAX) {
+				return fail(ERR_OUT_OF_MEMORY, "Failed to compute zstd compressed buffer size for GDScript bytecode.");
+			}
+			Vector<uint8_t> compressed_payload;
+			compressed_payload.resize(static_cast<int>(max_compressed_size));
+			const int64_t compressed_size = Compression::compress(
+					compressed_payload.ptrw(),
+					payload_bytes.ptr(),
+					payload_bytes.size(),
+					Compression::MODE_ZSTD);
+			if (compressed_size <= 0 || compressed_size > max_compressed_size) {
+				return fail(ERR_BUG, "Failed to compress GDScript bytecode payload with zstd.");
+			}
+			output.write_u8(COMPRESSION_ZSTD);
+			output.write_u32(static_cast<uint32_t>(payload_bytes.size()));
+			output.write_raw(compressed_payload.ptr(), static_cast<int>(compressed_size));
 		}
-
-		// Section 1: SECTION_DEPENDENCIES.
-		output.write_u32(SECTION_DEPENDENCIES);
-		output.write_u32(static_cast<uint32_t>(dependency_string_indices.size()));
-		for (int index = 0; index < dependency_string_indices.size(); index++) {
-			output.write_u32(dependency_string_indices[index]);
-		}
-
-		// Section 2 & 3 from scratch buffer.
-		const Vector<uint8_t> &scratch_bytes = body_scratch.get_bytes();
-		output.write_raw(scratch_bytes.ptr(), scratch_bytes.size());
 
 		r_buffer = output.get_bytes();
 		return OK;

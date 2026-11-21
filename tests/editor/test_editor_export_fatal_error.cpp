@@ -580,6 +580,7 @@ TEST_CASE("[Editor][Export] EditorExportPreset persists and loads MODE_SCRIPT_CO
 	CHECK(static_cast<int>(EditorExportPreset::MODE_SCRIPT_BINARY_TOKENS) == 1);
 	CHECK(static_cast<int>(EditorExportPreset::MODE_SCRIPT_BINARY_TOKENS_COMPRESSED) == 2);
 	CHECK(static_cast<int>(EditorExportPreset::MODE_SCRIPT_COMPILED_BYTECODE) == 3);
+	CHECK(static_cast<int>(EditorExportPreset::MODE_SCRIPT_COMPILED_BYTECODE_COMPRESSED) == 4);
 
 	ExportTestEnvironment env("script_mode_persistence");
 
@@ -588,24 +589,36 @@ TEST_CASE("[Editor][Export] EditorExportPreset persists and loads MODE_SCRIPT_CO
 	preset->set_script_export_mode(EditorExportPreset::MODE_SCRIPT_COMPILED_BYTECODE);
 	CHECK(preset->get_script_export_mode() == EditorExportPreset::MODE_SCRIPT_COMPILED_BYTECODE);
 
+	Ref<EditorExportPreset> compressed_preset = env.platform->create_preset();
+	compressed_preset->set_name("CompressedCompiledBytecodePreset");
+	compressed_preset->set_script_export_mode(EditorExportPreset::MODE_SCRIPT_COMPILED_BYTECODE_COMPRESSED);
+	CHECK(compressed_preset->get_script_export_mode() == EditorExportPreset::MODE_SCRIPT_COMPILED_BYTECODE_COMPRESSED);
+
 	env.editor_export->add_export_preset(preset);
+	env.editor_export->add_export_preset(compressed_preset);
 
 	// Trigger EditorExport's internal save timer timeout to write res://export_presets.cfg synchronously.
 	REQUIRE(env.editor_export->get_child_count() > 0);
 	env.editor_export->get_child(0)->emit_signal(SNAME("timeout"));
 	REQUIRE(FileAccess::exists("res://export_presets.cfg"));
 
-	// Remove the in-memory preset and reload from export_presets.cfg.
+	// Remove the in-memory presets and reload from export_presets.cfg.
+	env.editor_export->remove_export_preset(1);
 	env.editor_export->remove_export_preset(0);
 	CHECK(env.editor_export->get_export_preset_count() == 0);
 
 	env.editor_export->load_config();
-	REQUIRE(env.editor_export->get_export_preset_count() == 1);
+	REQUIRE(env.editor_export->get_export_preset_count() == 2);
 
 	Ref<EditorExportPreset> loaded_preset = env.editor_export->get_export_preset(0);
 	REQUIRE(loaded_preset.is_valid());
 	CHECK(loaded_preset->get_name() == "CompiledBytecodePreset");
 	CHECK(loaded_preset->get_script_export_mode() == EditorExportPreset::MODE_SCRIPT_COMPILED_BYTECODE);
+
+	Ref<EditorExportPreset> loaded_compressed_preset = env.editor_export->get_export_preset(1);
+	REQUIRE(loaded_compressed_preset.is_valid());
+	CHECK(loaded_compressed_preset->get_name() == "CompressedCompiledBytecodePreset");
+	CHECK(loaded_compressed_preset->get_script_export_mode() == EditorExportPreset::MODE_SCRIPT_COMPILED_BYTECODE_COMPRESSED);
 }
 
 } // namespace TestEditorExportFatalError

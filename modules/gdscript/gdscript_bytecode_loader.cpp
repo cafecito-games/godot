@@ -37,6 +37,7 @@
 #include "gdscript_utility_functions.h"
 
 #include "core/config/engine.h"
+#include "core/io/compression.h"
 #include "core/io/marshalls.h"
 #include "core/io/resource_loader.h"
 #include "core/object/class_db.h"
@@ -194,6 +195,13 @@ public:
 			budget(static_cast<size_t>(p_buffer.size())),
 			error_message(r_error_message) {}
 
+	void reset(const Vector<uint8_t> &p_buffer) {
+		data = p_buffer.ptr();
+		size = static_cast<size_t>(p_buffer.size());
+		offset = 0;
+		budget = DecodeBudget(size);
+	}
+
 	Error fail(Error p_error, const String &p_message) {
 		if (error_message != nullptr) {
 			*error_message = p_message;
@@ -333,6 +341,7 @@ struct DecodedGlobalStore {
 
 class GDScriptBytecodeLoader::LoadContext {
 	BytecodeReader reader;
+	Vector<uint8_t> decompressed_payload;
 	GDScriptBytecodeExternalResolver *resolver = nullptr;
 
 	Vector<String> string_table;
@@ -2315,6 +2324,71 @@ public:
 			return reader.fail(ERR_INVALID_DATA, vformat("Unknown ScriptFlags bits 0x%x.", r_header.script_flags));
 		}
 
+		error = reader.read_u8(r_header.compression_mode);
+		if (error != OK) {
+			return error;
+		}
+		if (r_header.compression_mode >= COMPRESSION_MAX) {
+			return reader.fail(ERR_INVALID_DATA, vformat("Unsupported GDScript bytecode compression mode %d.", r_header.compression_mode));
+		}
+
+		error = reader.read_u32(r_header.uncompressed_payload_size);
+		if (error != OK) {
+			return error;
+		}
+
+		if (r_header.compression_mode == COMPRESSION_NONE) {
+			if (r_header.uncompressed_payload_size != 0) {
+				return reader.fail(ERR_INVALID_DATA, vformat("Uncompressed GDScript bytecode must declare uncompressed_payload_size 0 (got %d).", r_header.uncompressed_payload_size));
+			}
+		} else if (r_header.compression_mode == COMPRESSION_ZSTD) {
+			const uint64_t compressed_size = static_cast<uint64_t>(reader.remaining());
+			if (compressed_size == 0) {
+				return reader.fail(ERR_FILE_EOF, "Compressed GDScript bytecode payload is empty.");
+			}
+			if (r_header.uncompressed_payload_size == 0) {
+				return reader.fail(ERR_INVALID_DATA, "Compressed GDScript bytecode uncompressed_payload_size cannot be 0.");
+			}
+			if (r_header.uncompressed_payload_size > MAX_UNCOMPRESSED_PAYLOAD_BYTES) {
+				return reader.fail(ERR_INVALID_DATA, vformat("Compressed GDScript bytecode uncompressed_payload_size %d exceeds maximum allowed %d bytes.", r_header.uncompressed_payload_size, MAX_UNCOMPRESSED_PAYLOAD_BYTES));
+			}
+			uint64_t max_allowed_uncompressed = MIN_DECOMPRESSION_ALLOWANCE;
+			if (compressed_size > UINT64_MAX / MAX_DECOMPRESSION_RATIO) {
+				max_allowed_uncompressed = MAX_UNCOMPRESSED_PAYLOAD_BYTES;
+			} else {
+				max_allowed_uncompressed = MAX(MIN_DECOMPRESSION_ALLOWANCE, compressed_size * MAX_DECOMPRESSION_RATIO);
+			}
+			if (static_cast<uint64_t>(r_header.uncompressed_payload_size) > max_allowed_uncompressed) {
+				return reader.fail(ERR_INVALID_DATA, vformat("Compressed GDScript bytecode uncompressed_payload_size %d exceeds decompression ratio limit (%d bytes).", r_header.uncompressed_payload_size, static_cast<uint32_t>(MIN(max_allowed_uncompressed, static_cast<uint64_t>(MAX_UNCOMPRESSED_PAYLOAD_BYTES)))));
+			}
+		}
+
+		return OK;
+	}
+
+	Error prepare_payload(const GDScriptBytecodeLoader::HeaderInfo &p_header) {
+		if (p_header.compression_mode == COMPRESSION_NONE) {
+			return OK;
+		}
+		if (p_header.compression_mode != COMPRESSION_ZSTD) {
+			return reader.fail(ERR_INVALID_DATA, vformat("Unsupported GDScript bytecode compression mode %d.", p_header.compression_mode));
+		}
+
+		const size_t compressed_size = reader.remaining();
+		const uint8_t *compressed_ptr = reader.current_ptr();
+		decompressed_payload.resize(static_cast<int>(p_header.uncompressed_payload_size));
+		const int64_t decompressed_size = Compression::decompress(
+				decompressed_payload.ptrw(),
+				static_cast<int64_t>(p_header.uncompressed_payload_size),
+				compressed_ptr,
+				static_cast<int64_t>(compressed_size),
+				Compression::MODE_ZSTD);
+		if (decompressed_size < 0 || decompressed_size != static_cast<int64_t>(p_header.uncompressed_payload_size)) {
+			decompressed_payload.clear();
+			return reader.fail(ERR_FILE_CORRUPT, vformat("Failed to decompress zstd GDScript bytecode payload (expected %d bytes).", p_header.uncompressed_payload_size));
+		}
+
+		reader.reset(decompressed_payload);
 		return OK;
 	}
 
@@ -2499,6 +2573,10 @@ Error GDScriptBytecodeLoader::read_dependencies(
 	if (error != OK) {
 		return error;
 	}
+	error = context.prepare_payload(local_header);
+	if (error != OK) {
+		return error;
+	}
 	error = context.read_string_table_section();
 	if (error != OK) {
 		return error;
@@ -2527,6 +2605,10 @@ Error GDScriptBytecodeLoader::load_skeleton(
 	HeaderInfo local_header;
 	LoadContext context(p_buffer, nullptr, r_error_message);
 	Error error = context.read_header_and_flags(local_header);
+	if (error != OK) {
+		return error;
+	}
+	error = context.prepare_payload(local_header);
 	if (error != OK) {
 		return error;
 	}
@@ -2565,6 +2647,10 @@ Error GDScriptBytecodeLoader::load_full(
 	HeaderInfo local_header;
 	LoadContext context(p_buffer, p_resolver, r_error_message);
 	Error error = context.read_header_and_flags(local_header);
+	if (error != OK) {
+		return error;
+	}
+	error = context.prepare_payload(local_header);
 	if (error != OK) {
 		return error;
 	}

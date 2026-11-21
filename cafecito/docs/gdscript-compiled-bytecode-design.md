@@ -227,26 +227,31 @@ Container:
       bit 1 = ANNOTATED_STATIC_UNLOAD
       bits 2..31 must be 0
 
-  Section 0 (SECTION_STRING_TABLE = 0):
-    section_id                : u32 = 0
-    string_count              : u32
-    strings[string_count]     : utf8
+  CompressionEnvelope:
+    compression_mode          : u8 (0 = COMPRESSION_NONE, 1 = COMPRESSION_ZSTD)
+    uncompressed_payload_size : u32 (0 when COMPRESSION_NONE; > 0 and bounded when COMPRESSION_ZSTD)
 
-  Section 1 (SECTION_DEPENDENCIES = 1):
-    section_id                : u32 = 1
-    dep_count                 : u32
-    dep_paths[dep_count]      : str_idx (sorted, deduplicated)
+  Payload (raw when COMPRESSION_NONE; single zstd frame decompressing to exact uncompressed_payload_size when COMPRESSION_ZSTD):
+    Section 0 (SECTION_STRING_TABLE = 0):
+      section_id                : u32 = 0
+      string_count              : u32
+      strings[string_count]     : utf8
 
-  Section 2 (SECTION_SKELETON = 2):
-    section_id                : u32 = 2
-    class_count               : u32 (must equal total nodes in root_skeleton)
-    root_skeleton             : SkeletonClass
+    Section 1 (SECTION_DEPENDENCIES = 1):
+      section_id                : u32 = 1
+      dep_count                 : u32
+      dep_paths[dep_count]      : str_idx (sorted, deduplicated)
 
-  Section 3 (SECTION_CLASS_BODIES = 3):
-    section_id                : u32 = 3
-    bodies[class_count]       : ClassBody (exact canonical preorder of SkeletonClass)
+    Section 2 (SECTION_SKELETON = 2):
+      section_id                : u32 = 2
+      class_count               : u32 (must equal total nodes in root_skeleton)
+      root_skeleton             : SkeletonClass
 
-  EOF (stream->get_available_bytes() == 0 required)
+    Section 3 (SECTION_CLASS_BODIES = 3):
+      section_id                : u32 = 3
+      bodies[class_count]       : ClassBody (exact canonical preorder of SkeletonClass)
+
+    EOF (stream->get_available_bytes() == 0 required)
 ```
 
 ### 6.3 Nested Record Layouts
@@ -486,11 +491,11 @@ Publishing either a partial script shell OR a finished cycle-dependent resource 
 ## 8. Export Preset, Plugin & Embedded-Script Validation
 
 1. **Preset Enum & UI:**
-   - Append `MODE_SCRIPT_COMPILED_BYTECODE` to `EditorExportPreset::ScriptExportMode` in [`editor_export_preset.h`](file:///Users/christian/CafecitoGames/godot/editor/export/editor_export_preset.h#L57-L61).
-   - Add `"Compiled bytecode (faster loading; omits source text)"` to `ProjectExportDialog` in [`project_export.cpp`](file:///Users/christian/CafecitoGames/godot/editor/export/project_export.cpp#L1939-L1941).
+   - Append `MODE_SCRIPT_COMPILED_BYTECODE` (3) and `MODE_SCRIPT_COMPILED_BYTECODE_COMPRESSED` (4) to `EditorExportPreset::ScriptExportMode` in [`editor_export_preset.h`](file:///Users/christian/CafecitoGames/godot/editor/export/editor_export_preset.h#L57-L63).
+   - Add `"Compiled bytecode (faster loading; omits source text)"` and `"Compressed compiled bytecode (smaller files; omits source text)"` to `ProjectExportDialog` in [`project_export.cpp`](file:///Users/christian/CafecitoGames/godot/editor/export/project_export.cpp#L1939-L1943).
 2. **`EditorExportGDScript`** (`modules/gdscript/editor/gdscript_editor_export_plugin.{h,cpp}`):
-   - `_export_begin()`: when `script_mode == MODE_SCRIPT_COMPILED_BYTECODE`, allocates a `GDScriptExportCompileSession(!export_debug)` (TLS routing **inactive**).
-   - `_export_file()`: for `.gd` files, calls `session->get_or_compile(p_path)` (narrow RAII TLS guard active only inside this call), checks `collect_unsupported_named_globals()`, serializes via `GDScriptBytecodeExporter::serialize()`, and calls `add_file(p_path.get_basename() + ".gdb", buffer, true)`. Any error calls `fail_export(...)`.
+   - `_export_begin()`: when `script_mode` is `MODE_SCRIPT_COMPILED_BYTECODE` or `MODE_SCRIPT_COMPILED_BYTECODE_COMPRESSED`, allocates a `GDScriptExportCompileSession(!export_debug)` (TLS routing **inactive**).
+   - `_export_file()`: for `.gd` files, calls `session->get_or_compile(p_path)` (narrow RAII TLS guard active only inside this call), checks `collect_unsupported_named_globals()`, serializes via `GDScriptBytecodeExporter::serialize()` (selecting `COMPRESSION_ZSTD` for `MODE_SCRIPT_COMPILED_BYTECODE_COMPRESSED`), and calls `add_file(p_path.get_basename() + ".gdb", buffer, true)`. Any error calls `fail_export(...)`.
    - `_export_end()`: destroys `GDScriptExportCompileSession`.
 3. **Unified Embedded-Script Validation (On-Disk, Customized & In-Memory `extra_files`):**
    - Add a C++-only (non-`GDVIRTUAL`) hook on `EditorExportPlugin`:
