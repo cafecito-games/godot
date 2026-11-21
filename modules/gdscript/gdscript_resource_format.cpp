@@ -32,7 +32,9 @@
 
 #include "gdscript_bytecode_loader.h"
 #include "gdscript_cache.h"
+#ifndef GDSCRIPT_NO_FRONTEND
 #include "gdscript_parser.h"
+#endif // !GDSCRIPT_NO_FRONTEND
 
 #include "core/io/file_access.h"
 #include "core/io/resource_loader.h"
@@ -95,6 +97,7 @@ void ResourceFormatLoaderGDScript::get_dependencies(const String &p_path, List<S
 		return;
 	}
 
+#ifndef GDSCRIPT_NO_FRONTEND
 	Ref<FileAccess> file = FileAccess::open(p_path, FileAccess::READ);
 	ERR_FAIL_COND_MSG(file.is_null(), "Cannot open file '" + p_path + "'.");
 
@@ -111,9 +114,13 @@ void ResourceFormatLoaderGDScript::get_dependencies(const String &p_path, List<S
 	for (const String &E : parser.get_dependencies()) {
 		p_dependencies->push_back(E);
 	}
+#endif // !GDSCRIPT_NO_FRONTEND
 }
 
 void ResourceFormatLoaderGDScript::get_classes_used(const String &p_path, HashSet<StringName> *r_classes) {
+#ifdef GDSCRIPT_NO_FRONTEND
+	return;
+#else
 	const String resolved_path = p_path.has_extension("gdb") ? p_path : ResourceLoader::path_remap(p_path);
 	if (resolved_path.has_extension("gdb")) {
 		return;
@@ -175,6 +182,7 @@ void ResourceFormatLoaderGDScript::get_classes_used(const String &p_path, HashSe
 
 		current = tokenizer.scan();
 	}
+#endif // GDSCRIPT_NO_FRONTEND
 }
 
 Error ResourceFormatSaverGDScript::save(const Ref<Resource> &p_resource, const String &p_path, uint32_t p_flags) {

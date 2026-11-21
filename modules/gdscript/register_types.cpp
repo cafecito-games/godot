@@ -32,7 +32,9 @@
 
 #include "gdscript.h"
 #include "gdscript_cache.h"
+#ifndef GDSCRIPT_NO_FRONTEND
 #include "gdscript_parser.h"
+#endif // !GDSCRIPT_NO_FRONTEND
 #include "gdscript_resource_format.h"
 #include "gdscript_utility_functions.h"
 
@@ -152,7 +154,9 @@ void uninitialize_gdscript_module(ModuleInitializationLevel p_level) {
 		ResourceSaver::remove_resource_format_saver(resource_saver_gd);
 		resource_saver_gd.unref();
 
+#ifndef GDSCRIPT_NO_FRONTEND
 		GDScriptParser::cleanup();
+#endif // !GDSCRIPT_NO_FRONTEND
 		GDScriptUtilityFunctions::unregister_functions();
 	}
 

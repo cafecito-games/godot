@@ -23,7 +23,64 @@ env_gdscript.CommandNoCache(
     env.Run(gdscript_bytecode_abi_builder.make_gdscript_bytecode_abi_header),
 )
 
-env_gdscript.add_source_files(env.modules_sources, "*.cpp")
+runtime_sources = [
+    "gdscript.cpp",
+    "gdscript_bytecode_loader.cpp",
+    "gdscript_bytecode_verifier.cpp",
+    "gdscript_cache.cpp",
+    "gdscript_editor.cpp",
+    "gdscript_function.cpp",
+    "gdscript_lambda_callable.cpp",
+    "gdscript_resource_format.cpp",
+    "gdscript_rpc_callable.cpp",
+    "gdscript_utility_callable.cpp",
+    "gdscript_utility_functions.cpp",
+    "gdscript_vm.cpp",
+    "register_types.cpp",
+]
+
+if env.debug_features:
+    runtime_sources.append("gdscript_disassembler.cpp")
+
+frontend_sources = [
+    "gdscript_analyzer.cpp",
+    "gdscript_byte_codegen.cpp",
+    "gdscript_bytecode_export.cpp",
+    "gdscript_compiler.cpp",
+    "gdscript_export_compile_session.cpp",
+    "gdscript_parser.cpp",
+    "gdscript_tokenizer.cpp",
+    "gdscript_tokenizer_buffer.cpp",
+    "gdscript_warning.cpp",
+]
+
+if not env["gdscript_frontend"]:
+    if env.editor_build:
+        print(
+            "Error: gdscript_frontend=no is not supported for editor builds. "
+            "The editor requires the GDScript front-end."
+        )
+        Exit(255)
+    if env["tests"]:
+        print(
+            "Error: gdscript_frontend=no is incompatible with tests=yes. "
+            "GDScript unit tests require the GDScript front-end."
+        )
+        Exit(255)
+    if env.get("use_fuzzer", False):
+        print(
+            "Error: gdscript_frontend=no is incompatible with use_fuzzer=yes. "
+            "Fuzzer builds require the GDScript front-end."
+        )
+        Exit(255)
+
+    env_gdscript.add_source_files(env.modules_sources, runtime_sources)
+    # Using a define in the disabled case avoids adding an extra define to regular builds.
+    env_gdscript.AppendUnique(CPPDEFINES=["GDSCRIPT_NO_FRONTEND"])
+    # Ensure every translation unit including GDScript headers agrees on layout.
+    env.AppendUnique(CPPDEFINES=["GDSCRIPT_NO_FRONTEND"])
+else:
+    env_gdscript.add_source_files(env.modules_sources, runtime_sources + frontend_sources)
 
 if env.editor_build:
     env_gdscript.add_source_files(env.modules_sources, "./editor/*.cpp")

@@ -31,14 +31,16 @@
 #include "gdscript_cache.h"
 
 #include "gdscript.h"
-#include "gdscript_analyzer.h"
 #include "gdscript_bytecode_format.h"
 #include "gdscript_bytecode_loader.h"
+#ifndef GDSCRIPT_NO_FRONTEND
+#include "gdscript_analyzer.h"
 #include "gdscript_compiler.h"
 #if defined(TOOLS_ENABLED) || defined(TESTS_ENABLED)
 #include "gdscript_export_compile_session.h"
 #endif
 #include "gdscript_parser.h"
+#endif // !GDSCRIPT_NO_FRONTEND
 
 #include "core/io/file_access.h"
 #include "core/io/resource_loader.h"
@@ -46,6 +48,7 @@
 #include "core/object/message_queue.h"
 #include "core/templates/vector.h"
 
+#ifndef GDSCRIPT_NO_FRONTEND
 GDScriptParserRef::Status GDScriptParserRef::get_status() const {
 	return status;
 }
@@ -157,6 +160,7 @@ GDScriptParserRef::~GDScriptParserRef() {
 		GDScriptCache::singleton->parser_map.erase(path);
 	}
 }
+#endif // !GDSCRIPT_NO_FRONTEND
 
 GDScriptCache *GDScriptCache::singleton = nullptr;
 thread_local Vector<GDScriptCache::InFlightBytecodeLoad *> GDScriptCache::active_direct_bytecode_loads;
@@ -205,7 +209,9 @@ void GDScriptCache::move_script(const String &p_from, const String &p_to) {
 		return;
 	}
 
+#ifndef GDSCRIPT_NO_FRONTEND
 	remove_parser(p_from);
+#endif // !GDSCRIPT_NO_FRONTEND
 
 	if (singleton->shallow_gdscript_cache.has(p_from) && !p_from.is_empty()) {
 		singleton->shallow_gdscript_cache[p_to] = singleton->shallow_gdscript_cache[p_from];
@@ -234,6 +240,7 @@ void GDScriptCache::remove_script(const String &p_path) {
 		return;
 	}
 
+#ifndef GDSCRIPT_NO_FRONTEND
 	if (HashMap<String, Vector<ObjectID>>::Iterator E = singleton->abandoned_parser_map.find(p_path)) {
 		for (ObjectID parser_ref_id : E->value) {
 			Ref<GDScriptParserRef> parser_ref = { ObjectDB::get_instance(parser_ref_id) };
@@ -250,12 +257,14 @@ void GDScriptCache::remove_script(const String &p_path) {
 	}
 
 	remove_parser(p_path);
+#endif // !GDSCRIPT_NO_FRONTEND
 
 	singleton->dependencies.erase(p_path);
 	singleton->shallow_gdscript_cache.erase(p_path);
 	singleton->full_gdscript_cache.erase(p_path);
 }
 
+#ifndef GDSCRIPT_NO_FRONTEND
 Ref<GDScriptParserRef> GDScriptCache::get_parser(const String &p_path, GDScriptParserRef::Status p_status, Error &r_error, const String &p_owner) {
 #if defined(TOOLS_ENABLED) || defined(TESTS_ENABLED)
 	if (active_export_session != nullptr) {
@@ -357,6 +366,7 @@ Vector<uint8_t> GDScriptCache::get_binary_tokens(const String &p_path) {
 
 	return buffer;
 }
+#endif // !GDSCRIPT_NO_FRONTEND
 
 Vector<uint8_t> GDScriptCache::get_bytecode_buffer(const String &p_path, Error &r_error) {
 	Vector<uint8_t> buffer;
@@ -613,6 +623,10 @@ Ref<GDScript> GDScriptCache::get_shallow_script(const String &p_path, Error &r_e
 		return script;
 	}
 
+#ifdef GDSCRIPT_NO_FRONTEND
+	r_error = ERR_UNAVAILABLE;
+	ERR_FAIL_V_MSG(Ref<GDScript>(), vformat("Cannot load GDScript \"%s\" (resolved \"%s\"): this build was compiled with gdscript_frontend=no and only supports precompiled .gdb bytecode.", p_path, remapped_path));
+#else
 	Ref<GDScript> script;
 	script.instantiate();
 
@@ -639,6 +653,7 @@ Ref<GDScript> GDScriptCache::get_shallow_script(const String &p_path, Error &r_e
 	singleton->shallow_gdscript_cache[p_path] = script;
 
 	return script;
+#endif // GDSCRIPT_NO_FRONTEND
 }
 
 Ref<GDScript> GDScriptCache::get_full_script(const String &p_path, Error &r_error, const String &p_owner, bool p_update_from_disk) {
@@ -872,6 +887,10 @@ Ref<GDScript> GDScriptCache::get_full_script(const String &p_path, Error &r_erro
 		return script;
 	}
 
+#ifdef GDSCRIPT_NO_FRONTEND
+	r_error = ERR_UNAVAILABLE;
+	ERR_FAIL_V_MSG(Ref<GDScript>(), vformat("Cannot load GDScript \"%s\" (resolved \"%s\"): this build was compiled with gdscript_frontend=no and only supports precompiled .gdb bytecode.", p_path, remapped_path));
+#else
 	if (script.is_null()) {
 		script = get_shallow_script(p_path, r_error);
 		// Only exit early if script failed to load, otherwise let reload report errors.
@@ -919,6 +938,7 @@ finish:
 	script->set_path(p_path, true);
 
 	return script;
+#endif // GDSCRIPT_NO_FRONTEND
 }
 
 Ref<GDScript> GDScriptCache::get_cached_script(const String &p_path) {
@@ -1003,6 +1023,7 @@ void GDScriptCache::clear() {
 	}
 	singleton->cleared = true;
 
+#ifndef GDSCRIPT_NO_FRONTEND
 	singleton->parser_inverse_dependencies.clear();
 
 	for (const KeyValue<String, Vector<ObjectID>> &KV : singleton->abandoned_parser_map) {
@@ -1030,6 +1051,7 @@ void GDScriptCache::clear() {
 	}
 
 	parser_map_refs.clear();
+#endif // !GDSCRIPT_NO_FRONTEND
 
 	Vector<InFlightBytecodeLoad *> remaining_in_flight;
 	remaining_in_flight.reserve(singleton->in_flight_bytecode_loads.size());
