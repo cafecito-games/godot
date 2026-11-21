@@ -79,6 +79,17 @@ public:
 	static const List<GDScriptFunction::StackDebug> &get_stack_debug(const GDScriptFunction *p_function) { return p_function->stack_debug; }
 	static HashMap<StringName, Variant> &mutable_script_constants(GDScript *p_script) { return p_script->constants; }
 	static HashMap<StringName, GDScript::MemberInfo> &mutable_member_indices(GDScript *p_script) { return p_script->member_indices; }
+	static void reverse_member_indices(GDScript *p_script) {
+		HashMap<StringName, GDScript::MemberInfo> original(p_script->member_indices);
+		Vector<StringName> keys;
+		for (const KeyValue<StringName, GDScript::MemberInfo> &entry : original) {
+			keys.push_back(entry.key);
+		}
+		p_script->member_indices.clear();
+		for (int i = keys.size() - 1; i >= 0; i--) {
+			p_script->member_indices.insert(keys[i], original[keys[i]]);
+		}
+	}
 	static HashSet<StringName> &mutable_members(GDScript *p_script) { return p_script->members; }
 	static HashMap<StringName, GDScript::MemberInfo> &mutable_static_indices(GDScript *p_script) { return p_script->static_variables_indices; }
 	static HashMap<StringName, MethodInfo> &mutable_signals(GDScript *p_script) { return p_script->_signals; }
@@ -872,15 +883,7 @@ func fn_a(x: int) -> int:
 			}
 			GDScriptBytecodeTestAccessor::mutable_rpc_config(script_reordered.ptr()) = reversed_rpc;
 
-			HashMap<StringName, Variant> orig_consts(GDScriptBytecodeTestAccessor::mutable_script_constants(script_reordered.ptr()));
-			Vector<StringName> const_keys;
-			for (const KeyValue<StringName, Variant> &e : orig_consts) {
-				const_keys.push_back(e.key);
-			}
-			GDScriptBytecodeTestAccessor::mutable_script_constants(script_reordered.ptr()).clear();
-			for (int i = const_keys.size() - 1; i >= 0; i--) {
-				GDScriptBytecodeTestAccessor::mutable_script_constants(script_reordered.ptr()).insert(const_keys[i], orig_consts[const_keys[i]]);
-			}
+			GDScriptBytecodeTestAccessor::reverse_member_indices(script_reordered.ptr());
 
 			HashMap<StringName, Ref<GDScript>> orig_subs(GDScriptBytecodeTestAccessor::mutable_subclasses(script_reordered.ptr()));
 			Vector<StringName> sub_keys;

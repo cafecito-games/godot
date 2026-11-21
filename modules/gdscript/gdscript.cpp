@@ -31,6 +31,8 @@
 #include "gdscript.h"
 
 #include "gdscript_analyzer.h"
+#include "gdscript_bytecode_format.h"
+#include "gdscript_bytecode_loader.h"
 #include "gdscript_cache.h"
 #include "gdscript_compiler.h"
 #include "gdscript_parser.h"
@@ -754,6 +756,58 @@ Error GDScript::reload(bool p_keep_state) {
 		ERR_FAIL_V_MSG(ERR_ALREADY_IN_USE, "Cannot reload script while instances exist.");
 	}
 
+	if (bytecode_backed) {
+		if (valid) {
+			reloading = false;
+			return OK;
+		}
+
+		String source_path = path;
+		if (source_path.is_empty()) {
+			source_path = get_path();
+		}
+		const String remapped_path = source_path.is_empty() ? String() : ResourceLoader::path_remap(source_path);
+		if (!remapped_path.has_extension("gdb")) {
+			reloading = false;
+			return ERR_UNAVAILABLE;
+		}
+
+		Error read_error = OK;
+		const Vector<uint8_t> bytecode_buffer = GDScriptCache::get_bytecode_buffer(remapped_path, read_error);
+		if (read_error != OK) {
+			reloading = false;
+			return read_error;
+		}
+
+		GDScriptBytecodeLoader::HeaderInfo header_info;
+		String load_error_message;
+		GDScriptBytecodeCacheResolver resolver(source_path);
+		Error load_error = GDScriptBytecodeLoader::load_full(bytecode_buffer, Ref<GDScript>(this), source_path, &resolver, &header_info, &load_error_message);
+		if (load_error != OK) {
+			ERR_PRINT(vformat("Failed to reload GDScript bytecode \"%s\": %s", source_path, load_error_message));
+			valid = false;
+			reloading = false;
+			return load_error;
+		}
+
+		const bool has_static_data = (header_info.script_flags & GDScriptBytecodeFormat::SCRIPT_FLAG_HAS_STATIC_DATA) != 0;
+		const bool annotated_static_unload = (header_info.script_flags & GDScriptBytecodeFormat::SCRIPT_FLAG_ANNOTATED_STATIC_UNLOAD) != 0;
+		if (has_static_data && !annotated_static_unload) {
+			GDScriptCache::add_static_script(Ref<GDScript>(this));
+		}
+
+		if (ScriptServer::is_scripting_enabled() || is_tool()) {
+			Error static_init_error = _static_init();
+			if (static_init_error != OK) {
+				reloading = false;
+				return static_init_error;
+			}
+		}
+
+		reloading = false;
+		return OK;
+	}
+
 	String basedir = path;
 
 	if (basedir.is_empty()) {
@@ -1385,7 +1439,7 @@ String GDScript::debug_get_script_name(const Ref<Script> &p_script) {
 #endif
 
 String GDScript::canonicalize_path(const String &p_path) {
-	if (p_path.get_extension() == "gdc") {
+	if (p_path.get_extension() == "gdc" || p_path.get_extension() == "gdb") {
 		return p_path.get_basename() + ".gd";
 	}
 	return p_path;

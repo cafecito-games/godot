@@ -204,7 +204,7 @@ Normal release/debug export templates never compile, allocate, or populate `Expo
 - **Enum validation:** Every serialized enum is range-checked before casting.
 - **Canonical deterministic order:**
   - Build one canonical preorder `Vector<const GDScript *> local_classes` starting at the root script and recursing into `subclasses` sorted by UTF-8 bytewise key order (`String::operator<`). All local-class indices reference this vector.
-  - Sort every map/set (`members`, `member_indices`, `static_variables_indices`, `constants`, `_signals`, `member_functions`, `rpc_config` keys, `SECTION_DEPENDENCIES`) by UTF-8 bytewise key order before encoding.
+  - Sort non-ordered maps/sets (`members`, `member_indices`, `static_variables_indices`, `rpc_config` keys, `SECTION_DEPENDENCIES`) by UTF-8 bytewise key order before encoding; preserve deterministic AST declaration order for `constants`, `_signals`, and `member_functions` for runtime reflection parity (`get_script_constant_map()`, `get_script_signal_list()`, `get_script_method_list()`).
   - Populate `SECTION_STRING_TABLE` in deterministic first-encounter order while encoding `SECTION_SKELETON` and `SECTION_CLASS_BODIES` into a scratch buffer, then splice it ahead of them.
 
 ### 6.2 Top-Level Container Layout
@@ -348,12 +348,12 @@ ClassBody:
   static_var_count       : u32
   static_var_indices[cnt]: MemberInfoEntry (sorted by name; unique & contiguous 0..M-1)
   constant_count         : u32
-  constants[count]       : (str_idx name, TaggedVariant value) (sorted by name)
+  constants[count]       : (str_idx name, TaggedVariant value) (AST declaration order)
   signal_count           : u32
-  signals[count]         : (str_idx name, MethodInfo) (sorted by name; name == MethodInfo.name)
+  signals[count]         : (str_idx name, MethodInfo) (AST declaration order; name == MethodInfo.name)
   rpc_config             : TaggedVariant (must decode to Dictionary)
   member_func_count      : u32
-  member_functions[cnt]  : (str_idx name, FunctionRecord) (sorted by name; name == FunctionRecord.name)
+  member_functions[cnt]  : (str_idx name, FunctionRecord) (AST declaration order; name == FunctionRecord.name)
   has_implicit_init      : u8 (bool) + optional FunctionRecord
   has_implicit_ready     : u8 (bool) + optional FunctionRecord
   has_static_init        : u8 (bool) + optional FunctionRecord

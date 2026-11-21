@@ -32,11 +32,13 @@
 
 #include "gdscript_bytecode_abi.gen.h"
 #include "gdscript_bytecode_verifier.h"
+#include "gdscript_cache.h"
 #include "gdscript_utility_callable.h"
 #include "gdscript_utility_functions.h"
 
 #include "core/config/engine.h"
 #include "core/io/marshalls.h"
+#include "core/io/resource_loader.h"
 #include "core/object/class_db.h"
 #include "core/object/method_bind.h"
 #include "core/templates/hash_set.h"
@@ -2591,4 +2593,77 @@ Error GDScriptBytecodeLoader::load_full(
 Error GDScriptBytecodeLoader::initialize_static_data(const Ref<GDScript> &p_script) {
 	ERR_FAIL_COND_V(p_script.is_null(), ERR_INVALID_PARAMETER);
 	return p_script->_static_init();
+}
+
+Ref<Resource> GDScriptBytecodeCacheResolver::resolve_resource(const String &p_path, const String &p_type_hint, Error &r_error) {
+	r_error = OK;
+	if (p_path.is_empty()) {
+		r_error = ERR_INVALID_PARAMETER;
+		return Ref<Resource>();
+	}
+
+	Ref<Resource> resource = ResourceLoader::load(p_path, p_type_hint, ResourceFormatLoader::CACHE_MODE_REUSE, &r_error);
+	if (r_error != OK || resource.is_null()) {
+		if (r_error == OK) {
+			r_error = ERR_CANT_RESOLVE;
+		}
+		return Ref<Resource>();
+	}
+	return resource;
+}
+
+Ref<GDScript> GDScriptBytecodeCacheResolver::resolve_script(const String &p_path, const String &p_fully_qualified_name, bool &r_is_local_class, Error &r_error) {
+	r_is_local_class = false;
+	r_error = OK;
+	if (p_path.is_empty()) {
+		r_error = ERR_INVALID_PARAMETER;
+		return Ref<GDScript>();
+	}
+
+	Ref<GDScript> root_script;
+	if (ResourceLoader::is_within_load()) {
+		Ref<Resource> loaded_resource = ResourceLoader::load(p_path, "GDScript", ResourceFormatLoader::CACHE_MODE_REUSE, &r_error);
+		root_script = loaded_resource;
+	} else {
+		root_script = GDScriptCache::get_full_script(p_path, r_error, owner_path);
+	}
+
+	if (r_error != OK || root_script.is_null()) {
+		if (r_error == OK) {
+			r_error = ERR_CANT_RESOLVE;
+		}
+		return Ref<GDScript>();
+	}
+
+	// Accept an unvalidated shell ONLY when it belongs to an in-flight load on the same load chain.
+	// Failed non-reloading scripts must never be linked into bytecode.
+	if (!root_script->is_valid() && !GDScriptCache::is_script_loading_on_current_chain(p_path, root_script.ptr())) {
+		r_error = ERR_CANT_RESOLVE;
+		return Ref<GDScript>();
+	}
+
+	if (p_fully_qualified_name.is_empty() || p_fully_qualified_name == root_script->get_fully_qualified_name()) {
+		return root_script;
+	}
+
+	GDScript *resolved_class = root_script->find_class(p_fully_qualified_name);
+	if (resolved_class == nullptr) {
+		const String root_fqcn = root_script->get_fully_qualified_name();
+		if (!root_fqcn.is_empty() && p_fully_qualified_name.begins_with(root_fqcn + "::")) {
+			resolved_class = root_script->find_class(p_fully_qualified_name.trim_prefix(root_fqcn));
+		}
+	}
+	if (resolved_class == nullptr) {
+		const String canonical_root_path = GDScript::canonicalize_path(root_script->get_script_path());
+		if (!canonical_root_path.is_empty() && p_fully_qualified_name.begins_with(canonical_root_path + "::")) {
+			resolved_class = root_script->find_class(p_fully_qualified_name.trim_prefix(canonical_root_path));
+		}
+	}
+
+	if (resolved_class == nullptr) {
+		r_error = ERR_CANT_RESOLVE;
+		return Ref<GDScript>();
+	}
+
+	return Ref<GDScript>(resolved_class);
 }

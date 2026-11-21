@@ -957,36 +957,21 @@ class GDScriptBytecodeExporter::ExportContext {
 		}
 
 		// Constants (sorted).
-		Vector<StringName> sorted_constants;
-		sorted_constants.resize(p_script->constants.size());
-		write_index = 0;
+		// Constants (preserve deterministic AST declaration order for get_script_constant_map() parity).
+		r_writer.write_u32(static_cast<uint32_t>(p_script->constants.size()));
 		for (const KeyValue<StringName, Variant> &entry : p_script->constants) {
-			sorted_constants.write[write_index++] = entry.key;
-		}
-		sorted_constants.sort_custom<StringNameBytewiseComparator>();
-
-		r_writer.write_u32(static_cast<uint32_t>(sorted_constants.size()));
-		for (const StringName &constant_name : sorted_constants) {
-			r_writer.write_u32(intern_string_name(constant_name));
-			Error error = write_tagged_variant(r_writer, p_script->constants[constant_name], 0, false);
+			r_writer.write_u32(intern_string_name(entry.key));
+			Error error = write_tagged_variant(r_writer, entry.value, 0, false);
 			if (error != OK) {
 				return error;
 			}
 		}
 
-		// Signals (sorted).
-		Vector<StringName> sorted_signals;
-		sorted_signals.resize(p_script->_signals.size());
-		write_index = 0;
+		// Signals (preserve deterministic AST declaration order for reflection parity).
+		r_writer.write_u32(static_cast<uint32_t>(p_script->_signals.size()));
 		for (const KeyValue<StringName, MethodInfo> &entry : p_script->_signals) {
-			sorted_signals.write[write_index++] = entry.key;
-		}
-		sorted_signals.sort_custom<StringNameBytewiseComparator>();
-
-		r_writer.write_u32(static_cast<uint32_t>(sorted_signals.size()));
-		for (const StringName &signal_name : sorted_signals) {
-			r_writer.write_u32(intern_string_name(signal_name));
-			Error error = write_method_info(r_writer, p_script->_signals[signal_name]);
+			r_writer.write_u32(intern_string_name(entry.key));
+			Error error = write_method_info(r_writer, entry.value);
 			if (error != OK) {
 				return error;
 			}
@@ -998,19 +983,11 @@ class GDScriptBytecodeExporter::ExportContext {
 			return rpc_error;
 		}
 
-		// Member functions (sorted).
-		Vector<StringName> sorted_functions;
-		sorted_functions.resize(p_script->member_functions.size());
-		write_index = 0;
+		// Member functions (preserve deterministic AST declaration order for reflection parity).
+		r_writer.write_u32(static_cast<uint32_t>(p_script->member_functions.size()));
 		for (const KeyValue<StringName, GDScriptFunction *> &entry : p_script->member_functions) {
-			sorted_functions.write[write_index++] = entry.key;
-		}
-		sorted_functions.sort_custom<StringNameBytewiseComparator>();
-
-		r_writer.write_u32(static_cast<uint32_t>(sorted_functions.size()));
-		for (const StringName &function_name : sorted_functions) {
-			r_writer.write_u32(intern_string_name(function_name));
-			Error error = write_function_record(r_writer, p_script, p_script->member_functions[function_name], 0);
+			r_writer.write_u32(intern_string_name(entry.key));
+			Error error = write_function_record(r_writer, p_script, entry.value, 0);
 			if (error != OK) {
 				return error;
 			}
