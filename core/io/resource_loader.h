@@ -122,7 +122,8 @@ public:
 		THREAD_LOAD_INVALID_RESOURCE,
 		THREAD_LOAD_IN_PROGRESS,
 		THREAD_LOAD_FAILED,
-		THREAD_LOAD_LOADED
+		THREAD_LOAD_LOADED,
+		THREAD_LOAD_STAGED,
 	};
 
 	enum LoadThreadMode {
@@ -178,6 +179,24 @@ private:
 
 	static Ref<ResourceFormatLoader> _find_custom_resource_format_loader(const String &path);
 
+	struct CycleTransaction;
+	class CycleTransactionRef {
+		CycleTransaction *transaction = nullptr;
+
+	public:
+		CycleTransactionRef() = default;
+		explicit CycleTransactionRef(CycleTransaction *p_transaction);
+		CycleTransactionRef(const CycleTransactionRef &p_other);
+		CycleTransactionRef(CycleTransactionRef &&p_other) noexcept;
+		CycleTransactionRef &operator=(const CycleTransactionRef &p_other);
+		CycleTransactionRef &operator=(CycleTransactionRef &&p_other) noexcept;
+		~CycleTransactionRef();
+
+		CycleTransaction *ptr() const { return transaction; }
+		bool is_valid() const { return transaction != nullptr; }
+		void reset(CycleTransaction *p_transaction = nullptr);
+	};
+
 	struct ThreadLoadTask {
 		WorkerThreadPool::TaskID task_id = 0; // Used if run on a worker thread from the pool.
 		Thread::ID thread_id = 0; // Used if running on an user thread (e.g., simple non-threaded load).
@@ -194,6 +213,8 @@ private:
 		CacheMode cache_mode = CACHE_MODE_REUSE;
 		Error error = OK;
 		Ref<Resource> resource;
+		Ref<Resource> partial_resource;
+		CycleTransactionRef staged_transaction;
 		LocalVector<Ref<Resource>> resource_dependencies; // We need to keep these alive for as long as the task is alive at least.
 		ThreadLoadTask *parent_task = nullptr;
 		HashSet<String> sub_tasks;
@@ -205,6 +226,7 @@ private:
 		bool started_load : 1;
 		bool finished_load : 1;
 		bool connections_propagated : 1;
+		bool partial_resource_shared : 1;
 
 		struct ResourceChangedConnection {
 			Resource *source = nullptr;
@@ -220,13 +242,23 @@ private:
 				use_sub_threads(false),
 				started_load(false),
 				finished_load(false),
-				connections_propagated(false) {}
+				connections_propagated(false),
+				partial_resource_shared(false) {}
 	};
 	static void _run_load_task(void *p_userdata);
+
+	static CycleTransaction *_resolve_cycle_transaction(CycleTransaction *p_transaction);
+	static void _merge_cycle_transactions(CycleTransaction *p_source, CycleTransaction *p_target);
+	static bool _is_ancestor_of_current_task(const ThreadLoadTask *p_ancestor);
+	static void _enroll_task_chain_in_transaction(ThreadLoadTask *p_from, ThreadLoadTask *p_stop_exclusive, CycleTransaction *p_transaction);
+	static bool _try_join_transaction_from_ancestry(CycleTransaction *p_transaction);
+	static void _wait_for_cycle_transaction(CycleTransaction *p_transaction, LoadToken &p_load_token, MutexLock<SafeBinaryMutex<BINARY_MUTEX_TAG>> &p_thread_load_lock);
+	static void _detach_sub_tasks_parent(ThreadLoadTask &p_load_task);
 
 	static thread_local bool import_thread;
 	static thread_local int load_nesting;
 	static thread_local HashMap<int, HashMap<String, Ref<Resource>>> res_ref_overrides; // Outermost key is nesting level.
+	static thread_local HashMap<String, Ref<Resource>> *external_res_ref_overrides;
 	static thread_local ThreadLoadTask *curr_load_task;
 
 	static SafeBinaryMutex<BINARY_MUTEX_TAG> thread_load_mutex;
@@ -315,8 +347,26 @@ public:
 	static void set_create_missing_resources_if_class_unavailable(bool p_enable);
 	_FORCE_INLINE_ static bool is_creating_missing_resources_if_class_unavailable_enabled() { return create_missing_resources_if_class_unavailable; }
 
+	class ExternalRefOverrideGuard {
+		HashMap<String, Ref<Resource>> *previous_overrides = nullptr;
+
+	public:
+		explicit ExternalRefOverrideGuard(HashMap<String, Ref<Resource>> *p_overrides);
+		~ExternalRefOverrideGuard();
+		ExternalRefOverrideGuard(const ExternalRefOverrideGuard &) = delete;
+		ExternalRefOverrideGuard &operator=(const ExternalRefOverrideGuard &) = delete;
+	};
+
+	static String validate_local_path(const String &p_path) { return _validate_local_path(p_path); }
+
 	static Ref<Resource> ensure_resource_ref_override_for_outer_load(const String &p_path, const String &p_res_type);
 	static Ref<Resource> get_resource_ref_override(const String &p_path);
+
+	static bool register_current_load_partial_resource(const Ref<Resource> &p_resource, const String &p_expected_path = String());
+	static bool add_current_load_transaction_callback(const Callable &p_callback);
+	static String get_current_load_path();
+	static bool is_current_load_in_cycle_transaction();
+	static bool is_path_ancestor_of_current_load(const String &p_path);
 
 	static bool is_cleaning_tasks();
 

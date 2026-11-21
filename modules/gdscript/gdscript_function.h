@@ -30,6 +30,7 @@
 
 #pragma once
 
+#include "gdscript_bytecode_format.h"
 #include "gdscript_utility_functions.h"
 
 #include "core/object/ref_counted.h"
@@ -149,166 +150,73 @@ public:
 
 class GDScriptFunction {
 public:
+	static constexpr int OPERATOR_INLINE_CACHE_PTR_WORDS = GDScriptBytecodeFormat::OPERATOR_INLINE_CACHE_PTR_WORDS;
+	static_assert(sizeof(Variant::ValidatedOperatorEvaluator) <= sizeof(int) * OPERATOR_INLINE_CACHE_PTR_WORDS,
+			"OPERATOR_INLINE_CACHE_PTR_WORDS must be large enough to store Variant::ValidatedOperatorEvaluator.");
+
 	enum Opcode {
-		OPCODE_OPERATOR,
-		OPCODE_OPERATOR_VALIDATED,
-		OPCODE_TYPE_TEST_BUILTIN,
-		OPCODE_TYPE_TEST_ARRAY,
-		OPCODE_TYPE_TEST_DICTIONARY,
-		OPCODE_TYPE_TEST_NATIVE,
-		OPCODE_TYPE_TEST_SCRIPT,
-		OPCODE_SET_KEYED,
-		OPCODE_SET_KEYED_VALIDATED,
-		OPCODE_SET_INDEXED_VALIDATED,
-		OPCODE_GET_KEYED,
-		OPCODE_GET_KEYED_VALIDATED,
-		OPCODE_GET_INDEXED_VALIDATED,
-		OPCODE_SET_NAMED,
-		OPCODE_SET_NAMED_VALIDATED,
-		OPCODE_GET_NAMED,
-		OPCODE_GET_NAMED_VALIDATED,
-		OPCODE_SET_MEMBER,
-		OPCODE_GET_MEMBER,
-		OPCODE_SET_STATIC_VARIABLE, // Only for GDScript.
-		OPCODE_GET_STATIC_VARIABLE, // Only for GDScript.
-		OPCODE_ASSIGN,
-		OPCODE_ASSIGN_NULL,
-		OPCODE_ASSIGN_TRUE,
-		OPCODE_ASSIGN_FALSE,
-		OPCODE_ASSIGN_TYPED_BUILTIN,
-		OPCODE_ASSIGN_TYPED_ARRAY,
-		OPCODE_ASSIGN_TYPED_DICTIONARY,
-		OPCODE_ASSIGN_TYPED_NATIVE,
-		OPCODE_ASSIGN_TYPED_SCRIPT,
-		OPCODE_CAST_TO_BUILTIN,
-		OPCODE_CAST_TO_NATIVE,
-		OPCODE_CAST_TO_SCRIPT,
-		OPCODE_CONSTRUCT, // Only for basic types!
-		OPCODE_CONSTRUCT_VALIDATED, // Only for basic types!
-		OPCODE_CONSTRUCT_ARRAY,
-		OPCODE_CONSTRUCT_TYPED_ARRAY,
-		OPCODE_CONSTRUCT_DICTIONARY,
-		OPCODE_CONSTRUCT_TYPED_DICTIONARY,
-		OPCODE_CALL,
-		OPCODE_CALL_RETURN,
-		OPCODE_CALL_ASYNC,
-		OPCODE_CALL_UTILITY,
-		OPCODE_CALL_UTILITY_VALIDATED,
-		OPCODE_CALL_GDSCRIPT_UTILITY,
-		OPCODE_CALL_BUILTIN_TYPE_VALIDATED,
-		OPCODE_CALL_SELF_BASE,
-		OPCODE_CALL_METHOD_BIND,
-		OPCODE_CALL_METHOD_BIND_RET,
-		OPCODE_CALL_BUILTIN_STATIC,
-		OPCODE_CALL_NATIVE_STATIC,
-		OPCODE_CALL_NATIVE_STATIC_VALIDATED_RETURN,
-		OPCODE_CALL_NATIVE_STATIC_VALIDATED_NO_RETURN,
-		OPCODE_CALL_METHOD_BIND_VALIDATED_RETURN,
-		OPCODE_CALL_METHOD_BIND_VALIDATED_NO_RETURN,
-		OPCODE_AWAIT,
-		OPCODE_AWAIT_RESUME,
-		OPCODE_CREATE_LAMBDA,
-		OPCODE_CREATE_SELF_LAMBDA,
-		OPCODE_JUMP,
-		OPCODE_JUMP_IF,
-		OPCODE_JUMP_IF_NOT,
-		OPCODE_JUMP_TO_DEF_ARGUMENT,
-		OPCODE_JUMP_IF_SHARED,
-		OPCODE_RETURN,
-		OPCODE_RETURN_TYPED_BUILTIN,
-		OPCODE_RETURN_TYPED_ARRAY,
-		OPCODE_RETURN_TYPED_DICTIONARY,
-		OPCODE_RETURN_TYPED_NATIVE,
-		OPCODE_RETURN_TYPED_SCRIPT,
-		OPCODE_ITERATE_BEGIN,
-		OPCODE_ITERATE_BEGIN_INT,
-		OPCODE_ITERATE_BEGIN_FLOAT,
-		OPCODE_ITERATE_BEGIN_VECTOR2,
-		OPCODE_ITERATE_BEGIN_VECTOR2I,
-		OPCODE_ITERATE_BEGIN_VECTOR3,
-		OPCODE_ITERATE_BEGIN_VECTOR3I,
-		OPCODE_ITERATE_BEGIN_STRING,
-		OPCODE_ITERATE_BEGIN_DICTIONARY,
-		OPCODE_ITERATE_BEGIN_ARRAY,
-		OPCODE_ITERATE_BEGIN_PACKED_BYTE_ARRAY,
-		OPCODE_ITERATE_BEGIN_PACKED_INT32_ARRAY,
-		OPCODE_ITERATE_BEGIN_PACKED_INT64_ARRAY,
-		OPCODE_ITERATE_BEGIN_PACKED_FLOAT32_ARRAY,
-		OPCODE_ITERATE_BEGIN_PACKED_FLOAT64_ARRAY,
-		OPCODE_ITERATE_BEGIN_PACKED_STRING_ARRAY,
-		OPCODE_ITERATE_BEGIN_PACKED_VECTOR2_ARRAY,
-		OPCODE_ITERATE_BEGIN_PACKED_VECTOR3_ARRAY,
-		OPCODE_ITERATE_BEGIN_PACKED_COLOR_ARRAY,
-		OPCODE_ITERATE_BEGIN_PACKED_VECTOR4_ARRAY,
-		OPCODE_ITERATE_BEGIN_OBJECT,
-		OPCODE_ITERATE_BEGIN_RANGE,
-		OPCODE_ITERATE,
-		OPCODE_ITERATE_INT,
-		OPCODE_ITERATE_FLOAT,
-		OPCODE_ITERATE_VECTOR2,
-		OPCODE_ITERATE_VECTOR2I,
-		OPCODE_ITERATE_VECTOR3,
-		OPCODE_ITERATE_VECTOR3I,
-		OPCODE_ITERATE_STRING,
-		OPCODE_ITERATE_DICTIONARY,
-		OPCODE_ITERATE_ARRAY,
-		OPCODE_ITERATE_PACKED_BYTE_ARRAY,
-		OPCODE_ITERATE_PACKED_INT32_ARRAY,
-		OPCODE_ITERATE_PACKED_INT64_ARRAY,
-		OPCODE_ITERATE_PACKED_FLOAT32_ARRAY,
-		OPCODE_ITERATE_PACKED_FLOAT64_ARRAY,
-		OPCODE_ITERATE_PACKED_STRING_ARRAY,
-		OPCODE_ITERATE_PACKED_VECTOR2_ARRAY,
-		OPCODE_ITERATE_PACKED_VECTOR3_ARRAY,
-		OPCODE_ITERATE_PACKED_COLOR_ARRAY,
-		OPCODE_ITERATE_PACKED_VECTOR4_ARRAY,
-		OPCODE_ITERATE_OBJECT,
-		OPCODE_ITERATE_RANGE,
-		OPCODE_STORE_GLOBAL,
-		OPCODE_STORE_NAMED_GLOBAL,
-		OPCODE_TYPE_ADJUST_BOOL,
-		OPCODE_TYPE_ADJUST_INT,
-		OPCODE_TYPE_ADJUST_FLOAT,
-		OPCODE_TYPE_ADJUST_STRING,
-		OPCODE_TYPE_ADJUST_VECTOR2,
-		OPCODE_TYPE_ADJUST_VECTOR2I,
-		OPCODE_TYPE_ADJUST_RECT2,
-		OPCODE_TYPE_ADJUST_RECT2I,
-		OPCODE_TYPE_ADJUST_VECTOR3,
-		OPCODE_TYPE_ADJUST_VECTOR3I,
-		OPCODE_TYPE_ADJUST_TRANSFORM2D,
-		OPCODE_TYPE_ADJUST_VECTOR4,
-		OPCODE_TYPE_ADJUST_VECTOR4I,
-		OPCODE_TYPE_ADJUST_PLANE,
-		OPCODE_TYPE_ADJUST_QUATERNION,
-		OPCODE_TYPE_ADJUST_AABB,
-		OPCODE_TYPE_ADJUST_BASIS,
-		OPCODE_TYPE_ADJUST_TRANSFORM3D,
-		OPCODE_TYPE_ADJUST_PROJECTION,
-		OPCODE_TYPE_ADJUST_COLOR,
-		OPCODE_TYPE_ADJUST_STRING_NAME,
-		OPCODE_TYPE_ADJUST_NODE_PATH,
-		OPCODE_TYPE_ADJUST_RID,
-		OPCODE_TYPE_ADJUST_OBJECT,
-		OPCODE_TYPE_ADJUST_CALLABLE,
-		OPCODE_TYPE_ADJUST_SIGNAL,
-		OPCODE_TYPE_ADJUST_DICTIONARY,
-		OPCODE_TYPE_ADJUST_ARRAY,
-		OPCODE_TYPE_ADJUST_PACKED_BYTE_ARRAY,
-		OPCODE_TYPE_ADJUST_PACKED_INT32_ARRAY,
-		OPCODE_TYPE_ADJUST_PACKED_INT64_ARRAY,
-		OPCODE_TYPE_ADJUST_PACKED_FLOAT32_ARRAY,
-		OPCODE_TYPE_ADJUST_PACKED_FLOAT64_ARRAY,
-		OPCODE_TYPE_ADJUST_PACKED_STRING_ARRAY,
-		OPCODE_TYPE_ADJUST_PACKED_VECTOR2_ARRAY,
-		OPCODE_TYPE_ADJUST_PACKED_VECTOR3_ARRAY,
-		OPCODE_TYPE_ADJUST_PACKED_COLOR_ARRAY,
-		OPCODE_TYPE_ADJUST_PACKED_VECTOR4_ARRAY,
-		OPCODE_ASSERT,
-		OPCODE_BREAKPOINT,
-		OPCODE_LINE,
-		OPCODE_END
+#define GDSCRIPT_OPCODE_FIXED(m_name, m_word_count, m_operands) m_name,
+#define GDSCRIPT_OPCODE_VARARG(m_name, m_trailing_words, m_count_tail_offset, m_count_multiplier, m_count_addend, m_trailing_operands) m_name,
+#include "gdscript_opcode_layout.inc"
+#undef GDSCRIPT_OPCODE_FIXED
+#undef GDSCRIPT_OPCODE_VARARG
 	};
+
+	static const GDScriptBytecodeFormat::OpcodeLayout &get_opcode_layout(Opcode p_opcode);
+
+#ifdef GDSCRIPT_BYTECODE_EXPORT_ENABLED
+	struct ExportFixups {
+		struct OperatorFixup {
+			Variant::Operator operation = Variant::OP_EQUAL;
+			Variant::Type left_type = Variant::NIL;
+			Variant::Type right_type = Variant::NIL;
+		};
+
+		struct MemberFixup {
+			Variant::Type builtin_type = Variant::NIL;
+			StringName member_name;
+		};
+
+		struct BuiltinMethodFixup {
+			Variant::Type builtin_type = Variant::NIL;
+			StringName method_name;
+		};
+
+		struct ConstructorFixup {
+			Variant::Type builtin_type = Variant::NIL;
+			int constructor_index = 0;
+		};
+
+		struct MethodBindFixup {
+			StringName class_name;
+			StringName method_name;
+		};
+
+		struct GlobalStoreFixup {
+			int code_offset = 0;
+			StringName global_name;
+		};
+
+		Vector<OperatorFixup> operators;
+		Vector<MemberFixup> setters;
+		Vector<MemberFixup> getters;
+		Vector<Variant::Type> keyed_setters;
+		Vector<Variant::Type> keyed_getters;
+		Vector<Variant::Type> indexed_setters;
+		Vector<Variant::Type> indexed_getters;
+		Vector<BuiltinMethodFixup> builtin_methods;
+		Vector<ConstructorFixup> constructors;
+		Vector<StringName> utilities;
+		Vector<StringName> gds_utilities;
+		Vector<MethodBindFixup> method_binds;
+
+		Vector<GlobalStoreFixup> global_stores;
+		// Bytecode word offsets of OPCODE_OPERATOR instructions whose mutable inline cache
+		// occupies [offset + 5 .. offset + 6 + OPERATOR_INLINE_CACHE_PTR_WORDS].
+		Vector<int> operator_cache_offsets;
+		Vector<StringName> named_globals;
+	};
+#endif
 
 	enum Address {
 		ADDR_BITS = 24,
@@ -342,6 +250,13 @@ private:
 	friend class GDScriptCompiler;
 	friend class GDScriptByteCodeGenerator;
 	friend class GDScriptLanguage;
+	friend class GDScriptBytecodeExporter;
+	friend class GDScriptBytecodeLoader;
+	friend class GDScriptBytecodeVerifier;
+#ifdef TESTS_ENABLED
+	friend class GDScriptBytecodeAbiTestAccessor;
+	friend class GDScriptBytecodeTestAccessor;
+#endif
 
 	StringName name;
 	StringName source;
@@ -381,6 +296,9 @@ private:
 	Vector<GDScriptUtilityFunctions::FunctionPtr> gds_utilities;
 	Vector<MethodBind *> methods;
 	Vector<GDScriptFunction *> lambdas;
+#ifdef GDSCRIPT_BYTECODE_EXPORT_ENABLED
+	ExportFixups export_fixups;
+#endif
 
 	int _code_size = 0;
 	int _default_arg_count = 0;
@@ -483,6 +401,19 @@ public:
 	_FORCE_INLINE_ int get_argument_count() const { return _argument_count; }
 	_FORCE_INLINE_ Variant get_rpc_config() const { return rpc_config; }
 	_FORCE_INLINE_ int get_max_stack_size() const { return _stack_size; }
+#ifdef GDSCRIPT_BYTECODE_EXPORT_ENABLED
+	_FORCE_INLINE_ const ExportFixups &get_export_fixups() const { return export_fixups; }
+#endif
+#ifdef TESTS_ENABLED
+	struct DebugVMAllocaStats {
+		uint32_t bytes_in_use = 0;
+		uint32_t peak_bytes = 0;
+		uint32_t heap_spill_count = 0;
+	};
+	static DebugVMAllocaStats debug_get_vm_alloca_stats();
+	static void debug_reset_vm_alloca_stats();
+	static void debug_set_vm_alloca_bytes_in_use_for_test(uint32_t p_bytes);
+#endif
 
 	Variant get_constant(int p_idx) const;
 	StringName get_global_name(int p_idx) const;

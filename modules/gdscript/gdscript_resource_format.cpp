@@ -30,20 +30,25 @@
 
 #include "gdscript_resource_format.h"
 
+#include "gdscript_bytecode_loader.h"
 #include "gdscript_cache.h"
+#ifndef GDSCRIPT_NO_FRONTEND
 #include "gdscript_parser.h"
+#endif // !GDSCRIPT_NO_FRONTEND
 
 #include "core/io/file_access.h"
+#include "core/io/resource_loader.h"
 #include "core/object/class_db.h"
 
 Ref<Resource> ResourceFormatLoaderGDScript::load(const String &p_path, const String &p_original_path, Error *r_error, bool p_use_sub_threads, float *r_progress, CacheMode p_cache_mode) {
 	Error err;
 	bool ignoring = p_cache_mode == CACHE_MODE_IGNORE || p_cache_mode == CACHE_MODE_IGNORE_DEEP;
-	Ref<GDScript> scr = GDScriptCache::get_full_script(p_original_path, err, "", ignoring);
+	const String &script_path = p_original_path.is_empty() ? p_path : p_original_path;
+	Ref<GDScript> scr = GDScriptCache::get_full_script(script_path, err, "", ignoring);
 
 	if (err && scr.is_valid()) {
 		// If !scr.is_valid(), the error was likely from scr->load_source_code(), which already generates an error.
-		ERR_PRINT_ED(vformat(R"(Failed to load script "%s" with error "%s".)", p_original_path, error_names[err]));
+		ERR_PRINT_ED(vformat(R"(Failed to load script "%s" with error "%s".)", script_path, error_names[err]));
 	}
 
 	if (r_error) {
@@ -57,6 +62,7 @@ Ref<Resource> ResourceFormatLoaderGDScript::load(const String &p_path, const Str
 void ResourceFormatLoaderGDScript::get_recognized_extensions(List<String> *p_extensions) const {
 	p_extensions->push_back("gd");
 	p_extensions->push_back("gdc");
+	p_extensions->push_back("gdb");
 }
 
 bool ResourceFormatLoaderGDScript::handles_type(const String &p_type) const {
@@ -65,13 +71,33 @@ bool ResourceFormatLoaderGDScript::handles_type(const String &p_type) const {
 
 String ResourceFormatLoaderGDScript::get_resource_type(const String &p_path) const {
 	String el = p_path.get_extension().to_lower();
-	if (el == "gd" || el == "gdc") {
+	if (el == "gd" || el == "gdc" || el == "gdb") {
 		return "GDScript";
 	}
 	return "";
 }
 
 void ResourceFormatLoaderGDScript::get_dependencies(const String &p_path, List<String> *p_dependencies, bool p_add_types) {
+	const String resolved_path = p_path.has_extension("gdb") ? p_path : ResourceLoader::path_remap(p_path);
+	if (resolved_path.has_extension("gdb")) {
+		Error read_error = OK;
+		const Vector<uint8_t> bytecode_buffer = GDScriptCache::get_bytecode_buffer(resolved_path, read_error);
+		ERR_FAIL_COND_MSG(read_error != OK, "Cannot open file '" + resolved_path + "'.");
+
+		Vector<String> bytecode_dependencies;
+		String error_message;
+		const Error parse_error = GDScriptBytecodeLoader::read_dependencies(bytecode_buffer, bytecode_dependencies, &error_message);
+		if (parse_error != OK) {
+			ERR_PRINT(vformat("Failed to read GDScript bytecode dependencies from \"%s\": %s", resolved_path, error_message));
+			return;
+		}
+		for (int index = 0; index < bytecode_dependencies.size(); index++) {
+			p_dependencies->push_back(bytecode_dependencies[index]);
+		}
+		return;
+	}
+
+#ifndef GDSCRIPT_NO_FRONTEND
 	Ref<FileAccess> file = FileAccess::open(p_path, FileAccess::READ);
 	ERR_FAIL_COND_MSG(file.is_null(), "Cannot open file '" + p_path + "'.");
 
@@ -88,15 +114,27 @@ void ResourceFormatLoaderGDScript::get_dependencies(const String &p_path, List<S
 	for (const String &E : parser.get_dependencies()) {
 		p_dependencies->push_back(E);
 	}
+#endif // !GDSCRIPT_NO_FRONTEND
 }
 
 void ResourceFormatLoaderGDScript::get_classes_used(const String &p_path, HashSet<StringName> *r_classes) {
+#ifdef GDSCRIPT_NO_FRONTEND
+	return;
+#else
+	const String resolved_path = p_path.has_extension("gdb") ? p_path : ResourceLoader::path_remap(p_path);
+	if (resolved_path.has_extension("gdb")) {
+		return;
+	}
+
 	Ref<GDScript> scr = ResourceLoader::load(p_path);
-	if (scr.is_null()) {
+	if (scr.is_null() || scr->is_bytecode_backed()) {
 		return;
 	}
 
 	const String source = scr->get_source_code();
+	if (source.is_empty()) {
+		return;
+	}
 	GDScriptTokenizerText tokenizer;
 	tokenizer.set_source_code(source);
 	GDScriptTokenizer::Token current = tokenizer.scan();
@@ -144,6 +182,7 @@ void ResourceFormatLoaderGDScript::get_classes_used(const String &p_path, HashSe
 
 		current = tokenizer.scan();
 	}
+#endif // GDSCRIPT_NO_FRONTEND
 }
 
 Error ResourceFormatSaverGDScript::save(const Ref<Resource> &p_resource, const String &p_path, uint32_t p_flags) {

@@ -30,13 +30,17 @@
 
 #include "gdscript.h"
 
-#include "gdscript_analyzer.h"
+#include "gdscript_bytecode_format.h"
+#include "gdscript_bytecode_loader.h"
 #include "gdscript_cache.h"
+#include "gdscript_rpc_callable.h"
+#ifndef GDSCRIPT_NO_FRONTEND
+#include "gdscript_analyzer.h"
 #include "gdscript_compiler.h"
 #include "gdscript_parser.h"
-#include "gdscript_rpc_callable.h"
 #include "gdscript_tokenizer_buffer.h"
 #include "gdscript_warning.h"
+#endif // !GDSCRIPT_NO_FRONTEND
 
 #include "core/io/resource_loader.h"
 #include "core/object/callable_mp.h"
@@ -754,6 +758,66 @@ Error GDScript::reload(bool p_keep_state) {
 		ERR_FAIL_V_MSG(ERR_ALREADY_IN_USE, "Cannot reload script while instances exist.");
 	}
 
+	if (bytecode_backed) {
+		if (valid) {
+			reloading = false;
+			return OK;
+		}
+
+		String source_path = path;
+		if (source_path.is_empty()) {
+			source_path = get_path();
+		}
+		const String remapped_path = source_path.is_empty() ? String() : ResourceLoader::path_remap(source_path);
+		if (!remapped_path.has_extension("gdb")) {
+			reloading = false;
+			return ERR_UNAVAILABLE;
+		}
+
+		Error read_error = OK;
+		const Vector<uint8_t> bytecode_buffer = GDScriptCache::get_bytecode_buffer(remapped_path, read_error);
+		if (read_error != OK) {
+			reloading = false;
+			return read_error;
+		}
+
+		GDScriptBytecodeLoader::HeaderInfo header_info;
+		String load_error_message;
+		GDScriptBytecodeCacheResolver resolver(source_path);
+		Error load_error = GDScriptBytecodeLoader::load_full(bytecode_buffer, Ref<GDScript>(this), source_path, &resolver, &header_info, &load_error_message);
+		if (load_error != OK) {
+			ERR_PRINT(vformat("Failed to reload GDScript bytecode \"%s\": %s", source_path, load_error_message));
+			valid = false;
+			reloading = false;
+			return load_error;
+		}
+
+		const bool has_static_data = (header_info.script_flags & GDScriptBytecodeFormat::SCRIPT_FLAG_HAS_STATIC_DATA) != 0;
+		const bool annotated_static_unload = (header_info.script_flags & GDScriptBytecodeFormat::SCRIPT_FLAG_ANNOTATED_STATIC_UNLOAD) != 0;
+		if (has_static_data && !annotated_static_unload) {
+			GDScriptCache::add_static_script(Ref<GDScript>(this));
+		}
+
+		if (ScriptServer::is_scripting_enabled() || is_tool()) {
+			Error static_init_error = _static_init();
+			if (static_init_error != OK) {
+				reloading = false;
+				return static_init_error;
+			}
+		}
+
+		reloading = false;
+		return OK;
+	}
+
+#ifdef GDSCRIPT_NO_FRONTEND
+	reloading = false;
+	String source_path = path.is_empty() ? get_path() : path;
+	if (source_path.is_empty()) {
+		source_path = "<built-in>";
+	}
+	ERR_FAIL_V_MSG(ERR_UNAVAILABLE, vformat("Cannot compile GDScript \"%s\": this build was compiled with gdscript_frontend=no and only supports precompiled .gdb bytecode.", source_path));
+#else
 	String basedir = path;
 
 	if (basedir.is_empty()) {
@@ -900,6 +964,7 @@ Error GDScript::reload(bool p_keep_state) {
 
 	reloading = false;
 	return OK;
+#endif // GDSCRIPT_NO_FRONTEND
 }
 
 ScriptLanguage *GDScript::get_language() const {
@@ -1172,8 +1237,12 @@ const Vector<uint8_t> &GDScript::get_binary_tokens_source() const {
 }
 
 Vector<uint8_t> GDScript::get_as_binary_tokens() const {
+#ifdef GDSCRIPT_NO_FRONTEND
+	return Vector<uint8_t>();
+#else
 	GDScriptTokenizerBuffer tokenizer;
 	return tokenizer.parse_code_string(source, GDScriptTokenizerBuffer::COMPRESS_NONE);
+#endif
 }
 
 const HashMap<StringName, GDScriptFunction *> &GDScript::debug_get_member_functions() const {
@@ -1332,6 +1401,11 @@ void GDScript::_save_orphaned_subclasses() {
 	// collect subclasses ObjectID and name
 	for (KeyValue<StringName, Ref<GDScript>> &E : subclasses) {
 		E.value->_owner = nullptr; //bye, you are no longer owned cause I died
+#if defined(TOOLS_ENABLED) || defined(TESTS_ENABLED)
+		if (detached_export_script || E.value->detached_export_script) {
+			continue;
+		}
+#endif
 		ClassRefWithName subclass;
 		subclass.id = E.value->get_instance_id();
 		subclass.fully_qualified_name = E.value->fully_qualified_name;
@@ -1380,7 +1454,7 @@ String GDScript::debug_get_script_name(const Ref<Script> &p_script) {
 #endif
 
 String GDScript::canonicalize_path(const String &p_path) {
-	if (p_path.get_extension() == "gdc") {
+	if (p_path.get_extension() == "gdc" || p_path.get_extension() == "gdb") {
 		return p_path.get_basename() + ".gd";
 	}
 	return p_path;
@@ -2146,6 +2220,8 @@ void GDScriptLanguage::remove_named_global_constant(const StringName &p_name) {
 }
 
 void GDScriptLanguage::init() {
+	GDScriptCache::reset_cleared();
+
 	//populate global constants
 	int gcc = CoreConstants::get_global_constant_count();
 	for (int i = 0; i < gcc; i++) {
@@ -2184,12 +2260,12 @@ void GDScriptLanguage::init() {
 	}
 #endif // TOOLS_ENABLED
 
-#ifdef DEBUG_ENABLED
+#if defined(DEBUG_ENABLED) && !defined(GDSCRIPT_NO_FRONTEND)
 	GDScriptParser::update_project_settings();
 	if (!ProjectSettings::get_singleton()->is_connected("settings_changed", callable_mp_static(&GDScriptParser::update_project_settings))) {
 		ProjectSettings::get_singleton()->connect("settings_changed", callable_mp_static(&GDScriptParser::update_project_settings));
 	}
-#endif // DEBUG_ENABLED
+#endif // DEBUG_ENABLED && !GDSCRIPT_NO_FRONTEND
 
 #ifdef TESTS_ENABLED
 	GDScriptTests::GDScriptTestRunner::handle_cmdline();
@@ -2544,6 +2620,7 @@ void GDScriptLanguage::reload_scripts(const Array &p_scripts, bool p_soft_reload
 	for (KeyValue<Ref<GDScript>, HashMap<ObjectID, List<Pair<StringName, Variant>>>> &E : to_reload) {
 		Ref<GDScript> scr = E.key;
 		print_verbose("GDScript: Reloading: " + scr->get_path());
+#ifndef GDSCRIPT_NO_FRONTEND
 		if (scr->is_built_in()) {
 			// TODO: It would be nice to do it more efficiently than loading the whole scene again.
 			Ref<PackedScene> scene = ResourceLoader::load(scr->get_path().get_slice("::", 0), "", ResourceFormatLoader::CACHE_MODE_IGNORE_DEEP);
@@ -2557,6 +2634,7 @@ void GDScriptLanguage::reload_scripts(const Array &p_scripts, bool p_soft_reload
 		} else {
 			scr->load_source_code(scr->get_path());
 		}
+#endif // !GDSCRIPT_NO_FRONTEND
 		scr->reload(p_soft_reload);
 
 		//restore state if saved
@@ -2716,6 +2794,9 @@ String GDScriptLanguage::get_global_class_name(const String &p_path, String *r_b
 }
 
 String GDScriptLanguage::_get_global_class_name(const String &p_path, String *r_base_type, String *r_icon_path, bool *r_is_abstract, bool *r_is_tool, LocalVector<String> &r_visited) const {
+#ifdef GDSCRIPT_NO_FRONTEND
+	return String();
+#else
 	if (r_visited.has(p_path)) {
 		return String();
 	}
@@ -2830,6 +2911,7 @@ String GDScriptLanguage::_get_global_class_name(const String &p_path, String *r_
 		*r_is_tool = parser.is_tool();
 	}
 	return c->identifier != nullptr ? String(c->identifier->name) : String();
+#endif // GDSCRIPT_NO_FRONTEND
 }
 
 thread_local GDScriptLanguage::CallLevel *GDScriptLanguage::_call_stack = nullptr;
@@ -2876,6 +2958,7 @@ GDScriptLanguage::GDScriptLanguage() {
 	track_call_stack = true;
 	track_locals = track_locals || EngineDebugger::is_active();
 
+#ifndef GDSCRIPT_NO_FRONTEND
 	GLOBAL_DEF("debug/gdscript/warnings/enable", true);
 
 	GLOBAL_DEF(PropertyInfo(Variant::DICTIONARY,
@@ -2900,6 +2983,7 @@ GDScriptLanguage::GDScriptLanguage() {
 	// TODO: This setting has nothing to do with warnings. It should be moved at the next compatibility breakage,
 	// if the setting is still relevant at that time.
 	GLOBAL_DEF("debug/gdscript/warnings/renamed_in_godot_4_hint", true);
+#endif // !GDSCRIPT_NO_FRONTEND
 #endif // DEBUG_ENABLED
 }
 

@@ -29,9 +29,11 @@
 /**************************************************************************/
 
 #include "gdscript.h"
+#ifndef GDSCRIPT_NO_FRONTEND
 #include "gdscript_analyzer.h"
 #include "gdscript_parser.h"
 #include "gdscript_tokenizer.h"
+#endif // !GDSCRIPT_NO_FRONTEND
 #include "gdscript_utility_functions.h"
 
 #ifdef TOOLS_ENABLED
@@ -43,7 +45,9 @@
 #include "core/core_constants.h"
 #include "core/io/file_access.h"
 #include "core/io/resource_loader.h"
+#ifndef GDSCRIPT_NO_FRONTEND
 #include "core/math/expression.h"
+#endif // !GDSCRIPT_NO_FRONTEND
 #include "core/object/class_db.h"
 #include "core/variant/container_type_validate.h"
 
@@ -131,6 +135,7 @@ Vector<ScriptLanguage::ScriptTemplate> GDScriptLanguage::get_built_in_templates(
 	return templates;
 }
 
+#ifndef GDSCRIPT_NO_FRONTEND
 static void get_function_names_recursively(const GDScriptParser::ClassNode *p_class, const String &p_prefix, HashMap<int, String> &r_funcs) {
 	for (int i = 0; i < p_class->members.size(); i++) {
 		if (p_class->members[i].type == GDScriptParser::ClassNode::Member::FUNCTION) {
@@ -142,8 +147,20 @@ static void get_function_names_recursively(const GDScriptParser::ClassNode *p_cl
 		}
 	}
 }
+#endif // !GDSCRIPT_NO_FRONTEND
 
 bool GDScriptLanguage::validate(const String &p_script, const String &p_path, List<String> *r_functions, List<ScriptLanguage::ScriptError> *r_errors, List<ScriptLanguage::Warning> *r_warnings, HashSet<int> *r_safe_lines) const {
+#ifdef GDSCRIPT_NO_FRONTEND
+	if (r_errors) {
+		ScriptLanguage::ScriptError error;
+		error.path = p_path;
+		error.line = 1;
+		error.column = 1;
+		error.message = "GDScript validation is unavailable because this build was compiled with gdscript_frontend=no.";
+		r_errors->push_back(error);
+	}
+	return false;
+#else
 	GDScriptParser parser;
 	GDScriptAnalyzer analyzer(&parser);
 
@@ -212,10 +229,15 @@ bool GDScriptLanguage::validate(const String &p_script, const String &p_path, Li
 #endif
 
 	return true;
+#endif // GDSCRIPT_NO_FRONTEND
 }
 
 bool GDScriptLanguage::supports_builtin_mode() const {
+#ifdef GDSCRIPT_NO_FRONTEND
+	return false;
+#else
 	return true;
+#endif
 }
 
 bool GDScriptLanguage::supports_documentation() const {
@@ -223,6 +245,9 @@ bool GDScriptLanguage::supports_documentation() const {
 }
 
 int GDScriptLanguage::find_function(const String &p_function, const String &p_code) const {
+#ifdef GDSCRIPT_NO_FRONTEND
+	return -1;
+#else
 	GDScriptTokenizerText tokenizer;
 	tokenizer.set_source_code(p_code);
 	int indent = 0;
@@ -245,6 +270,7 @@ int GDScriptLanguage::find_function(const String &p_function, const String &p_co
 		current = tokenizer.scan();
 	}
 	return -1;
+#endif // GDSCRIPT_NO_FRONTEND
 }
 
 /* DEBUGGER FUNCTIONS */
@@ -394,7 +420,7 @@ void GDScriptLanguage::debug_get_globals(List<String> *p_globals, List<Variant> 
 	get_public_constants(&cinfo);
 
 	for (const KeyValue<StringName, int> &E : name_idx) {
-		if (GDScriptAnalyzer::class_exists(E.key) || Engine::get_singleton()->has_singleton(E.key)) {
+		if ((ClassDB::class_exists(E.key) && ClassDB::is_class_exposed(E.key)) || Engine::get_singleton()->has_singleton(E.key)) {
 			continue;
 		}
 
@@ -435,6 +461,9 @@ void GDScriptLanguage::debug_get_globals(List<String> *p_globals, List<Variant> 
 }
 
 String GDScriptLanguage::debug_parse_stack_level_expression(int p_level, const String &p_expression, int p_max_subitems, int p_max_depth) {
+#ifdef GDSCRIPT_NO_FRONTEND
+	return String();
+#else
 	List<String> names;
 	List<Variant> values;
 	debug_get_stack_level_locals(p_level, &names, &values, p_max_subitems, p_max_depth);
@@ -459,6 +488,7 @@ String GDScriptLanguage::debug_parse_stack_level_expression(int p_level, const S
 	}
 
 	return String();
+#endif // GDSCRIPT_NO_FRONTEND
 }
 
 void GDScriptLanguage::get_recognized_extensions(List<String> *p_extensions) const {
@@ -515,6 +545,9 @@ void GDScriptLanguage::get_public_constants(List<Pair<String, Variant>> *p_const
 }
 
 void GDScriptLanguage::get_public_annotations(List<MethodInfo> *p_annotations) const {
+#ifdef GDSCRIPT_NO_FRONTEND
+	return;
+#else
 	GDScriptParser parser;
 	List<MethodInfo> annotations;
 	parser.get_annotation_list(&annotations);
@@ -522,6 +555,7 @@ void GDScriptLanguage::get_public_annotations(List<MethodInfo> *p_annotations) c
 	for (const MethodInfo &E : annotations) {
 		p_annotations->push_back(E);
 	}
+#endif // GDSCRIPT_NO_FRONTEND
 }
 
 String GDScriptLanguage::make_function(const String &p_class, const String &p_name, const PackedStringArray &p_args) const {
@@ -3862,7 +3896,11 @@ static void _find_call_arguments(GDScriptParser::CompletionContext &p_context, c
 #else // !TOOLS_ENABLED
 
 Error GDScriptLanguage::complete_code(const String &p_code, const String &p_path, Object *p_owner, List<ScriptLanguage::CodeCompletionOption> *r_options, bool &r_forced, String &r_call_hint) {
+#ifdef GDSCRIPT_NO_FRONTEND
+	return ERR_UNAVAILABLE;
+#else
 	return OK;
+#endif
 }
 
 #endif // TOOLS_ENABLED
@@ -3884,6 +3922,9 @@ String GDScriptLanguage::_get_indentation() const {
 }
 
 void GDScriptLanguage::auto_indent_code(String &p_code, int p_from_line, int p_to_line) const {
+#ifdef GDSCRIPT_NO_FRONTEND
+	return;
+#else
 	String indent = _get_indentation();
 
 	Vector<String> lines = p_code.split("\n");
@@ -3938,6 +3979,7 @@ void GDScriptLanguage::auto_indent_code(String &p_code, int p_from_line, int p_t
 		}
 		p_code += lines[i];
 	}
+#endif // GDSCRIPT_NO_FRONTEND
 }
 
 #ifdef TOOLS_ENABLED

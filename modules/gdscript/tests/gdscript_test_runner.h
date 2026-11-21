@@ -83,6 +83,7 @@ private:
 	ErrorHandlerList _error_handler;
 
 	TokenizerMode tokenizer_mode = TOKENIZER_TEXT;
+	bool bytecode_mode = false;
 
 	void enable_stdout();
 	void disable_stdout();
@@ -103,6 +104,8 @@ public:
 
 	void set_tokenizer_mode(TokenizerMode p_tokenizer_mode) { tokenizer_mode = p_tokenizer_mode; }
 	TokenizerMode get_tokenizer_mode() const { return tokenizer_mode; }
+	void set_bytecode_mode(bool p_bytecode_mode) { bytecode_mode = p_bytecode_mode; }
+	bool is_bytecode_mode() const { return bytecode_mode; }
 
 	GDScriptTest(const String &p_source_path, const String &p_output_path, const String &p_base_dir);
 	GDScriptTest() :
@@ -117,6 +120,7 @@ class GDScriptTestRunner {
 	bool do_init_languages = false;
 	bool print_filenames; // Whether filenames should be printed when generated/running tests
 	bool binary_tokens; // Test with buffer tokenizer.
+	bool bytecode_mode; // Test with compiled bytecode round-trip (.gdb).
 
 	bool make_tests();
 	bool make_tests_for_dir(const String &p_dir);
@@ -129,7 +133,7 @@ public:
 	int run_tests();
 	bool generate_outputs();
 
-	GDScriptTestRunner(const String &p_source_dir, bool p_init_language, bool p_print_filenames = false, bool p_use_binary_tokens = false);
+	GDScriptTestRunner(const String &p_source_dir, bool p_init_language, bool p_print_filenames = false, bool p_use_binary_tokens = false, bool p_use_bytecode = false);
 	~GDScriptTestRunner();
 };
 

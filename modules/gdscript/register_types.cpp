@@ -32,12 +32,14 @@
 
 #include "gdscript.h"
 #include "gdscript_cache.h"
+#ifndef GDSCRIPT_NO_FRONTEND
 #include "gdscript_parser.h"
+#endif // !GDSCRIPT_NO_FRONTEND
 #include "gdscript_resource_format.h"
-#include "gdscript_tokenizer_buffer.h"
 #include "gdscript_utility_functions.h"
 
 #ifdef TOOLS_ENABLED
+#include "editor/gdscript_editor_export_plugin.h"
 #include "editor/gdscript_highlighter.h"
 #include "editor/gdscript_translation_parser_plugin.h"
 #include "editor/script/script_editor_plugin.h"
@@ -79,46 +81,6 @@ GDScriptCache *gdscript_cache = nullptr;
 #ifdef TOOLS_ENABLED
 
 Ref<GDScriptEditorTranslationParserPlugin> gdscript_translation_parser_plugin;
-
-class EditorExportGDScript : public EditorExportPlugin {
-	GDCLASS(EditorExportGDScript, EditorExportPlugin);
-
-	static constexpr EditorExportPreset::ScriptExportMode DEFAULT_SCRIPT_MODE = EditorExportPreset::MODE_SCRIPT_BINARY_TOKENS_COMPRESSED;
-	EditorExportPreset::ScriptExportMode script_mode = DEFAULT_SCRIPT_MODE;
-
-protected:
-	virtual void _export_begin(const HashSet<String> &p_features, bool p_debug, const String &p_path, int p_flags) override {
-		script_mode = DEFAULT_SCRIPT_MODE;
-
-		const Ref<EditorExportPreset> &preset = get_export_preset();
-		if (preset.is_valid()) {
-			script_mode = preset->get_script_export_mode();
-		}
-	}
-
-	virtual void _export_file(const String &p_path, const String &p_type, const HashSet<String> &p_features) override {
-		if (p_path.get_extension() != "gd" || script_mode == EditorExportPreset::MODE_SCRIPT_TEXT) {
-			return;
-		}
-
-		Vector<uint8_t> file = FileAccess::get_file_as_bytes(p_path);
-		if (file.is_empty()) {
-			return;
-		}
-
-		String source = String::utf8(reinterpret_cast<const char *>(file.ptr()), file.size());
-		GDScriptTokenizerBuffer::CompressMode compress_mode = script_mode == EditorExportPreset::MODE_SCRIPT_BINARY_TOKENS_COMPRESSED ? GDScriptTokenizerBuffer::COMPRESS_ZSTD : GDScriptTokenizerBuffer::COMPRESS_NONE;
-		file = GDScriptTokenizerBuffer::parse_code_string(source, compress_mode);
-		if (file.is_empty()) {
-			return;
-		}
-
-		add_file(p_path.get_basename() + ".gdc", file, true);
-	}
-
-public:
-	virtual String get_name() const override { return "GDScript"; }
-};
 
 static void _editor_init() {
 	Ref<EditorExportGDScript> gd_export;
@@ -192,7 +154,9 @@ void uninitialize_gdscript_module(ModuleInitializationLevel p_level) {
 		ResourceSaver::remove_resource_format_saver(resource_saver_gd);
 		resource_saver_gd.unref();
 
+#ifndef GDSCRIPT_NO_FRONTEND
 		GDScriptParser::cleanup();
+#endif // !GDSCRIPT_NO_FRONTEND
 		GDScriptUtilityFunctions::unregister_functions();
 	}
 

@@ -141,6 +141,20 @@ class GDScriptByteCodeGenerator : public GDScriptCodeGenerator {
 	}
 #endif
 
+#ifdef GDSCRIPT_BYTECODE_EXPORT_ENABLED
+	GDScriptFunction::ExportFixups export_fixups;
+
+	template <typename T>
+	void record_export_fixup(Vector<T> &r_fixups, int p_index, const T &p_fixup) {
+		if (p_index >= r_fixups.size()) {
+			r_fixups.resize(p_index + 1);
+			r_fixups.write[p_index] = p_fixup;
+		}
+	}
+
+	void record_method_bind_fixup(MethodBind *p_method);
+#endif
+
 	// Lists since these can be nested.
 	List<int> if_jmp_addrs;
 	List<int> for_jmp_addrs;
@@ -510,7 +524,7 @@ public:
 	virtual void write_assign_true(const Address &p_target) override;
 	virtual void write_assign_false(const Address &p_target) override;
 	virtual void write_assign_default_parameter(const Address &p_dst, const Address &p_src, bool p_use_conversion) override;
-	virtual void write_store_global(const Address &p_dst, int p_global_index) override;
+	virtual void write_store_global(const Address &p_dst, int p_global_index, const StringName &p_global_name = StringName()) override;
 	virtual void write_store_named_global(const Address &p_dst, const StringName &p_global) override;
 	virtual void write_cast(const Address &p_target, const Address &p_source, const GDScriptDataType &p_type) override;
 	virtual void write_call(const Address &p_target, const Address &p_base, const StringName &p_function_name, const Vector<Address> &p_arguments) override;

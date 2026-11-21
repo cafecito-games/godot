@@ -1,12 +1,86 @@
 #!/usr/bin/env python
 from misc.utility.scons_hints import *
 
+import gdscript_bytecode_abi_builder
+
 Import("env")
 Import("env_modules")
 
 env_gdscript = env_modules.Clone()
 
-env_gdscript.add_source_files(env.modules_sources, "*.cpp")
+gdscript_bytecode_abi_sources = [
+    "gdscript_opcode_layout.inc",
+    "gdscript_bytecode_format.h",
+    "#core/variant/variant.h",
+    "#core/variant/variant_construct.cpp",
+    "gdscript_bytecode_abi_builder.py",
+    env.Value(str(env["precision"])),
+    env.Value(bool(env["deprecated"])),
+]
+env_gdscript.CommandNoCache(
+    "gdscript_bytecode_abi.gen.h",
+    gdscript_bytecode_abi_sources,
+    env.Run(gdscript_bytecode_abi_builder.make_gdscript_bytecode_abi_header),
+)
+
+runtime_sources = [
+    "gdscript.cpp",
+    "gdscript_bytecode_loader.cpp",
+    "gdscript_bytecode_verifier.cpp",
+    "gdscript_cache.cpp",
+    "gdscript_editor.cpp",
+    "gdscript_function.cpp",
+    "gdscript_lambda_callable.cpp",
+    "gdscript_resource_format.cpp",
+    "gdscript_rpc_callable.cpp",
+    "gdscript_utility_callable.cpp",
+    "gdscript_utility_functions.cpp",
+    "gdscript_vm.cpp",
+    "register_types.cpp",
+]
+
+if env.debug_features:
+    runtime_sources.append("gdscript_disassembler.cpp")
+
+frontend_sources = [
+    "gdscript_analyzer.cpp",
+    "gdscript_byte_codegen.cpp",
+    "gdscript_bytecode_export.cpp",
+    "gdscript_compiler.cpp",
+    "gdscript_export_compile_session.cpp",
+    "gdscript_parser.cpp",
+    "gdscript_tokenizer.cpp",
+    "gdscript_tokenizer_buffer.cpp",
+    "gdscript_warning.cpp",
+]
+
+if not env["gdscript_frontend"]:
+    if env.editor_build:
+        print(
+            "Error: gdscript_frontend=no is not supported for editor builds. "
+            "The editor requires the GDScript front-end."
+        )
+        Exit(255)
+    if env["tests"]:
+        print(
+            "Error: gdscript_frontend=no is incompatible with tests=yes. "
+            "GDScript unit tests require the GDScript front-end."
+        )
+        Exit(255)
+    if env.get("use_fuzzer", False):
+        print(
+            "Error: gdscript_frontend=no is incompatible with use_fuzzer=yes. "
+            "Fuzzer builds require the GDScript front-end."
+        )
+        Exit(255)
+
+    env_gdscript.add_source_files(env.modules_sources, runtime_sources)
+    # Using a define in the disabled case avoids adding an extra define to regular builds.
+    env_gdscript.AppendUnique(CPPDEFINES=["GDSCRIPT_NO_FRONTEND"])
+    # Ensure every translation unit including GDScript headers agrees on layout.
+    env.AppendUnique(CPPDEFINES=["GDSCRIPT_NO_FRONTEND"])
+else:
+    env_gdscript.add_source_files(env.modules_sources, runtime_sources + frontend_sources)
 
 if env.editor_build:
     env_gdscript.add_source_files(env.modules_sources, "./editor/*.cpp")
@@ -26,5 +100,7 @@ if env.editor_build:
 
 if env["tests"]:
     # TODO: Handle test creation magic without needing to pass macro.
-    env_gdscript.Append(CPPDEFINES=["TESTS_ENABLED"])
+    env_gdscript.AppendUnique(CPPDEFINES=["TESTS_ENABLED"])
+    # Ensure tests/test_main.cpp sees the same TESTS_ENABLED layout as gdscript headers.
+    env.AppendUnique(CPPDEFINES=["TESTS_ENABLED"])
     env_gdscript.add_source_files(env.modules_sources, "./tests/*.cpp")

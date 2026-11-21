@@ -30,7 +30,24 @@
 
 #include "gdscript_byte_codegen.h"
 
+#if defined(TOOLS_ENABLED) || defined(TESTS_ENABLED)
+#include "gdscript_cache.h"
+#include "gdscript_export_compile_session.h"
+#endif
+
 #include "core/object/class_db.h"
+#include "core/object/method_bind.h"
+
+#ifdef GDSCRIPT_BYTECODE_EXPORT_ENABLED
+void GDScriptByteCodeGenerator::record_method_bind_fixup(MethodBind *p_method) {
+	if (p_method != nullptr) {
+		record_export_fixup(
+				export_fixups.method_binds,
+				get_method_bind_pos(p_method),
+				GDScriptFunction::ExportFixups::MethodBindFixup{ p_method->get_instance_class(), p_method->get_name() });
+	}
+}
+#endif
 
 uint32_t GDScriptByteCodeGenerator::add_parameter(const StringName &p_name, bool p_is_optional, const GDScriptDataType &p_type) {
 	function->_argument_count++;
@@ -411,6 +428,36 @@ GDScriptFunction *GDScriptByteCodeGenerator::write_end() {
 	function->gds_utilities_names = gds_utilities_names;
 #endif
 
+#ifdef GDSCRIPT_BYTECODE_EXPORT_ENABLED
+	DEV_ASSERT(export_fixups.operators.size() == function->operator_funcs.size());
+	DEV_ASSERT(export_fixups.setters.size() == function->setters.size());
+	DEV_ASSERT(export_fixups.getters.size() == function->getters.size());
+	DEV_ASSERT(export_fixups.keyed_setters.size() == function->keyed_setters.size());
+	DEV_ASSERT(export_fixups.keyed_getters.size() == function->keyed_getters.size());
+	DEV_ASSERT(export_fixups.indexed_setters.size() == function->indexed_setters.size());
+	DEV_ASSERT(export_fixups.indexed_getters.size() == function->indexed_getters.size());
+	DEV_ASSERT(export_fixups.builtin_methods.size() == function->builtin_methods.size());
+	DEV_ASSERT(export_fixups.constructors.size() == function->constructors.size());
+	DEV_ASSERT(export_fixups.utilities.size() == function->utilities.size());
+	DEV_ASSERT(export_fixups.gds_utilities.size() == function->gds_utilities.size());
+	DEV_ASSERT(export_fixups.method_binds.size() == function->methods.size());
+	if (export_fixups.operators.size() != function->operator_funcs.size() ||
+			export_fixups.setters.size() != function->setters.size() ||
+			export_fixups.getters.size() != function->getters.size() ||
+			export_fixups.keyed_setters.size() != function->keyed_setters.size() ||
+			export_fixups.keyed_getters.size() != function->keyed_getters.size() ||
+			export_fixups.indexed_setters.size() != function->indexed_setters.size() ||
+			export_fixups.indexed_getters.size() != function->indexed_getters.size() ||
+			export_fixups.builtin_methods.size() != function->builtin_methods.size() ||
+			export_fixups.constructors.size() != function->constructors.size() ||
+			export_fixups.utilities.size() != function->utilities.size() ||
+			export_fixups.gds_utilities.size() != function->gds_utilities.size() ||
+			export_fixups.method_binds.size() != function->methods.size()) {
+		ERR_PRINT("Compiler bug: ExportFixups table size mismatch with GDScriptFunction pointer tables.");
+	}
+	function->export_fixups = export_fixups;
+#endif
+
 	ended = true;
 	return function;
 }
@@ -564,6 +611,12 @@ void GDScriptByteCodeGenerator::write_unary_operator(const Address &p_target, Va
 		append(Address());
 		append(p_target);
 		append(op_func);
+#ifdef GDSCRIPT_BYTECODE_EXPORT_ENABLED
+		record_export_fixup(
+				export_fixups.operators,
+				get_operation_pos(op_func),
+				GDScriptFunction::ExportFixups::OperatorFixup{ p_operator, p_left_operand.type.builtin_type, Variant::NIL });
+#endif
 #ifdef DEBUG_ENABLED
 		add_debug_name(operator_names, get_operation_pos(op_func), Variant::get_operator_name(p_operator));
 #endif
@@ -571,6 +624,9 @@ void GDScriptByteCodeGenerator::write_unary_operator(const Address &p_target, Va
 	}
 
 	// No specific types, perform variant evaluation.
+#ifdef GDSCRIPT_BYTECODE_EXPORT_ENABLED
+	export_fixups.operator_cache_offsets.push_back(opcodes.size());
+#endif
 	append_opcode(GDScriptFunction::OPCODE_OPERATOR);
 	append(p_left_operand);
 	append(Address());
@@ -578,8 +634,7 @@ void GDScriptByteCodeGenerator::write_unary_operator(const Address &p_target, Va
 	append(p_operator);
 	append(0); // Signature storage.
 	append(0); // Return type storage.
-	constexpr int _pointer_size = sizeof(Variant::ValidatedOperatorEvaluator) / sizeof(*(opcodes.ptr()));
-	for (int i = 0; i < _pointer_size; i++) {
+	for (int word_index = 0; word_index < GDScriptFunction::OPERATOR_INLINE_CACHE_PTR_WORDS; word_index++) {
 		append(0); // Space for function pointer.
 	}
 }
@@ -621,6 +676,12 @@ void GDScriptByteCodeGenerator::write_binary_operator(const Address &p_target, V
 		append(p_right_operand);
 		append(p_target);
 		append(op_func);
+#ifdef GDSCRIPT_BYTECODE_EXPORT_ENABLED
+		record_export_fixup(
+				export_fixups.operators,
+				get_operation_pos(op_func),
+				GDScriptFunction::ExportFixups::OperatorFixup{ p_operator, p_left_operand.type.builtin_type, p_right_operand.type.builtin_type });
+#endif
 #ifdef DEBUG_ENABLED
 		add_debug_name(operator_names, get_operation_pos(op_func), Variant::get_operator_name(p_operator));
 #endif
@@ -628,6 +689,9 @@ void GDScriptByteCodeGenerator::write_binary_operator(const Address &p_target, V
 	}
 
 	// No specific types, perform variant evaluation.
+#ifdef GDSCRIPT_BYTECODE_EXPORT_ENABLED
+	export_fixups.operator_cache_offsets.push_back(opcodes.size());
+#endif
 	append_opcode(GDScriptFunction::OPCODE_OPERATOR);
 	append(p_left_operand);
 	append(p_right_operand);
@@ -635,8 +699,7 @@ void GDScriptByteCodeGenerator::write_binary_operator(const Address &p_target, V
 	append(p_operator);
 	append(0); // Signature storage.
 	append(0); // Return type storage.
-	constexpr int _pointer_size = sizeof(Variant::ValidatedOperatorEvaluator) / sizeof(*(opcodes.ptr()));
-	for (int i = 0; i < _pointer_size; i++) {
+	for (int word_index = 0; word_index < GDScriptFunction::OPERATOR_INLINE_CACHE_PTR_WORDS; word_index++) {
 		append(0); // Space for function pointer.
 	}
 }
@@ -800,6 +863,9 @@ void GDScriptByteCodeGenerator::write_set(const Address &p_target, const Address
 			append(p_index);
 			append(p_source);
 			append(setter);
+#ifdef GDSCRIPT_BYTECODE_EXPORT_ENABLED
+			record_export_fixup(export_fixups.indexed_setters, get_indexed_setter_pos(setter), p_target.type.builtin_type);
+#endif
 			return;
 		} else if (Variant::get_member_validated_keyed_setter(p_target.type.builtin_type)) {
 			Variant::ValidatedKeyedSetter setter = Variant::get_member_validated_keyed_setter(p_target.type.builtin_type);
@@ -808,6 +874,9 @@ void GDScriptByteCodeGenerator::write_set(const Address &p_target, const Address
 			append(p_index);
 			append(p_source);
 			append(setter);
+#ifdef GDSCRIPT_BYTECODE_EXPORT_ENABLED
+			record_export_fixup(export_fixups.keyed_setters, get_keyed_setter_pos(setter), p_target.type.builtin_type);
+#endif
 			return;
 		}
 	}
@@ -828,6 +897,9 @@ void GDScriptByteCodeGenerator::write_get(const Address &p_target, const Address
 			append(p_index);
 			append(p_target);
 			append(getter);
+#ifdef GDSCRIPT_BYTECODE_EXPORT_ENABLED
+			record_export_fixup(export_fixups.indexed_getters, get_indexed_getter_pos(getter), p_source.type.builtin_type);
+#endif
 			return;
 		} else if (Variant::get_member_validated_keyed_getter(p_source.type.builtin_type)) {
 			Variant::ValidatedKeyedGetter getter = Variant::get_member_validated_keyed_getter(p_source.type.builtin_type);
@@ -836,6 +908,9 @@ void GDScriptByteCodeGenerator::write_get(const Address &p_target, const Address
 			append(p_index);
 			append(p_target);
 			append(getter);
+#ifdef GDSCRIPT_BYTECODE_EXPORT_ENABLED
+			record_export_fixup(export_fixups.keyed_getters, get_keyed_getter_pos(getter), p_source.type.builtin_type);
+#endif
 			return;
 		}
 	}
@@ -853,6 +928,12 @@ void GDScriptByteCodeGenerator::write_set_named(const Address &p_target, const S
 		append(p_target);
 		append(p_source);
 		append(setter);
+#ifdef GDSCRIPT_BYTECODE_EXPORT_ENABLED
+		record_export_fixup(
+				export_fixups.setters,
+				get_setter_pos(setter),
+				GDScriptFunction::ExportFixups::MemberFixup{ p_target.type.builtin_type, p_name });
+#endif
 #ifdef DEBUG_ENABLED
 		add_debug_name(setter_names, get_setter_pos(setter), p_name);
 #endif
@@ -871,6 +952,12 @@ void GDScriptByteCodeGenerator::write_get_named(const Address &p_target, const S
 		append(p_source);
 		append(p_target);
 		append(getter);
+#ifdef GDSCRIPT_BYTECODE_EXPORT_ENABLED
+		record_export_fixup(
+				export_fixups.getters,
+				get_getter_pos(getter),
+				GDScriptFunction::ExportFixups::MemberFixup{ p_source.type.builtin_type, p_name });
+#endif
 #ifdef DEBUG_ENABLED
 		add_debug_name(getter_names, get_getter_pos(getter), p_name);
 #endif
@@ -1026,9 +1113,22 @@ void GDScriptByteCodeGenerator::write_assign_default_parameter(const Address &p_
 	function->default_arguments.push_back(opcodes.size());
 }
 
-void GDScriptByteCodeGenerator::write_store_global(const Address &p_dst, int p_global_index) {
+void GDScriptByteCodeGenerator::write_store_global(const Address &p_dst, int p_global_index, const StringName &p_global_name) {
 	append_opcode(GDScriptFunction::OPCODE_STORE_GLOBAL);
 	append(p_dst);
+#ifdef GDSCRIPT_BYTECODE_EXPORT_ENABLED
+	StringName resolved_global_name = p_global_name;
+	if (resolved_global_name == StringName()) {
+		const HashMap<StringName, int> &global_map = GDScriptLanguage::get_singleton()->get_global_map();
+		for (const KeyValue<StringName, int> &entry : global_map) {
+			if (entry.value == p_global_index) {
+				resolved_global_name = entry.key;
+				break;
+			}
+		}
+	}
+	export_fixups.global_stores.push_back(GDScriptFunction::ExportFixups::GlobalStoreFixup{ static_cast<int>(opcodes.size()), resolved_global_name });
+#endif
 	append(p_global_index);
 }
 
@@ -1036,6 +1136,11 @@ void GDScriptByteCodeGenerator::write_store_named_global(const Address &p_dst, c
 	append_opcode(GDScriptFunction::OPCODE_STORE_NAMED_GLOBAL);
 	append(p_dst);
 	append(p_global);
+#ifdef GDSCRIPT_BYTECODE_EXPORT_ENABLED
+	if (!export_fixups.named_globals.has(p_global)) {
+		export_fixups.named_globals.push_back(p_global);
+	}
+#endif
 }
 
 void GDScriptByteCodeGenerator::write_cast(const Address &p_target, const Address &p_source, const GDScriptDataType &p_type) {
@@ -1132,6 +1237,9 @@ void GDScriptByteCodeGenerator::write_call_gdscript_utility(const Address &p_tar
 	append(p_arguments.size());
 	append(gds_function);
 	ct.cleanup();
+#ifdef GDSCRIPT_BYTECODE_EXPORT_ENABLED
+	record_export_fixup(export_fixups.gds_utilities, get_gds_utility_pos(gds_function), p_function);
+#endif
 #ifdef DEBUG_ENABLED
 	add_debug_name(gds_utilities_names, get_gds_utility_pos(gds_function), p_function);
 #endif
@@ -1166,10 +1274,14 @@ void GDScriptByteCodeGenerator::write_call_utility(const Address &p_target, cons
 		}
 		append(ct.target);
 		append(p_arguments.size());
-		append(Variant::get_validated_utility_function(p_function));
+		Variant::ValidatedUtilityFunction utility_function = Variant::get_validated_utility_function(p_function);
+		append(utility_function);
 		ct.cleanup();
+#ifdef GDSCRIPT_BYTECODE_EXPORT_ENABLED
+		record_export_fixup(export_fixups.utilities, get_utility_pos(utility_function), p_function);
+#endif
 #ifdef DEBUG_ENABLED
-		add_debug_name(utilities_names, get_utility_pos(Variant::get_validated_utility_function(p_function)), p_function);
+		add_debug_name(utilities_names, get_utility_pos(utility_function), p_function);
 #endif
 	} else {
 		append_opcode_and_argcount(GDScriptFunction::OPCODE_CALL_UTILITY, 1 + p_arguments.size());
@@ -1236,11 +1348,18 @@ void GDScriptByteCodeGenerator::write_call_builtin_type(const Address &p_target,
 	append(p_base);
 	append(ct.target);
 	append(p_arguments.size());
-	append(Variant::get_validated_builtin_method(p_type, p_method));
+	Variant::ValidatedBuiltInMethod builtin_method = Variant::get_validated_builtin_method(p_type, p_method);
+	append(builtin_method);
 	ct.cleanup();
 
+#ifdef GDSCRIPT_BYTECODE_EXPORT_ENABLED
+	record_export_fixup(
+			export_fixups.builtin_methods,
+			get_builtin_method_pos(builtin_method),
+			GDScriptFunction::ExportFixups::BuiltinMethodFixup{ p_type, p_method });
+#endif
 #ifdef DEBUG_ENABLED
-	add_debug_name(builtin_methods_names, get_builtin_method_pos(Variant::get_validated_builtin_method(p_type, p_method)), p_method);
+	add_debug_name(builtin_methods_names, get_builtin_method_pos(builtin_method), p_method);
 #endif
 }
 
@@ -1263,6 +1382,9 @@ void GDScriptByteCodeGenerator::write_call_native_static(const Address &p_target
 	CallTarget ct = get_call_target(p_target);
 	append(ct.target);
 	append(method);
+#ifdef GDSCRIPT_BYTECODE_EXPORT_ENABLED
+	record_method_bind_fixup(method);
+#endif
 	append(p_arguments.size());
 	ct.cleanup();
 	return;
@@ -1295,6 +1417,9 @@ void GDScriptByteCodeGenerator::write_call_native_static_validated(const GDScrip
 	append(ct.target);
 	append(p_arguments.size());
 	append(p_method);
+#ifdef GDSCRIPT_BYTECODE_EXPORT_ENABLED
+	record_method_bind_fixup(p_method);
+#endif
 	ct.cleanup();
 }
 
@@ -1308,6 +1433,9 @@ void GDScriptByteCodeGenerator::write_call_method_bind(const Address &p_target, 
 	append(ct.target);
 	append(p_arguments.size());
 	append(p_method);
+#ifdef GDSCRIPT_BYTECODE_EXPORT_ENABLED
+	record_method_bind_fixup(p_method);
+#endif
 	ct.cleanup();
 }
 
@@ -1339,6 +1467,9 @@ void GDScriptByteCodeGenerator::write_call_method_bind_validated(const Address &
 	append(ct.target);
 	append(p_arguments.size());
 	append(p_method);
+#ifdef GDSCRIPT_BYTECODE_EXPORT_ENABLED
+	record_method_bind_fixup(p_method);
+#endif
 	ct.cleanup();
 }
 
@@ -1431,10 +1562,17 @@ void GDScriptByteCodeGenerator::write_construct(const Address &p_target, Variant
 			CallTarget ct = get_call_target(p_target);
 			append(ct.target);
 			append(p_arguments.size());
-			append(Variant::get_validated_constructor(p_type, valid_constructor));
+			Variant::ValidatedConstructor constructor_func = Variant::get_validated_constructor(p_type, valid_constructor);
+			append(constructor_func);
 			ct.cleanup();
+#ifdef GDSCRIPT_BYTECODE_EXPORT_ENABLED
+			record_export_fixup(
+					export_fixups.constructors,
+					get_constructor_pos(constructor_func),
+					GDScriptFunction::ExportFixups::ConstructorFixup{ p_type, valid_constructor });
+#endif
 #ifdef DEBUG_ENABLED
-			add_debug_name(constructors_names, get_constructor_pos(Variant::get_validated_constructor(p_type, valid_constructor)), Variant::get_type_name(p_type));
+			add_debug_name(constructors_names, get_constructor_pos(constructor_func), Variant::get_type_name(p_type));
 #endif
 			return;
 		}
@@ -1826,7 +1964,13 @@ void GDScriptByteCodeGenerator::write_breakpoint() {
 }
 
 void GDScriptByteCodeGenerator::write_newline(int p_line) {
-	if (GDScriptLanguage::get_singleton()->should_track_call_stack()) {
+	bool should_emit_line = GDScriptLanguage::get_singleton()->should_track_call_stack();
+#if defined(TOOLS_ENABLED) || defined(TESTS_ENABLED)
+	if (GDScriptExportCompileSession *export_session = GDScriptCache::get_active_export_session()) {
+		should_emit_line = export_session->should_emit_line_opcodes();
+	}
+#endif
+	if (should_emit_line) {
 		// Add newline for debugger and stack tracking if enabled in the project settings.
 		append_opcode(GDScriptFunction::OPCODE_LINE);
 		append(p_line);

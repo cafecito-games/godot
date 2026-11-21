@@ -736,7 +736,8 @@ Error ResourceLoaderBinary::load() {
 
 		if (r) {
 			if (!path.is_empty()) {
-				if (cache_mode != ResourceFormatLoader::CACHE_MODE_IGNORE) {
+				const bool defer_cache_publication = (cache_mode == ResourceFormatLoader::CACHE_MODE_IGNORE) || ResourceLoader::is_current_load_in_cycle_transaction();
+				if (!defer_cache_publication) {
 					r->set_path(path, cache_mode == ResourceFormatLoader::CACHE_MODE_REPLACE); // If got here because the resource with same path has different type, replace it.
 				} else {
 					r->set_path_cache(path);
@@ -880,9 +881,9 @@ void ResourceLoaderBinary::get_classes_used(Ref<FileAccess> p_f, HashSet<StringN
 	}
 
 	for (const IntResource &res : internal_resources) {
-		p_f->seek(res.offset);
+		f->seek(res.offset);
 		String t = get_unicode_string();
-		if (!p_f->get_error() && t != String() && ClassDB::class_exists(t)) {
+		if (!f->get_error() && t != String() && ClassDB::class_exists(t)) {
 			p_classes->insert(t);
 		}
 	}

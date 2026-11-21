@@ -58,6 +58,8 @@ public:
 		MODE_SCRIPT_TEXT,
 		MODE_SCRIPT_BINARY_TOKENS,
 		MODE_SCRIPT_BINARY_TOKENS_COMPRESSED,
+		MODE_SCRIPT_COMPILED_BYTECODE,
+		MODE_SCRIPT_COMPILED_BYTECODE_COMPRESSED,
 	};
 
 private:
@@ -98,7 +100,7 @@ private:
 	uint64_t seed = 0;
 
 	String script_key;
-	ScriptExportMode script_mode = MODE_SCRIPT_BINARY_TOKENS_COMPRESSED;
+	ScriptExportMode script_mode = MODE_SCRIPT_COMPILED_BYTECODE_COMPRESSED;
 
 protected:
 	bool _set(const StringName &p_name, const Variant &p_value);
