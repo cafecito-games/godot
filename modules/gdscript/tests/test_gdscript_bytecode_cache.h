@@ -468,6 +468,74 @@ TEST_CASE("[Modules][GDScript][BytecodeCache] GDScript::reload() guard on byteco
 	CHECK(!ResourceCache::has(script_path));
 }
 
+TEST_CASE("[Modules][GDScript][BytecodeCache] CACHE_MODE_IGNORE loads detached copy without mutating live cached script") {
+	ensure_gdscript_language_initialized();
+
+	const String base_dir = make_temp_suite_dir("gdb_cache_mode_ignore");
+	const String script_path = base_dir.path_join("detached_target.gd");
+	const String gdb_path = base_dir.path_join("detached_target.gdb");
+
+	write_text_file(
+			script_path,
+			"extends RefCounted\nstatic var boot_value: int = 100\nstatic func _static_init() -> void:\n\tboot_value += 23\nvar offset: int = 7\nfunc compute(x: int) -> int:\n\treturn x + offset + boot_value\n");
+
+	Vector<String> scripts;
+	scripts.push_back(script_path);
+	export_scripts_to_bytecode_and_delete_sources(scripts, true);
+
+	Error initial_error = OK;
+	Ref<GDScript> cached_script = ResourceLoader::load(script_path, "", ResourceFormatLoader::CACHE_MODE_REUSE, &initial_error);
+	REQUIRE(initial_error == OK);
+	REQUIRE(cached_script.is_valid());
+	CHECK(cached_script->is_valid());
+	CHECK(cached_script->is_bytecode_backed());
+
+	Ref<RefCounted> live_instance = memnew(RefCounted);
+	live_instance->set_script(cached_script);
+	CHECK(int(live_instance->call("compute", 10)) == 140);
+
+	// CACHE_MODE_IGNORE must return a fresh detached script without mutating or clearing the live cached script.
+	Error ignore_error = OK;
+	Ref<GDScript> detached_script = ResourceLoader::load(script_path, "", ResourceFormatLoader::CACHE_MODE_IGNORE, &ignore_error);
+	REQUIRE(ignore_error == OK);
+	REQUIRE(detached_script.is_valid());
+	CHECK(detached_script.ptr() != cached_script.ptr());
+	CHECK(detached_script->is_valid());
+	CHECK(detached_script->is_bytecode_backed());
+
+	CHECK(cached_script->is_valid());
+	CHECK(ResourceCache::get_ref(script_path).ptr() == cached_script.ptr());
+	CHECK(GDScriptCache::get_cached_script(script_path).ptr() == cached_script.ptr());
+	CHECK(int(live_instance->call("compute", 10)) == 140);
+
+	Ref<RefCounted> detached_instance = memnew(RefCounted);
+	detached_instance->set_script(detached_script);
+	CHECK(int(detached_instance->call("compute", 20)) == 150);
+
+	// Even when the on-disk .gdb becomes corrupt and CACHE_MODE_IGNORE fails, the live cached script must remain intact.
+	write_text_file(gdb_path, "corrupt-gdb-payload");
+	ERR_PRINT_OFF;
+	Error corrupt_error = OK;
+	Ref<Resource> failed_detached = ResourceLoader::load(script_path, "", ResourceFormatLoader::CACHE_MODE_IGNORE, &corrupt_error);
+	ERR_PRINT_ON;
+	CHECK(corrupt_error != OK);
+	CHECK(failed_detached.is_null());
+
+	CHECK(cached_script->is_valid());
+	CHECK(ResourceCache::get_ref(script_path).ptr() == cached_script.ptr());
+	CHECK(GDScriptCache::get_cached_script(script_path).ptr() == cached_script.ptr());
+	CHECK(int(live_instance->call("compute", 5)) == 135);
+
+	detached_instance->set_script(Variant());
+	detached_instance.unref();
+	detached_script.unref();
+	live_instance->set_script(Variant());
+	live_instance.unref();
+	cached_script.unref();
+	cleanup_cached_scripts(scripts);
+	CHECK(!ResourceCache::has(script_path));
+}
+
 TEST_CASE("[Modules][GDScript][BytecodeCache] @static_unload preservation in static_gdscript_cache") {
 	ensure_gdscript_language_initialized();
 
@@ -776,11 +844,14 @@ TEST_CASE("[Modules][GDScript][BytecodeCache] Concurrent unrelated loads of cycl
 		REQUIRE(wait_for_flag(gate_guard.loader->gate_entered));
 
 		// At this point, scene_path has finished deserializing and is THREAD_LOAD_STAGED inside A's transaction,
-		// while A has not committed yet. Neither resource may be globally visible.
+		// while A has not committed yet. Neither resource may be globally visible, and an unrelated thread
+		// must not be considered part of A's in-flight load chain.
 		CHECK(gate_guard.loader->saw_uncommitted_caches_empty.is_set());
 		CHECK(!ResourceCache::has(path_a));
 		CHECK(!ResourceCache::has(scene_path));
 		CHECK(!GDScriptTests::TestGDScriptCacheAccessor::has_full(path_a));
+		CHECK(!GDScriptCache::is_script_loading_on_current_chain(path_a, GDScriptCache::get_cached_script(path_a).ptr()));
+		CHECK(!GDScriptCache::is_script_loading_on_current_chain(path_a, nullptr));
 
 		ConcurrentResourceLoadTask root_waiter;
 		ConcurrentResourceLoadTask scene_waiter;

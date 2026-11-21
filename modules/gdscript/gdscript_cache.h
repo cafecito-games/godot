@@ -128,7 +128,8 @@ class GDScriptCache {
 	static thread_local Vector<InFlightBytecodeLoad *> active_direct_bytecode_loads;
 
 	static bool _is_same_bytecode_load_chain(const InFlightBytecodeLoad *p_in_flight);
-	static void _finalize_bytecode_load_locked(InFlightBytecodeLoad *p_in_flight, bool p_committed, Error p_error, bool p_publish_resource_cache);
+	static void _finalize_bytecode_load_locked(InFlightBytecodeLoad *p_in_flight, bool p_committed, Error p_error, bool p_publish_resource_cache, Vector<Ref<GDScript>> &r_scripts_to_static_init);
+	static Error _run_bytecode_static_initializers_unlocked(const Vector<Ref<GDScript>> &p_scripts);
 	static void _on_bytecode_transaction_finalize(bool p_committed, const String &p_path, uint64_t p_load_id);
 
 	friend class GDScript;

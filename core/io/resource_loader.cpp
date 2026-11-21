@@ -1359,12 +1359,28 @@ Ref<ResourceLoader::LoadToken> ResourceLoader::_load_start(const String &p_path,
 			// If a previous failed load with no remaining user tokens is still releasing its
 			// worker-side LoadToken reference, wait briefly for it to clear so a fresh load
 			// does not spuriously inherit the stale failure.
-			while (thread_load_tasks.has(local_path) &&
-					thread_load_tasks[local_path].status == THREAD_LOAD_FAILED &&
-					thread_load_tasks[local_path].load_token != nullptr &&
-					thread_load_tasks[local_path].load_token->user_rc == 0) {
-				if (thread_load_tasks[local_path].load_token->get_reference_count() == 0) {
-					thread_load_tasks[local_path].load_token->clear();
+			const WorkerThreadPool::TaskID caller_task_id =
+					WorkerThreadPool::get_singleton() != nullptr
+					? WorkerThreadPool::get_singleton()->get_caller_task_id()
+					: WorkerThreadPool::INVALID_TASK_ID;
+			const Thread::ID caller_thread_id = Thread::get_caller_id();
+
+			while (!cleaning_tasks && thread_load_tasks.has(local_path)) {
+				ThreadLoadTask &existing_task = thread_load_tasks[local_path];
+				if (existing_task.status != THREAD_LOAD_FAILED ||
+						existing_task.load_token == nullptr ||
+						existing_task.load_token->user_rc != 0) {
+					break;
+				}
+				if (existing_task.load_token->get_reference_count() == 0) {
+					existing_task.load_token->clear();
+					break;
+				}
+				const bool owned_by_caller =
+						(existing_task.task_id != 0 && existing_task.task_id == caller_task_id) ||
+						(existing_task.thread_id != 0 && existing_task.thread_id == caller_thread_id) ||
+						_is_ancestor_of_current_task(&existing_task);
+				if (owned_by_caller) {
 					break;
 				}
 				thread_load_lock.temp_unlock();
