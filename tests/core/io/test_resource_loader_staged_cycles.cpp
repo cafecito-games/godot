@@ -302,13 +302,33 @@ struct ConcurrentLoadWorkerData {
 	SafeFlag finished;
 	Error error = FAILED;
 	Ref<Resource> resource;
+	bool check_external_override_preserved = false;
+	bool external_override_preserved = false;
 };
 
 static void _concurrent_load_worker(void *p_userdata) {
 	ConcurrentLoadWorkerData *worker_data = static_cast<ConcurrentLoadWorkerData *>(p_userdata);
+	if (worker_data->check_external_override_preserved) {
+		const String override_path = "res://staged_override_sentinel.res";
+		Ref<Resource> sentinel_resource;
+		sentinel_resource.instantiate();
+		HashMap<String, Ref<Resource>> external_overrides;
+		external_overrides[override_path] = sentinel_resource;
+		ResourceLoader::ExternalRefOverrideGuard override_guard(&external_overrides);
+		worker_data->started.set();
+		worker_data->resource = ResourceLoader::load(worker_data->path, "", ResourceLoader::CACHE_MODE_REUSE, &worker_data->error);
+		worker_data->external_override_preserved = (ResourceLoader::get_resource_ref_override(override_path) == sentinel_resource);
+		worker_data->finished.set();
+		return;
+	}
 	worker_data->started.set();
 	worker_data->resource = ResourceLoader::load(worker_data->path, "", ResourceLoader::CACHE_MODE_REUSE, &worker_data->error);
 	worker_data->finished.set();
+}
+
+static void _concurrent_load_group_worker(void *p_userdata, uint32_t p_index) {
+	(void)p_index;
+	_concurrent_load_worker(p_userdata);
 }
 #endif // THREADS_ENABLED
 
@@ -758,22 +778,28 @@ TEST_CASE("[ResourceLoader] Staged cycle blocks unrelated threads on both root a
 		unrelated_b_data.path = path_b;
 		ConcurrentLoadWorkerData unrelated_pool_b_data;
 		unrelated_pool_b_data.path = path_b;
+		unrelated_pool_b_data.check_external_override_preserved = true;
+		ConcurrentLoadWorkerData unrelated_group_b_data;
+		unrelated_group_b_data.path = path_b;
 
 		Thread unrelated_a_thread;
 		Thread unrelated_b_thread;
 		unrelated_a_thread.start(_concurrent_load_worker, &unrelated_a_data);
 		unrelated_b_thread.start(_concurrent_load_worker, &unrelated_b_data);
 		WorkerThreadPool::TaskID unrelated_pool_task = WorkerThreadPool::get_singleton()->add_native_task(&_concurrent_load_worker, &unrelated_pool_b_data);
+		WorkerThreadPool::GroupID unrelated_group_task = WorkerThreadPool::get_singleton()->add_native_group_task(&_concurrent_load_group_worker, &unrelated_group_b_data, 1, 1);
 
 		REQUIRE(_wait_for_flag(unrelated_a_data.started));
 		REQUIRE(_wait_for_flag(unrelated_b_data.started));
 		REQUIRE(_wait_for_flag(unrelated_pool_b_data.started));
+		REQUIRE(_wait_for_flag(unrelated_group_b_data.started));
 
 		// Give all unrelated callers ample time to hit ResourceLoader and prove all stay blocked.
 		OS::get_singleton()->delay_usec(40 * 1000);
 		CHECK_FALSE(unrelated_a_data.finished.is_set());
 		CHECK_FALSE(unrelated_b_data.finished.is_set());
 		CHECK_FALSE(unrelated_pool_b_data.finished.is_set());
+		CHECK_FALSE(unrelated_group_b_data.finished.is_set());
 		CHECK_FALSE(ResourceCache::has(path_a));
 		CHECK_FALSE(ResourceCache::has(path_b));
 
@@ -793,6 +819,7 @@ TEST_CASE("[ResourceLoader] Staged cycle blocks unrelated threads on both root a
 		unrelated_a_thread.wait_to_finish();
 		unrelated_b_thread.wait_to_finish();
 		WorkerThreadPool::get_singleton()->wait_for_task_completion(unrelated_pool_task);
+		WorkerThreadPool::get_singleton()->wait_for_group_task_completion(unrelated_group_task);
 
 		Error threaded_b_error = FAILED;
 		Ref<Resource> threaded_b_resource = ResourceLoader::load_threaded_get(path_b, &threaded_b_error);
@@ -818,6 +845,9 @@ TEST_CASE("[ResourceLoader] Staged cycle blocks unrelated threads on both root a
 		CHECK(unrelated_b_data.resource == node_b);
 		CHECK(unrelated_pool_b_data.error == OK);
 		CHECK(unrelated_pool_b_data.resource == node_b);
+		CHECK(unrelated_pool_b_data.external_override_preserved);
+		CHECK(unrelated_group_b_data.error == OK);
+		CHECK(unrelated_group_b_data.resource == node_b);
 		CHECK(threaded_b_error == OK);
 		CHECK(threaded_b_resource == node_b);
 

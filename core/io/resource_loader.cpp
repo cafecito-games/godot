@@ -408,23 +408,37 @@ void ResourceLoader::_wait_for_cycle_transaction(CycleTransaction *p_transaction
 			break;
 		}
 
+		const WorkerThreadPool::TaskID caller_task_id =
+				(WorkerThreadPool::get_singleton()->get_thread_index() != -1)
+				? WorkerThreadPool::get_singleton()->get_caller_task_id()
+				: WorkerThreadPool::INVALID_TASK_ID;
+
 		if (Thread::is_main_thread()) {
 			p_thread_load_lock.temp_unlock();
 			_wait_tick();
 			p_thread_load_lock.temp_relock();
-		} else if (WorkerThreadPool::get_singleton()->get_thread_index() != -1) {
-			WorkerThreadPool::TaskID caller_task_id = WorkerThreadPool::get_singleton()->get_caller_task_id();
+		} else if (caller_task_id != WorkerThreadPool::INVALID_TASK_ID) {
 			yielders.push_back(caller_task_id);
 			p_thread_load_lock.temp_unlock();
 
 			ThreadLoadTask *curr_load_task_backup = curr_load_task;
 			int load_nesting_backup = load_nesting;
+			HashMap<int, HashMap<String, Ref<Resource>>> res_ref_overrides_backup;
+			HashMap<String, Ref<Resource>> *external_res_ref_overrides_backup = external_res_ref_overrides;
 			curr_load_task = nullptr;
 			load_nesting = 0;
+			SWAP(res_ref_overrides, res_ref_overrides_backup);
+			external_res_ref_overrides = nullptr;
+
+			WorkerThreadPool::thread_unlock_allowance_zones();
 			WorkerThreadPool::get_singleton()->yield();
+			WorkerThreadPool::thread_relock_allowance_zones();
+
 			DEV_ASSERT(load_nesting == 0);
 			curr_load_task = curr_load_task_backup;
 			load_nesting = load_nesting_backup;
+			SWAP(res_ref_overrides, res_ref_overrides_backup);
+			external_res_ref_overrides = external_res_ref_overrides_backup;
 
 			p_thread_load_lock.temp_relock();
 			yielders.erase(caller_task_id);
@@ -586,6 +600,13 @@ void ResourceLoader::_run_load_task(void *p_userdata) {
 			thread_waiting_on[thread_index] = load_task.local_path;
 			wait = true;
 		} else {
+			// If this worker yielded while waiting on another resource and is now executing
+			// a new task collaboratively, temporarily clear thread_waiting_on so other
+			// workers awaiting this task do not see a false wait cycle and steal it.
+			if (thread_waiting_on.has(thread_index)) {
+				thread_waiting_on_backup = thread_waiting_on[thread_index];
+				thread_waiting_on.erase(thread_index);
+			}
 			load_task.started_load = true;
 			load_task.thread_index = thread_index;
 		}
@@ -786,18 +807,6 @@ void ResourceLoader::_run_load_task(void *p_userdata) {
 		load_task.finished_load = true;
 	}
 
-	load_task.resource = res;
-
-	load_task.progress = 1.0; // It was fully loaded at this point, so force progress to 1.0.
-	load_task.error = load_err;
-
-	bool ignoring = load_task.cache_mode == CACHE_MODE_IGNORE || load_task.cache_mode == CACHE_MODE_IGNORE_DEEP;
-	bool replacing = load_task.cache_mode == CACHE_MODE_REPLACE || load_task.cache_mode == CACHE_MODE_REPLACE_DEEP;
-
-	Ref<Resource> cleared_partial_resource = load_task.partial_resource;
-	load_task.partial_resource = Ref<Resource>();
-
-	CycleTransactionRef active_transaction_ref(_resolve_cycle_transaction(load_task.staged_transaction.ptr()));
 	LocalVector<Ref<LoadToken>> released_staged_tokens;
 	LocalVector<Ref<Resource>> discarded_staged_resources;
 	struct LoadedCallbackItem {
@@ -806,8 +815,37 @@ void ResourceLoader::_run_load_task(void *p_userdata) {
 	};
 	LocalVector<LoadedCallbackItem> deferred_loaded_callbacks;
 
-	bool handled_by_transaction = false;
-	if (active_transaction_ref.is_valid()) {
+	bool duplicate_staged_completion = false;
+	if (load_task.resource.is_valid() && load_task.staged_transaction.is_valid()) {
+		// Another thread already completed and stored the canonical resource for this
+		// staged task; keep that instance and discard the duplicate load result.
+		if (res.is_valid() && res != load_task.resource) {
+			discarded_staged_resources.push_back(res);
+		}
+		while (load_task.status == THREAD_LOAD_IN_PROGRESS && !cleaning_tasks) {
+			thread_load_mutex.unlock();
+			_wait_tick();
+			thread_load_mutex.lock();
+		}
+		duplicate_staged_completion = true;
+	} else {
+		load_task.resource = res;
+		load_task.progress = 1.0; // It was fully loaded at this point, so force progress to 1.0.
+		load_task.error = load_err;
+	}
+
+	bool ignoring = load_task.cache_mode == CACHE_MODE_IGNORE || load_task.cache_mode == CACHE_MODE_IGNORE_DEEP;
+	bool replacing = load_task.cache_mode == CACHE_MODE_REPLACE || load_task.cache_mode == CACHE_MODE_REPLACE_DEEP;
+
+	Ref<Resource> cleared_partial_resource;
+	CycleTransactionRef active_transaction_ref;
+	bool handled_by_transaction = duplicate_staged_completion;
+	if (!duplicate_staged_completion) {
+		cleared_partial_resource = load_task.partial_resource;
+		load_task.partial_resource = Ref<Resource>();
+		active_transaction_ref.reset(_resolve_cycle_transaction(load_task.staged_transaction.ptr()));
+	}
+	if (!duplicate_staged_completion && active_transaction_ref.is_valid()) {
 		CycleTransaction *active_transaction = active_transaction_ref.ptr();
 		const bool is_transaction_root = (active_transaction->root_path == load_task.local_path);
 
