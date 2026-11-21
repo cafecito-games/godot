@@ -65,8 +65,8 @@ TEST_FORCE_LINK(test_gdscript_bytecode_export_plugin)
 
 namespace TestGDScriptBytecodeExportPlugin {
 
-class MockExportPlatform : public EditorExportPlatform {
-	GDCLASS(MockExportPlatform, EditorExportPlatform);
+class BytecodeMockExportPlatform : public EditorExportPlatform {
+	GDCLASS(BytecodeMockExportPlatform, EditorExportPlatform);
 
 public:
 	virtual void get_preset_features(const Ref<EditorExportPreset> &p_preset, List<String> *r_features) const override {
@@ -416,7 +416,7 @@ struct BytecodeExportTestEnvironment {
 	String output_dir;
 	EditorExport *editor_export = nullptr;
 	EditorFileSystem *editor_file_system = nullptr;
-	Ref<MockExportPlatform> platform;
+	Ref<BytecodeMockExportPlatform> platform;
 	Ref<EditorExportGDScript> gdscript_plugin;
 
 	explicit BytecodeExportTestEnvironment(const String &p_name) {
