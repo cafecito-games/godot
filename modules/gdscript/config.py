@@ -3,6 +3,18 @@ def can_build(env, platform):
     return True
 
 
+def get_opts(platform):
+    from SCons.Variables import BoolVariable
+
+    return [
+        BoolVariable(
+            "gdscript_frontend",
+            "Compile the GDScript front-end (tokenizer, parser, analyzer, compiler).",
+            True,
+        ),
+    ]
+
+
 def configure(env):
     pass
 

@@ -30,15 +30,17 @@
 
 #include "gdscript.h"
 
-#include "gdscript_analyzer.h"
 #include "gdscript_bytecode_format.h"
 #include "gdscript_bytecode_loader.h"
 #include "gdscript_cache.h"
+#include "gdscript_rpc_callable.h"
+#ifndef GDSCRIPT_NO_FRONTEND
+#include "gdscript_analyzer.h"
 #include "gdscript_compiler.h"
 #include "gdscript_parser.h"
-#include "gdscript_rpc_callable.h"
 #include "gdscript_tokenizer_buffer.h"
 #include "gdscript_warning.h"
+#endif // !GDSCRIPT_NO_FRONTEND
 
 #include "core/io/resource_loader.h"
 #include "core/object/callable_mp.h"
@@ -808,6 +810,14 @@ Error GDScript::reload(bool p_keep_state) {
 		return OK;
 	}
 
+#ifdef GDSCRIPT_NO_FRONTEND
+	reloading = false;
+	String source_path = path.is_empty() ? get_path() : path;
+	if (source_path.is_empty()) {
+		source_path = "<built-in>";
+	}
+	ERR_FAIL_V_MSG(ERR_UNAVAILABLE, vformat("Cannot compile GDScript \"%s\": this build was compiled with gdscript_frontend=no and only supports precompiled .gdb bytecode.", source_path));
+#else
 	String basedir = path;
 
 	if (basedir.is_empty()) {
@@ -954,6 +964,7 @@ Error GDScript::reload(bool p_keep_state) {
 
 	reloading = false;
 	return OK;
+#endif // GDSCRIPT_NO_FRONTEND
 }
 
 ScriptLanguage *GDScript::get_language() const {
@@ -1226,8 +1237,12 @@ const Vector<uint8_t> &GDScript::get_binary_tokens_source() const {
 }
 
 Vector<uint8_t> GDScript::get_as_binary_tokens() const {
+#ifdef GDSCRIPT_NO_FRONTEND
+	return Vector<uint8_t>();
+#else
 	GDScriptTokenizerBuffer tokenizer;
 	return tokenizer.parse_code_string(source, GDScriptTokenizerBuffer::COMPRESS_NONE);
+#endif
 }
 
 const HashMap<StringName, GDScriptFunction *> &GDScript::debug_get_member_functions() const {
@@ -2243,12 +2258,12 @@ void GDScriptLanguage::init() {
 	}
 #endif // TOOLS_ENABLED
 
-#ifdef DEBUG_ENABLED
+#if defined(DEBUG_ENABLED) && !defined(GDSCRIPT_NO_FRONTEND)
 	GDScriptParser::update_project_settings();
 	if (!ProjectSettings::get_singleton()->is_connected("settings_changed", callable_mp_static(&GDScriptParser::update_project_settings))) {
 		ProjectSettings::get_singleton()->connect("settings_changed", callable_mp_static(&GDScriptParser::update_project_settings));
 	}
-#endif // DEBUG_ENABLED
+#endif // DEBUG_ENABLED && !GDSCRIPT_NO_FRONTEND
 
 #ifdef TESTS_ENABLED
 	GDScriptTests::GDScriptTestRunner::handle_cmdline();
@@ -2603,6 +2618,7 @@ void GDScriptLanguage::reload_scripts(const Array &p_scripts, bool p_soft_reload
 	for (KeyValue<Ref<GDScript>, HashMap<ObjectID, List<Pair<StringName, Variant>>>> &E : to_reload) {
 		Ref<GDScript> scr = E.key;
 		print_verbose("GDScript: Reloading: " + scr->get_path());
+#ifndef GDSCRIPT_NO_FRONTEND
 		if (scr->is_built_in()) {
 			// TODO: It would be nice to do it more efficiently than loading the whole scene again.
 			Ref<PackedScene> scene = ResourceLoader::load(scr->get_path().get_slice("::", 0), "", ResourceFormatLoader::CACHE_MODE_IGNORE_DEEP);
@@ -2616,6 +2632,7 @@ void GDScriptLanguage::reload_scripts(const Array &p_scripts, bool p_soft_reload
 		} else {
 			scr->load_source_code(scr->get_path());
 		}
+#endif // !GDSCRIPT_NO_FRONTEND
 		scr->reload(p_soft_reload);
 
 		//restore state if saved
@@ -2775,6 +2792,9 @@ String GDScriptLanguage::get_global_class_name(const String &p_path, String *r_b
 }
 
 String GDScriptLanguage::_get_global_class_name(const String &p_path, String *r_base_type, String *r_icon_path, bool *r_is_abstract, bool *r_is_tool, LocalVector<String> &r_visited) const {
+#ifdef GDSCRIPT_NO_FRONTEND
+	return String();
+#else
 	if (r_visited.has(p_path)) {
 		return String();
 	}
@@ -2889,6 +2909,7 @@ String GDScriptLanguage::_get_global_class_name(const String &p_path, String *r_
 		*r_is_tool = parser.is_tool();
 	}
 	return c->identifier != nullptr ? String(c->identifier->name) : String();
+#endif // GDSCRIPT_NO_FRONTEND
 }
 
 thread_local GDScriptLanguage::CallLevel *GDScriptLanguage::_call_stack = nullptr;
@@ -2935,6 +2956,7 @@ GDScriptLanguage::GDScriptLanguage() {
 	track_call_stack = true;
 	track_locals = track_locals || EngineDebugger::is_active();
 
+#ifndef GDSCRIPT_NO_FRONTEND
 	GLOBAL_DEF("debug/gdscript/warnings/enable", true);
 
 	GLOBAL_DEF(PropertyInfo(Variant::DICTIONARY,
@@ -2959,6 +2981,7 @@ GDScriptLanguage::GDScriptLanguage() {
 	// TODO: This setting has nothing to do with warnings. It should be moved at the next compatibility breakage,
 	// if the setting is still relevant at that time.
 	GLOBAL_DEF("debug/gdscript/warnings/renamed_in_godot_4_hint", true);
+#endif // !GDSCRIPT_NO_FRONTEND
 #endif // DEBUG_ENABLED
 }
 
