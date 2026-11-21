@@ -46,6 +46,7 @@
 #include "core/string/print_string.h"
 #include "core/string/translation_server.h"
 #include "core/templates/rb_set.h"
+#include "core/templates/safe_refcount.h"
 #include "core/variant/variant_parser.h"
 #include "servers/rendering/rendering_server.h"
 
@@ -222,6 +223,247 @@ void ResourceFormatLoader::_bind_methods() {
 	GDVIRTUAL_BIND(_load, "path", "original_path", "use_sub_threads", "cache_mode");
 }
 
+struct ResourceLoader::CycleTransaction {
+	enum State {
+		STATE_IN_PROGRESS,
+		STATE_COMMITTED,
+		STATE_FAILED,
+	};
+
+	SafeRefCount ref_count;
+	State state = STATE_IN_PROGRESS;
+	bool finalizing = false;
+	bool finalizing_commit = false;
+	String root_path;
+	Error failure_error = OK;
+	Error poisoned_error = OK;
+	CycleTransactionRef merged_into;
+	ConditionVariable cond_var;
+
+	HashSet<String> staged_path_set;
+	LocalVector<String> staged_paths;
+	LocalVector<Ref<LoadToken>> staged_tokens;
+	LocalVector<Callable> finalize_callbacks;
+
+	CycleTransaction() {
+		ref_count.init(1);
+	}
+};
+
+ResourceLoader::CycleTransactionRef::CycleTransactionRef(CycleTransaction *p_transaction) {
+	reset(p_transaction);
+}
+
+ResourceLoader::CycleTransactionRef::CycleTransactionRef(const CycleTransactionRef &p_other) {
+	reset(p_other.transaction);
+}
+
+ResourceLoader::CycleTransactionRef::CycleTransactionRef(CycleTransactionRef &&p_other) noexcept :
+		transaction(p_other.transaction) {
+	p_other.transaction = nullptr;
+}
+
+ResourceLoader::CycleTransactionRef &ResourceLoader::CycleTransactionRef::operator=(const CycleTransactionRef &p_other) {
+	if (this != &p_other) {
+		reset(p_other.transaction);
+	}
+	return *this;
+}
+
+ResourceLoader::CycleTransactionRef &ResourceLoader::CycleTransactionRef::operator=(CycleTransactionRef &&p_other) noexcept {
+	if (this != &p_other) {
+		reset(nullptr);
+		transaction = p_other.transaction;
+		p_other.transaction = nullptr;
+	}
+	return *this;
+}
+
+ResourceLoader::CycleTransactionRef::~CycleTransactionRef() {
+	reset(nullptr);
+}
+
+void ResourceLoader::CycleTransactionRef::reset(CycleTransaction *p_transaction) {
+	if (transaction == p_transaction) {
+		return;
+	}
+	if (p_transaction != nullptr) {
+		p_transaction->ref_count.ref();
+	}
+	CycleTransaction *previous_transaction = transaction;
+	transaction = p_transaction;
+	if (previous_transaction != nullptr && previous_transaction->ref_count.unref()) {
+		memdelete(previous_transaction);
+	}
+}
+
+ResourceLoader::CycleTransaction *ResourceLoader::_resolve_cycle_transaction(CycleTransaction *p_transaction) {
+	CycleTransaction *current = p_transaction;
+	while (current != nullptr && current->merged_into.is_valid()) {
+		current = current->merged_into.ptr();
+	}
+	return current;
+}
+
+void ResourceLoader::_merge_cycle_transactions(CycleTransaction *p_source, CycleTransaction *p_target) {
+	CycleTransaction *source = _resolve_cycle_transaction(p_source);
+	CycleTransaction *target = _resolve_cycle_transaction(p_target);
+	if (source == nullptr || target == nullptr || source == target) {
+		return;
+	}
+
+	for (const String &staged_path : source->staged_paths) {
+		if (!target->staged_path_set.has(staged_path)) {
+			target->staged_path_set.insert(staged_path);
+			target->staged_paths.push_back(staged_path);
+		}
+	}
+	for (const Ref<LoadToken> &staged_token : source->staged_tokens) {
+		target->staged_tokens.push_back(staged_token);
+	}
+	source->staged_path_set.clear();
+	source->staged_paths.clear();
+	source->staged_tokens.clear();
+
+	for (const Callable &callback : source->finalize_callbacks) {
+		target->finalize_callbacks.push_back(callback);
+	}
+	source->finalize_callbacks.clear();
+
+	if (source->poisoned_error != OK && target->poisoned_error == OK) {
+		target->poisoned_error = source->poisoned_error;
+	}
+
+	source->merged_into.reset(target);
+	source->cond_var.notify_all();
+}
+
+bool ResourceLoader::_is_ancestor_of_current_task(const ThreadLoadTask *p_ancestor) {
+	if (p_ancestor == nullptr || curr_load_task == nullptr) {
+		return false;
+	}
+	const ThreadLoadTask *current = curr_load_task;
+	uint32_t max_steps = thread_load_tasks.size() + 2;
+	while (current != nullptr && max_steps-- > 0) {
+		if (current == p_ancestor) {
+			return true;
+		}
+		current = current->parent_task;
+	}
+	return false;
+}
+
+void ResourceLoader::_enroll_task_chain_in_transaction(ThreadLoadTask *p_from, ThreadLoadTask *p_stop_exclusive, CycleTransaction *p_transaction) {
+	CycleTransaction *target_transaction = _resolve_cycle_transaction(p_transaction);
+	if (target_transaction == nullptr) {
+		return;
+	}
+	ThreadLoadTask *current = p_from;
+	uint32_t max_steps = thread_load_tasks.size() + 2;
+	while (current != nullptr && current != p_stop_exclusive && max_steps-- > 0) {
+		if (!current->staged_transaction.is_valid()) {
+			current->staged_transaction.reset(target_transaction);
+		} else {
+			CycleTransaction *existing_transaction = _resolve_cycle_transaction(current->staged_transaction.ptr());
+			if (existing_transaction != target_transaction) {
+				_merge_cycle_transactions(existing_transaction, target_transaction);
+			}
+			current->staged_transaction.reset(target_transaction);
+		}
+		current = current->parent_task;
+	}
+}
+
+bool ResourceLoader::_try_join_transaction_from_ancestry(CycleTransaction *p_transaction) {
+	CycleTransaction *target_transaction = _resolve_cycle_transaction(p_transaction);
+	if (target_transaction == nullptr || curr_load_task == nullptr) {
+		return false;
+	}
+	ThreadLoadTask *current = curr_load_task;
+	uint32_t max_steps = thread_load_tasks.size() + 2;
+	while (current != nullptr && max_steps-- > 0) {
+		if (current->staged_transaction.is_valid() && _resolve_cycle_transaction(current->staged_transaction.ptr()) == target_transaction) {
+			if (current != curr_load_task) {
+				_enroll_task_chain_in_transaction(curr_load_task, current, target_transaction);
+			}
+			return true;
+		}
+		current = current->parent_task;
+	}
+	return false;
+}
+
+void ResourceLoader::_wait_for_cycle_transaction(CycleTransaction *p_transaction, LoadToken &p_load_token, MutexLock<SafeBinaryMutex<BINARY_MUTEX_TAG>> &p_thread_load_lock) {
+	CycleTransactionRef transaction_ref(_resolve_cycle_transaction(p_transaction));
+	if (!transaction_ref.is_valid()) {
+		return;
+	}
+
+	while (!cleaning_tasks) {
+		CycleTransaction *resolved_transaction = _resolve_cycle_transaction(transaction_ref.ptr());
+		if (resolved_transaction != transaction_ref.ptr()) {
+			transaction_ref.reset(resolved_transaction);
+		}
+		if (resolved_transaction == nullptr || resolved_transaction->state != CycleTransaction::STATE_IN_PROGRESS) {
+			break;
+		}
+
+		const WorkerThreadPool::TaskID caller_task_id =
+				(WorkerThreadPool::get_singleton()->get_thread_index() != -1)
+				? WorkerThreadPool::get_singleton()->get_caller_task_id()
+				: WorkerThreadPool::INVALID_TASK_ID;
+
+		if (Thread::is_main_thread()) {
+			p_thread_load_lock.temp_unlock();
+			_wait_tick();
+			p_thread_load_lock.temp_relock();
+		} else if (caller_task_id != WorkerThreadPool::INVALID_TASK_ID) {
+			yielders.push_back(caller_task_id);
+			p_thread_load_lock.temp_unlock();
+
+			ThreadLoadTask *curr_load_task_backup = curr_load_task;
+			int load_nesting_backup = load_nesting;
+			HashMap<int, HashMap<String, Ref<Resource>>> res_ref_overrides_backup;
+			HashMap<String, Ref<Resource>> *external_res_ref_overrides_backup = external_res_ref_overrides;
+			curr_load_task = nullptr;
+			load_nesting = 0;
+			SWAP(res_ref_overrides, res_ref_overrides_backup);
+			external_res_ref_overrides = nullptr;
+
+			WorkerThreadPool::thread_unlock_allowance_zones();
+			WorkerThreadPool::get_singleton()->yield();
+			WorkerThreadPool::thread_relock_allowance_zones();
+
+			DEV_ASSERT(load_nesting == 0);
+			curr_load_task = curr_load_task_backup;
+			load_nesting = load_nesting_backup;
+			SWAP(res_ref_overrides, res_ref_overrides_backup);
+			external_res_ref_overrides = external_res_ref_overrides_backup;
+
+			p_thread_load_lock.temp_relock();
+			yielders.erase(caller_task_id);
+		} else {
+			WorkerThreadPool::thread_unlock_allowance_zones();
+			resolved_transaction->cond_var.wait(p_thread_load_lock);
+			DEV_ASSERT(cleaning_tasks || (thread_load_tasks.has(p_load_token.local_path) && p_load_token.get_reference_count()));
+			// Drop thread_load_mutex before relocking allowance-zone mutexes so global
+			// lock ordering (e.g., GDScriptCache::mutex -> thread_load_mutex) holds.
+			p_thread_load_lock.temp_unlock();
+			WorkerThreadPool::thread_relock_allowance_zones();
+			p_thread_load_lock.temp_relock();
+		}
+	}
+}
+
+void ResourceLoader::_detach_sub_tasks_parent(ThreadLoadTask &p_load_task) {
+	for (const String &sub_task_path : p_load_task.sub_tasks) {
+		ThreadLoadTask *sub_task = thread_load_tasks.getptr(sub_task_path);
+		if (sub_task != nullptr && sub_task->parent_task == &p_load_task) {
+			sub_task->parent_task = nullptr;
+		}
+	}
+}
+
 // This should be robust enough to be called redundantly without issues.
 void ResourceLoader::LoadToken::clear() {
 	WorkerThreadPool::TaskID task_to_await = 0;
@@ -244,6 +486,7 @@ void ResourceLoader::LoadToken::clear() {
 				// Removing a task which is still in progress would be catastrophic.
 				// Tokens must be alive until the task thread function is done.
 				DEV_ASSERT(load_task.status == THREAD_LOAD_FAILED || load_task.status == THREAD_LOAD_LOADED);
+				_detach_sub_tasks_parent(load_task);
 				thread_load_tasks.erase(local_path);
 			}
 			local_path.clear(); // Mark as already cleared.
@@ -357,6 +600,13 @@ void ResourceLoader::_run_load_task(void *p_userdata) {
 			thread_waiting_on[thread_index] = load_task.local_path;
 			wait = true;
 		} else {
+			// If this worker yielded while waiting on another resource and is now executing
+			// a new task collaboratively, temporarily clear thread_waiting_on so other
+			// workers awaiting this task do not see a false wait cycle and steal it.
+			if (thread_waiting_on.has(thread_index)) {
+				thread_waiting_on_backup = thread_waiting_on[thread_index];
+				thread_waiting_on.erase(thread_index);
+			}
 			load_task.started_load = true;
 			load_task.thread_index = thread_index;
 		}
@@ -557,85 +807,400 @@ void ResourceLoader::_run_load_task(void *p_userdata) {
 		load_task.finished_load = true;
 	}
 
-	load_task.resource = res;
+	LocalVector<Ref<LoadToken>> released_staged_tokens;
+	LocalVector<Ref<Resource>> discarded_staged_resources;
+	struct LoadedCallbackItem {
+		Ref<Resource> resource;
+		String local_path;
+	};
+	LocalVector<LoadedCallbackItem> deferred_loaded_callbacks;
 
-	load_task.progress = 1.0; // It was fully loaded at this point, so force progress to 1.0.
-	load_task.error = load_err;
+	bool duplicate_staged_completion = false;
+	if (load_task.resource.is_valid() && load_task.staged_transaction.is_valid()) {
+		// Another thread already completed and stored the canonical resource for this
+		// staged task; keep that instance and discard the duplicate load result.
+		if (res.is_valid() && res != load_task.resource) {
+			discarded_staged_resources.push_back(res);
+		}
+		while (load_task.status == THREAD_LOAD_IN_PROGRESS && !cleaning_tasks) {
+			thread_load_mutex.unlock();
+			_wait_tick();
+			thread_load_mutex.lock();
+		}
+		duplicate_staged_completion = true;
+	} else {
+		load_task.resource = res;
+		load_task.progress = 1.0; // It was fully loaded at this point, so force progress to 1.0.
+		load_task.error = load_err;
+	}
 
 	bool ignoring = load_task.cache_mode == CACHE_MODE_IGNORE || load_task.cache_mode == CACHE_MODE_IGNORE_DEEP;
 	bool replacing = load_task.cache_mode == CACHE_MODE_REPLACE || load_task.cache_mode == CACHE_MODE_REPLACE_DEEP;
-	if (load_task.resource.is_valid()) {
-		// From now on, no critical section needed as no one will write to the task anymore.
-		// Moreover, the mutex being unlocked is a requirement if some of the calls below
-		// that set the resource up invoke code that in turn requests resource loading.
-		thread_load_mutex.unlock();
-		thread_load_mutex_held = false;
 
-		if (!ignoring) {
-			ResourceCache::lock.lock(); // Check and operations must happen atomically.
-			bool pending_unlock = true;
-			Ref<Resource> old_res = ResourceCache::get_ref(load_task.local_path);
-			if (was_finished) {
-				// If another thread already finished the entire load wait for it to complete
-				// cache registration, then use their instance.
-				while (!old_res.is_valid()) {
-					ResourceCache::lock.unlock();
-					_wait_tick();
-					ResourceCache::lock.lock();
-					old_res = ResourceCache::get_ref(load_task.local_path);
-				}
-			}
-			if (old_res.is_valid()) {
-				if (old_res != load_task.resource) {
-					// Resource can already exists at this point for two reasons:
-					// a) The load uses replace mode.
-					// b) There were more than one load in flight for the same path because of deadlock prevention.
-					// Either case, we want to keep the resource that was already there.
-					ResourceCache::lock.unlock();
-					pending_unlock = false;
-					if (replacing) {
-						old_res->copy_from(load_task.resource);
+	Ref<Resource> cleared_partial_resource;
+	CycleTransactionRef active_transaction_ref;
+	bool handled_by_transaction = duplicate_staged_completion;
+	if (!duplicate_staged_completion) {
+		cleared_partial_resource = load_task.partial_resource;
+		load_task.partial_resource = Ref<Resource>();
+		active_transaction_ref.reset(_resolve_cycle_transaction(load_task.staged_transaction.ptr()));
+	}
+	if (!duplicate_staged_completion && active_transaction_ref.is_valid()) {
+		CycleTransaction *active_transaction = active_transaction_ref.ptr();
+		const bool is_transaction_root = (active_transaction->root_path == load_task.local_path);
+
+		if (is_transaction_root) {
+			handled_by_transaction = true;
+			const bool should_commit = load_task.resource.is_valid() && load_task.error == OK && active_transaction->poisoned_error == OK;
+			active_transaction->finalizing = true;
+			active_transaction->finalizing_commit = should_commit;
+
+			LocalVector<Callable> finalize_callbacks;
+			SWAP(finalize_callbacks, active_transaction->finalize_callbacks);
+
+			if (should_commit) {
+				struct StagedPublishItem {
+					String local_path;
+					Ref<Resource> resource;
+					Ref<Resource> resolved_resource;
+					CacheMode cache_mode = CACHE_MODE_REUSE;
+				};
+				LocalVector<StagedPublishItem> publish_items;
+
+				StagedPublishItem root_item;
+				root_item.local_path = load_task.local_path;
+				root_item.resource = load_task.resource;
+				root_item.cache_mode = load_task.cache_mode;
+				publish_items.push_back(root_item);
+
+				for (const String &staged_path : active_transaction->staged_paths) {
+					ThreadLoadTask *staged_task = thread_load_tasks.getptr(staged_path);
+					if (staged_task != nullptr && staged_task->status == THREAD_LOAD_STAGED && staged_task->resource.is_valid()) {
+						StagedPublishItem staged_item;
+						staged_item.local_path = staged_task->local_path;
+						staged_item.resource = staged_task->resource;
+						staged_item.cache_mode = staged_task->cache_mode;
+						publish_items.push_back(staged_item);
 					}
-					load_task.resource = old_res;
 				}
-			} else {
-				load_task.resource->set_path(load_task.local_path);
-			}
-			if (pending_unlock) {
-				ResourceCache::lock.unlock();
-			}
-		} else {
-			load_task.resource->set_path_cache(load_task.local_path);
-		}
 
-		if (xl_remapped) {
-			load_task.resource->set_as_translation_remapped(true);
-		}
+				thread_load_mutex.unlock();
+				thread_load_mutex_held = false;
+
+				if (xl_remapped) {
+					root_item.resource->set_as_translation_remapped(true);
+				}
 
 #ifdef TOOLS_ENABLED
-		load_task.resource->set_edited(false);
-		if (timestamp_on_load) {
-			uint64_t mt = FileAccess::get_modified_time(remapped_path);
-			//printf("mt %s: %lli\n",remapped_path.utf8().get_data(),mt);
-			load_task.resource->set_last_modified_time(mt);
-		}
+				root_item.resource->set_edited(false);
+				if (timestamp_on_load) {
+					uint64_t modified_time = FileAccess::get_modified_time(remapped_path);
+					root_item.resource->set_last_modified_time(modified_time);
+				}
 #endif
 
-		if (_loaded_callback) {
-			_loaded_callback(load_task.resource, load_task.local_path);
-		}
-	} else if (!ignoring) {
-		Ref<Resource> existing = ResourceCache::get_ref(load_task.local_path);
-		if (existing.is_valid()) {
-			load_task.resource = existing;
-			load_task.status = THREAD_LOAD_LOADED;
-			load_task.progress = 1.0;
+				struct ReplaceCopyItem {
+					Ref<Resource> existing_resource;
+					Ref<Resource> loaded_resource;
+				};
+				LocalVector<ReplaceCopyItem> replace_copies;
 
+				{
+					MutexLock cache_lock(ResourceCache::lock);
+					for (StagedPublishItem &publish_item : publish_items) {
+						const bool item_ignoring = publish_item.cache_mode == CACHE_MODE_IGNORE || publish_item.cache_mode == CACHE_MODE_IGNORE_DEEP;
+						const bool item_replacing = publish_item.cache_mode == CACHE_MODE_REPLACE || publish_item.cache_mode == CACHE_MODE_REPLACE_DEEP;
+						if (item_ignoring) {
+							publish_item.resource->set_path_cache(publish_item.local_path);
+							publish_item.resolved_resource = publish_item.resource;
+							continue;
+						}
+
+						Ref<Resource> existing_resource = ResourceCache::get_ref(publish_item.local_path);
+						if (existing_resource.is_valid()) {
+							if (existing_resource != publish_item.resource) {
+								if (item_replacing) {
+									ReplaceCopyItem copy_item;
+									copy_item.existing_resource = existing_resource;
+									copy_item.loaded_resource = publish_item.resource;
+									replace_copies.push_back(copy_item);
+								}
+								publish_item.resolved_resource = existing_resource;
+							} else {
+								publish_item.resolved_resource = existing_resource;
+							}
+						} else {
+							if (publish_item.resource->get_path() == publish_item.local_path) {
+								publish_item.resource->set_path_cache(String());
+							}
+							publish_item.resource->set_path(publish_item.local_path);
+							publish_item.resolved_resource = publish_item.resource;
+						}
+					}
+				}
+
+				for (const ReplaceCopyItem &copy_item : replace_copies) {
+					copy_item.existing_resource->copy_from(copy_item.loaded_resource);
+				}
+
+				for (const Callable &callback : finalize_callbacks) {
+					if (callback.is_valid()) {
+						callback.call(true);
+					}
+				}
+
+				thread_load_mutex.lock();
+				thread_load_mutex_held = true;
+
+				if (!cleaning_tasks) {
+					for (const StagedPublishItem &publish_item : publish_items) {
+						Ref<Resource> final_resource = publish_item.resolved_resource.is_valid() ? publish_item.resolved_resource : publish_item.resource;
+						if (publish_item.local_path == load_task.local_path) {
+							load_task.resource = final_resource;
+							load_task.error = OK;
+							load_task.progress = 1.0f;
+							load_task.status = THREAD_LOAD_LOADED;
+						} else {
+							ThreadLoadTask *staged_task = thread_load_tasks.getptr(publish_item.local_path);
+							if (staged_task != nullptr && staged_task->status == THREAD_LOAD_STAGED) {
+								staged_task->resource = final_resource;
+								staged_task->error = OK;
+								staged_task->progress = 1.0f;
+								staged_task->status = THREAD_LOAD_LOADED;
+								if (staged_task->cond_var && staged_task->need_wait) {
+									staged_task->cond_var->notify_all();
+								}
+								staged_task->need_wait = false;
+							}
+						}
+						if (_loaded_callback) {
+							LoadedCallbackItem callback_item;
+							callback_item.resource = final_resource;
+							callback_item.local_path = publish_item.local_path;
+							deferred_loaded_callbacks.push_back(callback_item);
+						}
+					}
+
+					active_transaction->state = CycleTransaction::STATE_COMMITTED;
+					active_transaction->cond_var.notify_all();
+
+					for (const Ref<LoadToken> &staged_token : active_transaction->staged_tokens) {
+						released_staged_tokens.push_back(staged_token);
+					}
+					active_transaction->staged_tokens.clear();
+					active_transaction->staged_paths.clear();
+					active_transaction->staged_path_set.clear();
+				} else {
+					active_transaction->state = CycleTransaction::STATE_FAILED;
+					active_transaction->failure_error = FAILED;
+					active_transaction->cond_var.notify_all();
+				}
+			} else {
+				const Error root_error = (load_task.error != OK) ? load_task.error : (active_transaction->poisoned_error != OK ? active_transaction->poisoned_error : FAILED);
+				active_transaction->failure_error = root_error;
+
+				if (!finalize_callbacks.is_empty()) {
+					thread_load_mutex.unlock();
+					thread_load_mutex_held = false;
+					for (const Callable &callback : finalize_callbacks) {
+						if (callback.is_valid()) {
+							callback.call(false);
+						}
+					}
+					thread_load_mutex.lock();
+					thread_load_mutex_held = true;
+				}
+
+				if (load_task.resource.is_valid()) {
+					discarded_staged_resources.push_back(load_task.resource);
+					load_task.resource = Ref<Resource>();
+				}
+				load_task.error = root_error;
+				load_task.status = THREAD_LOAD_FAILED;
+
+				if (!cleaning_tasks) {
+					for (const String &staged_path : active_transaction->staged_paths) {
+						ThreadLoadTask *staged_task = thread_load_tasks.getptr(staged_path);
+						if (staged_task != nullptr && staged_task->status == THREAD_LOAD_STAGED) {
+							if (staged_task->resource.is_valid()) {
+								discarded_staged_resources.push_back(staged_task->resource);
+								staged_task->resource = Ref<Resource>();
+							}
+							staged_task->error = root_error;
+							staged_task->status = THREAD_LOAD_FAILED;
+							if (staged_task->cond_var && staged_task->need_wait) {
+								staged_task->cond_var->notify_all();
+							}
+							staged_task->need_wait = false;
+						}
+					}
+
+					for (const Ref<LoadToken> &staged_token : active_transaction->staged_tokens) {
+						released_staged_tokens.push_back(staged_token);
+					}
+					active_transaction->staged_tokens.clear();
+					active_transaction->staged_paths.clear();
+					active_transaction->staged_path_set.clear();
+				}
+
+				active_transaction->state = CycleTransaction::STATE_FAILED;
+				active_transaction->cond_var.notify_all();
+			}
+		} else {
+			// Descendant enrolled in an ancestor's cycle transaction.
+			if (active_transaction->state == CycleTransaction::STATE_IN_PROGRESS && !active_transaction->finalizing) {
+				handled_by_transaction = true;
+				if (load_task.resource.is_valid() && load_task.error == OK) {
+					thread_load_mutex.unlock();
+					thread_load_mutex_held = false;
+
+					load_task.resource->set_path_cache(load_task.local_path);
+					if (xl_remapped) {
+						load_task.resource->set_as_translation_remapped(true);
+					}
+
+#ifdef TOOLS_ENABLED
+					load_task.resource->set_edited(false);
+					if (timestamp_on_load) {
+						uint64_t modified_time = FileAccess::get_modified_time(remapped_path);
+						load_task.resource->set_last_modified_time(modified_time);
+					}
+#endif
+
+					thread_load_mutex.lock();
+					thread_load_mutex_held = true;
+
+					CycleTransaction *resolved_after_unlock = _resolve_cycle_transaction(active_transaction);
+					if (resolved_after_unlock != active_transaction) {
+						active_transaction_ref.reset(resolved_after_unlock);
+						active_transaction = resolved_after_unlock;
+					}
+
+					if (!cleaning_tasks) {
+						if (active_transaction->state == CycleTransaction::STATE_IN_PROGRESS && !active_transaction->finalizing) {
+							if (load_task.load_token->task_if_unregistered == nullptr) {
+								if (!active_transaction->staged_path_set.has(load_task.local_path)) {
+									active_transaction->staged_path_set.insert(load_task.local_path);
+									active_transaction->staged_paths.push_back(load_task.local_path);
+									active_transaction->staged_tokens.push_back(Ref<LoadToken>(load_task.load_token));
+								}
+								load_task.status = THREAD_LOAD_STAGED;
+							} else {
+								load_task.status = THREAD_LOAD_LOADED;
+							}
+						} else if (active_transaction->state == CycleTransaction::STATE_FAILED || (active_transaction->finalizing && !active_transaction->finalizing_commit)) {
+							if (load_task.resource.is_valid()) {
+								discarded_staged_resources.push_back(load_task.resource);
+								load_task.resource = Ref<Resource>();
+							}
+							load_task.error = (active_transaction->failure_error != OK) ? active_transaction->failure_error : FAILED;
+							load_task.status = THREAD_LOAD_FAILED;
+						} else {
+							// Ancestor transaction already committed while this descendant was finishing.
+							handled_by_transaction = false;
+						}
+					}
+				} else {
+					const Error descendant_error = (load_task.error != OK) ? load_task.error : FAILED;
+					load_task.error = descendant_error;
+					if (load_task.resource.is_valid()) {
+						discarded_staged_resources.push_back(load_task.resource);
+						load_task.resource = Ref<Resource>();
+					}
+					if (load_task.partial_resource_shared && active_transaction->poisoned_error == OK) {
+						active_transaction->poisoned_error = descendant_error;
+					}
+					load_task.status = THREAD_LOAD_FAILED;
+				}
+			} else if (active_transaction->state == CycleTransaction::STATE_FAILED || (active_transaction->finalizing && !active_transaction->finalizing_commit)) {
+				handled_by_transaction = true;
+				if (load_task.resource.is_valid()) {
+					discarded_staged_resources.push_back(load_task.resource);
+					load_task.resource = Ref<Resource>();
+				}
+				load_task.error = (active_transaction->failure_error != OK) ? active_transaction->failure_error : FAILED;
+				load_task.status = THREAD_LOAD_FAILED;
+			}
+		}
+	}
+
+	if (!handled_by_transaction) {
+		if (load_task.resource.is_valid()) {
+			// From now on, no critical section needed as no one will write to the task anymore.
+			// Moreover, the mutex being unlocked is a requirement if some of the calls below
+			// that set the resource up invoke code that in turn requests resource loading.
 			thread_load_mutex.unlock();
 			thread_load_mutex_held = false;
 
+			if (!ignoring) {
+				ResourceCache::lock.lock(); // Check and operations must happen atomically.
+				bool pending_unlock = true;
+				Ref<Resource> old_res = ResourceCache::get_ref(load_task.local_path);
+				if (was_finished) {
+					// If another thread already finished the entire load wait for it to complete
+					// cache registration, then use their instance.
+					while (!old_res.is_valid()) {
+						ResourceCache::lock.unlock();
+						_wait_tick();
+						ResourceCache::lock.lock();
+						old_res = ResourceCache::get_ref(load_task.local_path);
+					}
+				}
+				if (old_res.is_valid()) {
+					if (old_res != load_task.resource) {
+						// Resource can already exists at this point for two reasons:
+						// a) The load uses replace mode.
+						// b) There were more than one load in flight for the same path because of deadlock prevention.
+						// Either case, we want to keep the resource that was already there.
+						ResourceCache::lock.unlock();
+						pending_unlock = false;
+						if (replacing) {
+							old_res->copy_from(load_task.resource);
+						}
+						load_task.resource = old_res;
+					}
+				} else {
+					if (load_task.resource->get_path() == load_task.local_path) {
+						load_task.resource->set_path_cache(String());
+					}
+					load_task.resource->set_path(load_task.local_path);
+				}
+				if (pending_unlock) {
+					ResourceCache::lock.unlock();
+				}
+			} else {
+				load_task.resource->set_path_cache(load_task.local_path);
+			}
+
+			if (xl_remapped) {
+				load_task.resource->set_as_translation_remapped(true);
+			}
+
+#ifdef TOOLS_ENABLED
+			load_task.resource->set_edited(false);
+			if (timestamp_on_load) {
+				uint64_t mt = FileAccess::get_modified_time(remapped_path);
+				//printf("mt %s: %lli\n",remapped_path.utf8().get_data(),mt);
+				load_task.resource->set_last_modified_time(mt);
+			}
+#endif
+
 			if (_loaded_callback) {
 				_loaded_callback(load_task.resource, load_task.local_path);
+			}
+		} else if (!ignoring) {
+			Ref<Resource> existing = ResourceCache::get_ref(load_task.local_path);
+			if (existing.is_valid()) {
+				load_task.resource = existing;
+				load_task.status = THREAD_LOAD_LOADED;
+				load_task.progress = 1.0;
+
+				thread_load_mutex.unlock();
+				thread_load_mutex_held = false;
+
+				if (_loaded_callback) {
+					_loaded_callback(load_task.resource, load_task.local_path);
+				}
 			}
 		}
 	}
@@ -650,13 +1215,17 @@ void ResourceLoader::_run_load_task(void *p_userdata) {
 		// with the task later.
 		load_task.status = THREAD_LOAD_FAILED;
 		thread_load_mutex.unlock();
+		curr_load_task = curr_load_task_backup;
+		active_transaction_ref.reset(nullptr);
 		return;
 	}
 
-	if (load_task.error != OK) {
-		load_task.status = THREAD_LOAD_FAILED;
-	} else {
-		load_task.status = THREAD_LOAD_LOADED;
+	if (!handled_by_transaction) {
+		if (load_task.error != OK) {
+			load_task.status = THREAD_LOAD_FAILED;
+		} else {
+			load_task.status = THREAD_LOAD_LOADED;
+		}
 	}
 
 	if (load_task.cond_var && load_task.need_wait) {
@@ -681,6 +1250,15 @@ void ResourceLoader::_run_load_task(void *p_userdata) {
 	thread_load_mutex.unlock();
 
 	curr_load_task = curr_load_task_backup;
+
+	for (const LoadedCallbackItem &callback_item : deferred_loaded_callbacks) {
+		_loaded_callback(callback_item.resource, callback_item.local_path);
+	}
+	deferred_loaded_callbacks.clear();
+	discarded_staged_resources.clear();
+	cleared_partial_resource = Ref<Resource>();
+	released_staged_tokens.clear();
+	active_transaction_ref.reset(nullptr);
 
 	// It's safe now to let the task go in case no one else was grabbing the token.
 	if (load_token->unreference()) {
@@ -918,6 +1496,10 @@ ResourceLoader::ThreadLoadStatus ResourceLoader::load_threaded_get_status(const 
 		}
 
 		status = load_task_ptr->status;
+		if (status == THREAD_LOAD_STAGED) {
+			// Staged resources are not globally published until their transaction commits.
+			status = THREAD_LOAD_IN_PROGRESS;
+		}
 		if (r_progress) {
 			*r_progress = _dependency_get_progress(local_path);
 		}
@@ -978,7 +1560,7 @@ Ref<Resource> ResourceLoader::load_threaded_get(const String &p_path, Error *r_e
 				load_task_ptr = &thread_load_tasks[load_token->local_path];
 			}
 
-			while (load_task_ptr->status == THREAD_LOAD_IN_PROGRESS) {
+			while (load_task_ptr->status == THREAD_LOAD_IN_PROGRESS || load_task_ptr->status == THREAD_LOAD_STAGED) {
 				thread_load_lock.temp_unlock();
 				bool exit = !_ensure_load_progress();
 				WorkerThreadPool::thread_delay_usec_unlocked(1000);
@@ -1057,6 +1639,15 @@ Ref<Resource> ResourceLoader::_load_complete_inner(LoadToken &p_load_token, Erro
 		if (load_task.status == THREAD_LOAD_IN_PROGRESS) {
 			DEV_ASSERT((load_task.task_id == 0) != (load_task.thread_id == 0));
 
+			if (load_task.partial_resource.is_valid() && _is_ancestor_of_current_task(&load_task)) {
+				CycleTransaction *ancestor_transaction = _resolve_cycle_transaction(load_task.staged_transaction.ptr());
+				if (ancestor_transaction != nullptr) {
+					_enroll_task_chain_in_transaction(curr_load_task, &load_task, ancestor_transaction);
+				}
+				load_task.partial_resource_shared = true;
+				return load_task.partial_resource;
+			}
+
 			if ((load_task.task_id != 0 && load_task.task_id == WorkerThreadPool::get_singleton()->get_caller_task_id()) ||
 					(load_task.thread_id != 0 && load_task.thread_id == Thread::get_caller_id())) {
 				// Load is in progress, but it's precisely this thread the one in charge.
@@ -1086,7 +1677,7 @@ Ref<Resource> ResourceLoader::_load_complete_inner(LoadToken &p_load_token, Erro
 					}
 				}
 
-				DEV_ASSERT(load_task.status == THREAD_LOAD_FAILED || load_task.status == THREAD_LOAD_LOADED);
+				DEV_ASSERT(load_task.status == THREAD_LOAD_FAILED || load_task.status == THREAD_LOAD_LOADED || load_task.status == THREAD_LOAD_STAGED);
 			} else if (load_task.need_wait) {
 				// Loading thread is main or user thread.
 				if (!load_task.cond_var) {
@@ -1109,7 +1700,15 @@ Ref<Resource> ResourceLoader::_load_complete_inner(LoadToken &p_load_token, Erro
 				WorkerThreadPool::thread_relock_allowance_zones();
 				p_thread_load_lock.temp_relock();
 
-				DEV_ASSERT(load_task.status == THREAD_LOAD_FAILED || load_task.status == THREAD_LOAD_LOADED);
+				DEV_ASSERT(load_task.status == THREAD_LOAD_FAILED || load_task.status == THREAD_LOAD_LOADED || load_task.status == THREAD_LOAD_STAGED);
+			}
+		}
+
+		if (load_task.status == THREAD_LOAD_STAGED) {
+			CycleTransaction *staged_transaction = _resolve_cycle_transaction(load_task.staged_transaction.ptr());
+			if (staged_transaction != nullptr && !_try_join_transaction_from_ancestry(staged_transaction)) {
+				_wait_for_cycle_transaction(staged_transaction, p_load_token, p_thread_load_lock);
+				DEV_ASSERT(cleaning_tasks || load_task.status == THREAD_LOAD_FAILED || load_task.status == THREAD_LOAD_LOADED);
 			}
 		}
 
@@ -1324,6 +1923,56 @@ Ref<Resource> ResourceLoader::get_resource_ref_override(const String &p_path) {
 	}
 
 	return F->value;
+}
+
+bool ResourceLoader::register_current_load_partial_resource(const Ref<Resource> &p_resource, const String &p_expected_path) {
+	if (p_resource.is_null() || curr_load_task == nullptr) {
+		return false;
+	}
+	if (!p_expected_path.is_empty() && _validate_local_path(p_expected_path) != curr_load_task->local_path) {
+		return false;
+	}
+
+	MutexLock thread_load_lock(thread_load_mutex);
+	curr_load_task->partial_resource = p_resource;
+	if (!curr_load_task->staged_transaction.is_valid()) {
+		CycleTransaction *new_transaction = memnew(CycleTransaction);
+		new_transaction->root_path = curr_load_task->local_path;
+		curr_load_task->staged_transaction.reset(new_transaction);
+		// CycleTransaction constructor initializes ref_count to 1; reset() added a second ref.
+		new_transaction->ref_count.unref();
+	}
+	return true;
+}
+
+bool ResourceLoader::add_current_load_transaction_callback(const Callable &p_callback) {
+	if (!p_callback.is_valid() || curr_load_task == nullptr) {
+		return false;
+	}
+
+	MutexLock thread_load_lock(thread_load_mutex);
+	CycleTransaction *active_transaction = _resolve_cycle_transaction(curr_load_task->staged_transaction.ptr());
+	if (active_transaction == nullptr || active_transaction->state != CycleTransaction::STATE_IN_PROGRESS || active_transaction->finalizing) {
+		return false;
+	}
+	active_transaction->finalize_callbacks.push_back(p_callback);
+	return true;
+}
+
+String ResourceLoader::get_current_load_path() {
+	if (curr_load_task == nullptr) {
+		return String();
+	}
+	return curr_load_task->local_path;
+}
+
+bool ResourceLoader::is_current_load_in_cycle_transaction() {
+	if (curr_load_task == nullptr) {
+		return false;
+	}
+	MutexLock thread_load_lock(thread_load_mutex);
+	CycleTransaction *active_transaction = _resolve_cycle_transaction(curr_load_task->staged_transaction.ptr());
+	return active_transaction != nullptr && active_transaction->state == CycleTransaction::STATE_IN_PROGRESS;
 }
 
 bool ResourceLoader::exists(const String &p_path, const String &p_type_hint) {
@@ -1670,53 +2319,91 @@ void ResourceLoader::clear_translation_remaps() {
 void ResourceLoader::clear_thread_load_tasks() {
 	// Bring the thing down as quickly as possible without causing deadlocks or leaks.
 
-	MutexLock thread_load_lock(thread_load_mutex);
-	cleaning_tasks = true;
+	LocalVector<Ref<LoadToken>> released_staged_tokens;
+	LocalVector<Ref<Resource>> released_partial_resources;
+	{
+		MutexLock thread_load_lock(thread_load_mutex);
+		cleaning_tasks = true;
 
-	while (true) {
-		bool none_running = true;
-		for (int tid : yielders) {
-			WorkerThreadPool::get_singleton()->notify_yield_over(tid);
-		}
-		if (thread_load_tasks.size()) {
-			for (KeyValue<String, ResourceLoader::ThreadLoadTask> &E : thread_load_tasks) {
-				if (E.value.status == THREAD_LOAD_IN_PROGRESS) {
-					if (E.value.cond_var && E.value.need_wait) {
-						E.value.cond_var->notify_all();
+		while (true) {
+			bool none_running = true;
+			for (int tid : yielders) {
+				WorkerThreadPool::get_singleton()->notify_yield_over(tid);
+			}
+			if (thread_load_tasks.size()) {
+				for (KeyValue<String, ResourceLoader::ThreadLoadTask> &E : thread_load_tasks) {
+					if (E.value.staged_transaction.is_valid()) {
+						CycleTransaction *active_transaction = _resolve_cycle_transaction(E.value.staged_transaction.ptr());
+						if (active_transaction != nullptr && active_transaction->state == CycleTransaction::STATE_IN_PROGRESS) {
+							active_transaction->state = CycleTransaction::STATE_FAILED;
+							active_transaction->failure_error = FAILED;
+							active_transaction->cond_var.notify_all();
+						}
 					}
-					E.value.need_wait = false;
-					none_running = false;
+					if (E.value.status == THREAD_LOAD_IN_PROGRESS) {
+						if (E.value.cond_var && E.value.need_wait) {
+							E.value.cond_var->notify_all();
+						}
+						E.value.need_wait = false;
+						none_running = false;
+					} else if (E.value.status == THREAD_LOAD_STAGED) {
+						E.value.status = THREAD_LOAD_FAILED;
+						if (E.value.cond_var && E.value.need_wait) {
+							E.value.cond_var->notify_all();
+						}
+						E.value.need_wait = false;
+					}
 				}
 			}
+			if (none_running) {
+				break;
+			}
+
+			thread_load_lock.temp_unlock();
+
+			_wait_tick();
+
+			thread_load_lock.temp_relock();
 		}
-		if (none_running) {
-			break;
+
+		for (KeyValue<String, ResourceLoader::ThreadLoadTask> &E : thread_load_tasks) {
+			if (E.value.staged_transaction.is_valid()) {
+				CycleTransaction *active_transaction = _resolve_cycle_transaction(E.value.staged_transaction.ptr());
+				if (active_transaction != nullptr) {
+					for (Ref<LoadToken> &staged_token : active_transaction->staged_tokens) {
+						staged_token->local_path.clear();
+						released_staged_tokens.push_back(staged_token);
+					}
+					active_transaction->staged_tokens.clear();
+					active_transaction->staged_paths.clear();
+					active_transaction->staged_path_set.clear();
+					active_transaction->finalize_callbacks.clear();
+				}
+			}
+			if (E.value.partial_resource.is_valid()) {
+				released_partial_resources.push_back(E.value.partial_resource);
+				E.value.partial_resource = Ref<Resource>();
+			}
 		}
 
-		thread_load_lock.temp_unlock();
+		while (user_load_tokens.begin()) {
+			LoadToken *user_token = user_load_tokens.begin()->value;
+			user_load_tokens.remove(user_load_tokens.begin());
+			DEV_ASSERT(user_token->user_rc > 0 && !user_token->user_path.is_empty());
+			user_token->user_path.clear();
+			user_token->user_rc = 0;
+			if (user_token->unreference()) {
+				user_token->local_path.clear();
+				memdelete(user_token);
+			}
+		}
 
-		_wait_tick();
+		thread_load_tasks.clear();
+		thread_waiting_on.clear();
+		// yielders is already guaranteed to be empty now
 
-		thread_load_lock.temp_relock();
+		cleaning_tasks = false;
 	}
-
-	while (user_load_tokens.begin()) {
-		LoadToken *user_token = user_load_tokens.begin()->value;
-		user_load_tokens.remove(user_load_tokens.begin());
-		DEV_ASSERT(user_token->user_rc > 0 && !user_token->user_path.is_empty());
-		user_token->user_path.clear();
-		user_token->user_rc = 0;
-		if (user_token->unreference()) {
-			user_token->local_path.clear();
-			memdelete(user_token);
-		}
-	}
-
-	thread_load_tasks.clear();
-	thread_waiting_on.clear();
-	// yielders is already guaranteed to be empty now
-
-	cleaning_tasks = false;
 }
 
 void ResourceLoader::set_load_callback(ResourceLoadedCallback p_callback) {
@@ -1823,7 +2510,7 @@ Vector<String> ResourceLoader::list_directory(const String &p_directory) {
 				d = d.substr(0, d.rfind_char('.'));
 			}
 
-			if (d.ends_with(".gdc")) {
+			if (d.ends_with(".gdc") || d.ends_with(".gdb")) {
 				d = d.substr(0, d.rfind_char('.'));
 				d += ".gd";
 			}
