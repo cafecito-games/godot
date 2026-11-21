@@ -110,6 +110,17 @@ void GDScriptUtilityCallable::call(const Variant **p_arguments, int p_argcount, 
 	}
 }
 
+const GDScriptUtilityCallable *GDScriptUtilityCallable::get_from_callable(const Callable &p_callable) {
+	if (!p_callable.is_custom()) {
+		return nullptr;
+	}
+	const CallableCustom *custom_callable = p_callable.get_custom();
+	if (custom_callable == nullptr || custom_callable->get_compare_equal_func() != &GDScriptUtilityCallable::compare_equal) {
+		return nullptr;
+	}
+	return static_cast<const GDScriptUtilityCallable *>(custom_callable);
+}
+
 GDScriptUtilityCallable::GDScriptUtilityCallable(const StringName &p_function_name) {
 	function_name = p_function_name;
 	if (GDScriptUtilityFunctions::function_exists(p_function_name)) {
