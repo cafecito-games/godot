@@ -39,7 +39,7 @@ class GDScriptExportCompileSession;
 class EditorExportGDScript : public EditorExportPlugin {
 	GDCLASS(EditorExportGDScript, EditorExportPlugin);
 
-	static constexpr EditorExportPreset::ScriptExportMode DEFAULT_SCRIPT_MODE = EditorExportPreset::MODE_SCRIPT_BINARY_TOKENS_COMPRESSED;
+	static constexpr EditorExportPreset::ScriptExportMode DEFAULT_SCRIPT_MODE = EditorExportPreset::MODE_SCRIPT_COMPILED_BYTECODE_COMPRESSED;
 
 	EditorExportPreset::ScriptExportMode script_mode = DEFAULT_SCRIPT_MODE;
 	bool export_debug = false;

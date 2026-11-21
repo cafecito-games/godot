@@ -621,6 +621,37 @@ TEST_CASE("[Editor][Export] EditorExportPreset persists and loads MODE_SCRIPT_CO
 	CHECK(loaded_compressed_preset->get_script_export_mode() == EditorExportPreset::MODE_SCRIPT_COMPILED_BYTECODE_COMPRESSED);
 }
 
+TEST_CASE("[Editor][Export] EditorExportPreset defaults to MODE_SCRIPT_COMPILED_BYTECODE_COMPRESSED") {
+	ExportTestEnvironment environment("script_mode_default");
+
+	Ref<EditorExportPreset> new_preset = environment.platform->create_preset();
+	REQUIRE(new_preset.is_valid());
+	CHECK(new_preset->get_script_export_mode() == EditorExportPreset::MODE_SCRIPT_COMPILED_BYTECODE_COMPRESSED);
+
+	Ref<FileAccess> presets_file = FileAccess::open("res://export_presets.cfg", FileAccess::WRITE);
+	REQUIRE(presets_file.is_valid());
+	presets_file->store_string(vformat(
+			"[preset.0]\n"
+			"\n"
+			"name=\"ImplicitDefaultPreset\"\n"
+			"platform=\"%s\"\n"
+			"runnable=true\n"
+			"export_filter=\"all_resources\"\n"
+			"include_filter=\"\"\n"
+			"exclude_filter=\"\"\n"
+			"export_path=\"\"\n",
+			environment.platform->get_name()));
+	presets_file->close();
+
+	environment.editor_export->load_config();
+	REQUIRE(environment.editor_export->get_export_preset_count() == 1);
+
+	Ref<EditorExportPreset> loaded_preset = environment.editor_export->get_export_preset(0);
+	REQUIRE(loaded_preset.is_valid());
+	CHECK(loaded_preset->get_name() == "ImplicitDefaultPreset");
+	CHECK(loaded_preset->get_script_export_mode() == EditorExportPreset::MODE_SCRIPT_COMPILED_BYTECODE_COMPRESSED);
+}
+
 } // namespace TestEditorExportFatalError
 
 #endif // TOOLS_ENABLED
