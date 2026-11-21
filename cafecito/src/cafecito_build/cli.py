@@ -128,6 +128,7 @@ def _command_build_apple_libgodot(arguments: argparse.Namespace) -> int:
         kit_output_directory=(
             Path(arguments.kit_output_dir).resolve() if arguments.kit_output_dir else None
         ),
+        extra_flags=tuple(arguments.extra_flag or ()),
     )
     for output_path in outputs:
         print(f"[cafecito-build] Built Apple LibGodot slice: {output_path}")
@@ -148,6 +149,7 @@ def _command_package_apple_libgodot(arguments: argparse.Namespace) -> int:
         editor_binary=Path(arguments.editor_binary).resolve() if arguments.editor_binary else None,
         extension_api_path=Path(arguments.extension_api).resolve() if arguments.extension_api else None,
         jobs=arguments.jobs,
+        extra_flags=tuple(arguments.extra_flag or ()),
     )
     print(f"[cafecito-build] Packaged Apple LibGodot SDK: {output}")
     return 0
@@ -246,6 +248,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
         ),
     )
     apple_libgodot_parser.add_argument("-j", "--jobs", type=int, default=None)
+    apple_libgodot_parser.add_argument("--extra-flag", action="append", help="Additional SCons flag (repeatable)")
     apple_libgodot_parser.set_defaults(handler=_command_build_apple_libgodot)
 
     apple_pkg_parser = subparsers.add_parser(
@@ -275,6 +278,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
         default=None,
         help="Parallel compile jobs when building the macOS editor for extension_api.json",
     )
+    apple_pkg_parser.add_argument("--extra-flag", action="append", help="Additional SCons flag (repeatable)")
     apple_pkg_parser.set_defaults(handler=_command_package_apple_libgodot)
 
     checksums_parser = subparsers.add_parser("checksums", help="Write SHA256SUMS.txt for a release directory")

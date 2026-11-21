@@ -256,7 +256,13 @@ class AppleLibGodotPackagingTest(unittest.TestCase):
                 patch("cafecito_build.apple_libgodot.detect_architecture", return_value="arm64"),
                 patch("cafecito_build.apple_libgodot.run_scons_build", side_effect=fake_scons_build) as mock_build,
             ):
-                package_apple_libgodot_sdk(repository_root, "release", output_zip, jobs=6)
+                package_apple_libgodot_sdk(
+                    repository_root,
+                    "release",
+                    output_zip,
+                    jobs=6,
+                    extra_flags=("cache_path=/tmp/scons-cache",),
+                )
 
             mock_build.assert_called_once()
             build_request = mock_build.call_args.args[0]
@@ -265,7 +271,10 @@ class AppleLibGodotPackagingTest(unittest.TestCase):
             self.assertEqual(build_request.architecture, "arm64")
             self.assertFalse(build_request.relink_kit)
             self.assertEqual(build_request.jobs, 6)
-            self.assertEqual(build_request.extra_flags, SHARED_APPLE_LIBGODOT_FLAGS)
+            self.assertEqual(
+                build_request.extra_flags,
+                (*SHARED_APPLE_LIBGODOT_FLAGS, "optimize=none", "cache_path=/tmp/scons-cache"),
+            )
 
     def test_package_fails_closed_when_required_static_asset_missing(self) -> None:
         for relative_source in STATIC_PACKAGE_ASSETS.values():
@@ -312,6 +321,20 @@ class AppleLibGodotPackagingTest(unittest.TestCase):
 
 
 class AppleLibGodotCliTest(unittest.TestCase):
+    def test_build_apple_libgodot_arguments(self) -> None:
+        parser = build_argument_parser()
+        arguments = parser.parse_args([
+            "build-apple-libgodot",
+            "--configuration",
+            "release",
+            "--extra-flag",
+            "cache_path=/tmp/cache",
+            "--extra-flag",
+            "cache_limit=7",
+        ])
+        self.assertEqual(arguments.configuration, "release")
+        self.assertEqual(arguments.extra_flag, ["cache_path=/tmp/cache", "cache_limit=7"])
+
     def test_package_apple_libgodot_arguments(self) -> None:
         parser = build_argument_parser()
         arguments = parser.parse_args([
@@ -326,12 +349,15 @@ class AppleLibGodotCliTest(unittest.TestCase):
             "tmp/extension_api.json",
             "--jobs",
             "8",
+            "--extra-flag",
+            "cache_path=/tmp/cache",
         ])
         self.assertEqual(arguments.configuration, "debug")
         self.assertEqual(arguments.output, "release-out/apple-libgodot-debug.zip")
         self.assertEqual(arguments.editor_binary, "bin/godot.macos.editor.arm64")
         self.assertEqual(arguments.extension_api, "tmp/extension_api.json")
         self.assertEqual(arguments.jobs, 8)
+        self.assertEqual(arguments.extra_flag, ["cache_path=/tmp/cache"])
 
 
 if __name__ == "__main__":

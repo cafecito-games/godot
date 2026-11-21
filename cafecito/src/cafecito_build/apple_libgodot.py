@@ -120,6 +120,7 @@ def ensure_macos_editor(
     *,
     editor_binary: Path | None = None,
     jobs: int | None = None,
+    extra_flags: tuple[str, ...] = (),
 ) -> Path:
     """Return an existing macOS editor binary or build one for dumping extension_api.json."""
     if editor_binary is not None:
@@ -140,7 +141,7 @@ def ensure_macos_editor(
             architecture=host_architecture,
             relink_kit=False,
             jobs=jobs,
-            extra_flags=SHARED_APPLE_LIBGODOT_FLAGS,
+            extra_flags=(*SHARED_APPLE_LIBGODOT_FLAGS, "optimize=none", *extra_flags),
         )
     )
     if not default_binary.is_file():
@@ -242,6 +243,7 @@ def build_apple_libgodot_slices(
     relink_kit: bool = True,
     jobs: int | None = None,
     kit_output_directory: Path | None = None,
+    extra_flags: tuple[str, ...] = (),
 ) -> list[Path]:
     """Build all four Apple LibGodot slices for the requested configuration.
 
@@ -269,7 +271,7 @@ def build_apple_libgodot_slices(
                 library_type=slice_specification.library_type,
                 relink_kit=relink_kit,
                 jobs=jobs,
-                extra_flags=slice_specification.extra_flags(),
+                extra_flags=(*slice_specification.extra_flags(), *extra_flags),
             )
         )
         built_outputs.append(bin_directory / slice_specification.output_filename)
@@ -288,6 +290,7 @@ def package_apple_libgodot_sdk(
     editor_binary: Path | None = None,
     extension_api_path: Path | None = None,
     jobs: int | None = None,
+    extra_flags: tuple[str, ...] = (),
 ) -> Path:
     """Package built Apple LibGodot slices, headers, API dump, license files, and BUILD_INFO.json."""
     if configuration not in APPLE_LIBGODOT_SLICES:
@@ -319,6 +322,7 @@ def package_apple_libgodot_sdk(
                 repository_root,
                 editor_binary=editor_binary,
                 jobs=jobs,
+                extra_flags=extra_flags,
             )
             staged_files[EXTENSION_API_FILENAME] = dump_extension_api(resolved_editor, temporary_directory)
 

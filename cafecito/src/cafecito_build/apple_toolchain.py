@@ -135,6 +135,14 @@ def _append_github_file(env_var_name: str, entries: dict[str, str]) -> None:
             handle.write(f"{key}={value}\n")
 
 
+def _append_github_path(directory: Path) -> None:
+    github_path_str = os.environ.get("GITHUB_PATH", "").strip()
+    if not github_path_str or not directory.is_dir():
+        return
+    with Path(github_path_str).open("a", encoding="utf-8") as handle:
+        handle.write(f"{directory}\n")
+
+
 def select_and_verify_xcode(min_ios_sdk_major: int) -> XcodeCandidate:
     """Select an Xcode satisfying min_ios_sdk_major, log diagnostics, and export DEVELOPER_DIR."""
     developer_directories = _discover_developer_directories()
@@ -184,6 +192,10 @@ def select_and_verify_xcode(min_ios_sdk_major: int) -> XcodeCandidate:
     )
 
     _append_github_file("GITHUB_ENV", {"DEVELOPER_DIR": str(selected.developer_directory)})
+    toolchain_bin = selected.developer_directory / "Toolchains" / "XcodeDefault.xctoolchain" / "usr" / "bin"
+    if toolchain_bin.is_dir():
+        _append_github_path(toolchain_bin)
+        print(f"[apple-toolchain] Prepended toolchain bin to GITHUB_PATH: {toolchain_bin}")
     _append_github_file(
         "GITHUB_OUTPUT",
         {

@@ -8,6 +8,11 @@ on:
         required: false
         type: string
         default: ''
+      publish_release:
+        description: 'Publish GitHub Release (set false for build-only verification / dry runs)'
+        required: false
+        type: boolean
+        default: true
       build_macos_arm64:
         description: 'Build macOS Apple Silicon editor + templates + Relink Kits'
         required: false
@@ -45,20 +50,24 @@ on:
         default: false
 
 env:
-  SCONS_CACHE: ${{ github.workspace }}/.scons-cache
-  SCONS_CACHE_LIMIT: 7168
+  SCONS_CACHE_DIR: ${{ github.workspace }}/.scons-cache
+  SCONS_CACHE_LIMIT_GIB: '7'
+  SCONS_VERSION: '4.10.1'
   REQUIRED_IOS_SDK_MAJOR: '27'
+  HOMEBREW_NO_AUTO_UPDATE: '1'
+  HOMEBREW_NO_INSTALL_CLEANUP: '1'
 
 jobs:
   generate-tag:
     name: Generate Release Tag
+    if: inputs.publish_release
     runs-on: ubuntu-24.04
     outputs:
       release_tag: ${{ steps.tag.outputs.release_tag }}
       template_version: ${{ steps.tag.outputs.template_version }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Derive release tag and template version
         id: tag
@@ -85,23 +94,59 @@ jobs:
     if: inputs.build_macos_arm64
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.4.0
 
-      - name: Install build dependencies
-        run: brew install scons yasm zstd
+      - name: Configure Xcode toolchain PATH and ensure zstd
+        run: |
+          toolchain_bin="$(dirname "$(xcrun --find clang)")"
+          echo "${toolchain_bin}" >> "${GITHUB_PATH}"
+          echo "Prepended macOS toolchain bin to PATH: ${toolchain_bin}"
+          command -v zstd >/dev/null || brew install zstd
+
+      - name: Resolve Vulkan SDK version
+        id: vulkan-version
+        run: |
+          version="$(curl -fsSL https://sdk.lunarg.com/sdk/download/latest/mac/config.json | jq -r '.version')"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+
+      - name: Restore MoltenVK cache
+        id: restore-moltenvk
+        uses: actions/cache/restore@v6
+        continue-on-error: true
+        with:
+          path: ~/VulkanSDK/${{ steps.vulkan-version.outputs.version }}/macOS/lib/MoltenVK.xcframework
+          key: macos-moltenvk-v1-${{ steps.vulkan-version.outputs.version }}
 
       - name: Install Vulkan SDK
+        if: steps.restore-moltenvk.outputs.cache-hit != 'true'
         run: bash misc/scripts/install_vulkan_sdk_macos.sh
 
-      - name: Restore SCons cache
-        uses: actions/cache@v4
+      - name: Save MoltenVK cache
+        if: steps.restore-moltenvk.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        continue-on-error: true
         with:
-          path: ${{ github.workspace }}/.scons-cache
-          key: macos-arm64-${{ hashFiles('core/**/*.h', 'core/**/*.cpp', 'SConstruct') }}
-          restore-keys: macos-arm64-
+          path: ~/VulkanSDK/${{ steps.vulkan-version.outputs.version }}/macOS/lib/MoltenVK.xcframework
+          key: macos-moltenvk-v1-${{ steps.vulkan-version.outputs.version }}
 
-      - name: Build macOS arm64 editor and templates
+      - name: Restore SCons cache
+        id: restore-cache
+        uses: actions/cache/restore@v6
+        continue-on-error: true
+        with:
+          path: ${{ env.SCONS_CACHE_DIR }}
+          key: release-v2-macos-arm64-${{ github.sha }}
+          restore-keys: |
+            release-v2-macos-arm64-
+            macos-arm64-
+
+      - name: Record build start timestamp
+        run: |
+          sleep 1
+          echo "CACHE_TIMESTAMP=$(date +%s)" >> "${GITHUB_ENV}"
+
+      - name: Build macOS arm64 editor, templates, and Relink Kits
         run: |
           mkdir -p release-out
           # A target's loose `platform/macos` objects live at paths SCons qualifies by
@@ -109,15 +154,40 @@ jobs:
           # one's. Each kit is packaged while the objects its manifest names are still
           # the ones it was built from, as the Linux, Android and Windows jobs do.
           for target in editor template_release template_debug; do
-            uv run --project cafecito cafecito-build build --platform macos --target "$target" --arch arm64
+            uv run --project cafecito --with "scons==${SCONS_VERSION}" cafecito-build build \
+              --platform macos \
+              --target "$target" \
+              --arch arm64 \
+              --extra-flag "cache_path=${SCONS_CACHE_DIR}" \
+              --extra-flag "cache_limit=${SCONS_CACHE_LIMIT_GIB}"
             uv run --project cafecito cafecito-build package-relink-kit \
               --manifest "bin/godot.macos.${target}.arm64.relink.json" \
               --output-dir release-out
           done
 
-      - name: Package public macOS bundles
+      - name: Prune SCons cache
+        id: prune-cache
+        if: steps.restore-cache.outputs.cache-hit != 'true'
         run: |
-          mkdir -p release-out
+          python3 misc/scripts/purge_cache.py "${CACHE_TIMESTAMP}" "${SCONS_CACHE_DIR}"
+          if [ -d "${SCONS_CACHE_DIR}" ] && [ -n "$(find "${SCONS_CACHE_DIR}" -mindepth 2 -type f -print -quit)" ]; then
+            echo "has_files=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "has_files=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Save SCons cache
+        if: steps.prune-cache.outputs.has_files == 'true'
+        uses: actions/cache/save@v6
+        continue-on-error: true
+        with:
+          path: ${{ env.SCONS_CACHE_DIR }}
+          key: release-v2-macos-arm64-${{ github.sha }}
+
+      - name: Package public macOS bundles and extension API
+        run: |
+          mkdir -p release-out extension-api-out
+          (cd extension-api-out && ../bin/godot.macos.editor.arm64 --headless --dump-extension-api)
           uv run --project cafecito cafecito-build package-macos-editor \
             --editor-binary bin/godot.macos.editor.arm64 \
             --output release-out/godot_macos_editor.arm64.zip
@@ -127,10 +197,17 @@ jobs:
             --output release-out/macos-arm64.zip
 
       - name: Upload macOS arm64 artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
-          name: macos-arm64
+          name: release-macos-arm64
           path: release-out/*
+          retention-days: 1
+
+      - name: Upload macOS extension API artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: internal-macos-extension-api
+          path: extension-api-out/extension_api.json
           retention-days: 1
 
   build-ios:
@@ -141,25 +218,57 @@ jobs:
       xcode_version: ${{ steps.xcode.outputs.xcode_version }}
       ios_sdk_version: ${{ steps.xcode.outputs.ios_sdk_version }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.4.0
 
       - name: Select and verify Xcode / iOS SDK
         id: xcode
         run: uv run --project cafecito cafecito-build select-xcode --min-ios-sdk "${REQUIRED_IOS_SDK_MAJOR}"
 
-      - name: Install build dependencies
-        run: brew install scons yasm zstd
+      - name: Ensure zstd is available
+        run: command -v zstd >/dev/null || brew install zstd
+
+      - name: Resolve Vulkan SDK version
+        id: vulkan-version
+        run: |
+          version="$(curl -fsSL https://sdk.lunarg.com/sdk/download/latest/mac/config.json | jq -r '.version')"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+
+      - name: Restore MoltenVK cache
+        id: restore-moltenvk
+        uses: actions/cache/restore@v6
+        continue-on-error: true
+        with:
+          path: ~/VulkanSDK/${{ steps.vulkan-version.outputs.version }}/macOS/lib/MoltenVK.xcframework
+          key: macos-moltenvk-v1-${{ steps.vulkan-version.outputs.version }}
 
       - name: Install Vulkan SDK (MoltenVK for ios.zip)
+        if: steps.restore-moltenvk.outputs.cache-hit != 'true'
         run: bash misc/scripts/install_vulkan_sdk_macos.sh
 
-      - name: Restore SCons cache
-        uses: actions/cache@v4
+      - name: Save MoltenVK cache
+        if: steps.restore-moltenvk.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        continue-on-error: true
         with:
-          path: ${{ github.workspace }}/.scons-cache
-          key: ios-sdk-${{ steps.xcode.outputs.ios_sdk_version }}-${{ hashFiles('core/**/*.h', 'core/**/*.cpp', 'SConstruct') }}
-          restore-keys: ios-sdk-${{ steps.xcode.outputs.ios_sdk_version }}-
+          path: ~/VulkanSDK/${{ steps.vulkan-version.outputs.version }}/macOS/lib/MoltenVK.xcframework
+          key: macos-moltenvk-v1-${{ steps.vulkan-version.outputs.version }}
+
+      - name: Restore SCons cache
+        id: restore-cache
+        uses: actions/cache/restore@v6
+        continue-on-error: true
+        with:
+          path: ${{ env.SCONS_CACHE_DIR }}
+          key: release-v2-ios-sdk-${{ steps.xcode.outputs.ios_sdk_version }}-${{ github.sha }}
+          restore-keys: |
+            release-v2-ios-sdk-${{ steps.xcode.outputs.ios_sdk_version }}-
+            ios-sdk-${{ steps.xcode.outputs.ios_sdk_version }}-
+
+      - name: Record build start timestamp
+        run: |
+          sleep 1
+          echo "CACHE_TIMESTAMP=$(date +%s)" >> "${GITHUB_ENV}"
 
       - name: Build iOS slices (release + debug; device + simulator)
         run: |
@@ -168,11 +277,23 @@ jobs:
           # qualifies by neither target nor simulator, so each kit is packaged while the
           # objects its manifest names are still the ones it was built from.
           for target in template_release template_debug; do
-            uv run --project cafecito cafecito-build build --platform ios --target "$target" --arch arm64 --extra-flag ios_simulator=no
+            uv run --project cafecito --with "scons==${SCONS_VERSION}" cafecito-build build \
+              --platform ios \
+              --target "$target" \
+              --arch arm64 \
+              --extra-flag ios_simulator=no \
+              --extra-flag "cache_path=${SCONS_CACHE_DIR}" \
+              --extra-flag "cache_limit=${SCONS_CACHE_LIMIT_GIB}"
             uv run --project cafecito cafecito-build package-relink-kit \
               --manifest "bin/libgodot.ios.${target}.arm64.a.relink.json" \
               --output-dir release-out
-            uv run --project cafecito cafecito-build build --platform ios --target "$target" --arch arm64 --extra-flag ios_simulator=yes
+            uv run --project cafecito --with "scons==${SCONS_VERSION}" cafecito-build build \
+              --platform ios \
+              --target "$target" \
+              --arch arm64 \
+              --extra-flag ios_simulator=yes \
+              --extra-flag "cache_path=${SCONS_CACHE_DIR}" \
+              --extra-flag "cache_limit=${SCONS_CACHE_LIMIT_GIB}"
             uv run --project cafecito cafecito-build package-relink-kit \
               --manifest "bin/libgodot.ios.${target}.arm64.simulator.a.relink.json" \
               --output-dir release-out
@@ -181,15 +302,41 @@ jobs:
       - name: Generate and finalize ios.zip
         run: |
           mkdir -p release-out
-          uv run --project cafecito cafecito-build build --platform ios --target template_release --arch arm64 --no-relink-kit --extra-flag generate_bundle=yes
+          uv run --project cafecito --with "scons==${SCONS_VERSION}" cafecito-build build \
+            --platform ios \
+            --target template_release \
+            --arch arm64 \
+            --no-relink-kit \
+            --extra-flag generate_bundle=yes \
+            --extra-flag "cache_path=${SCONS_CACHE_DIR}" \
+            --extra-flag "cache_limit=${SCONS_CACHE_LIMIT_GIB}"
           uv run --project cafecito cafecito-build finalize-ios-template \
             --input-zip bin/godot_ios.zip \
             --output-zip release-out/ios.zip
 
-      - name: Upload iOS artifacts
-        uses: actions/upload-artifact@v4
+      - name: Prune SCons cache
+        id: prune-cache
+        if: steps.restore-cache.outputs.cache-hit != 'true'
+        run: |
+          python3 misc/scripts/purge_cache.py "${CACHE_TIMESTAMP}" "${SCONS_CACHE_DIR}"
+          if [ -d "${SCONS_CACHE_DIR}" ] && [ -n "$(find "${SCONS_CACHE_DIR}" -mindepth 2 -type f -print -quit)" ]; then
+            echo "has_files=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "has_files=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Save SCons cache
+        if: steps.prune-cache.outputs.has_files == 'true'
+        uses: actions/cache/save@v6
+        continue-on-error: true
         with:
-          name: ios
+          path: ${{ env.SCONS_CACHE_DIR }}
+          key: release-v2-ios-sdk-${{ steps.xcode.outputs.ios_sdk_version }}-${{ github.sha }}
+
+      - name: Upload iOS artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-ios
           path: release-out/*
           retention-days: 1
 
@@ -201,44 +348,136 @@ jobs:
       xcode_version: ${{ steps.xcode.outputs.xcode_version }}
       ios_sdk_version: ${{ steps.xcode.outputs.ios_sdk_version }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.4.0
 
       - name: Select and verify Xcode / iOS SDK
         id: xcode
         run: uv run --project cafecito cafecito-build select-xcode --min-ios-sdk "${REQUIRED_IOS_SDK_MAJOR}"
 
-      - name: Install build dependencies
-        run: brew install scons yasm zstd
+      - name: Ensure zstd is available
+        run: command -v zstd >/dev/null || brew install zstd
 
       - name: Restore SCons cache
-        uses: actions/cache@v4
+        id: restore-cache
+        uses: actions/cache/restore@v6
+        continue-on-error: true
         with:
-          path: ${{ github.workspace }}/.scons-cache
-          key: apple-libgodot-sdk-${{ steps.xcode.outputs.ios_sdk_version }}-${{ hashFiles('core/**/*.h', 'core/**/*.cpp', 'SConstruct') }}
+          path: ${{ env.SCONS_CACHE_DIR }}
+          key: release-v2-apple-libgodot-sdk-${{ steps.xcode.outputs.ios_sdk_version }}-${{ github.sha }}
           restore-keys: |
+            release-v2-apple-libgodot-sdk-${{ steps.xcode.outputs.ios_sdk_version }}-
             apple-libgodot-sdk-${{ steps.xcode.outputs.ios_sdk_version }}-
-            ios-sdk-${{ steps.xcode.outputs.ios_sdk_version }}-
-            macos-arm64-
 
-      - name: Build and package Apple LibGodot SDK + Relink Kits
+      - name: Record build start timestamp
+        run: |
+          sleep 1
+          echo "CACHE_TIMESTAMP=$(date +%s)" >> "${GITHUB_ENV}"
+
+      - name: Build Apple LibGodot slices and Relink Kits
         run: |
           mkdir -p release-out
           # Each slice's kit is packaged as that slice finishes. The macOS slices share
           # unqualified `platform/macos` object paths, so a kit packaged after the whole
           # build carries the last architecture built rather than its own.
-          uv run --project cafecito cafecito-build build-apple-libgodot \
+          uv run --project cafecito --with "scons==${SCONS_VERSION}" cafecito-build build-apple-libgodot \
             --configuration release \
-            --kit-output-dir release-out
+            --kit-output-dir release-out \
+            --extra-flag "cache_path=${SCONS_CACHE_DIR}" \
+            --extra-flag "cache_limit=${SCONS_CACHE_LIMIT_GIB}"
+
+      - name: Package Apple LibGodot SDK standalone (without build-macos-arm64)
+        if: "!inputs.build_macos_arm64"
+        run: |
+          uv run --project cafecito --with "scons==${SCONS_VERSION}" cafecito-build package-apple-libgodot \
+            --configuration release \
+            --output release-out/apple-libgodot-release.zip \
+            --extra-flag "cache_path=${SCONS_CACHE_DIR}" \
+            --extra-flag "cache_limit=${SCONS_CACHE_LIMIT_GIB}"
+          unzip -l release-out/apple-libgodot-release.zip
+
+      - name: Prune SCons cache
+        id: prune-cache
+        if: steps.restore-cache.outputs.cache-hit != 'true'
+        run: |
+          python3 misc/scripts/purge_cache.py "${CACHE_TIMESTAMP}" "${SCONS_CACHE_DIR}"
+          if [ -d "${SCONS_CACHE_DIR}" ] && [ -n "$(find "${SCONS_CACHE_DIR}" -mindepth 2 -type f -print -quit)" ]; then
+            echo "has_files=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "has_files=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Save SCons cache
+        if: steps.prune-cache.outputs.has_files == 'true'
+        uses: actions/cache/save@v6
+        continue-on-error: true
+        with:
+          path: ${{ env.SCONS_CACHE_DIR }}
+          key: release-v2-apple-libgodot-sdk-${{ steps.xcode.outputs.ios_sdk_version }}-${{ github.sha }}
+
+      - name: Stage Apple LibGodot slices for SDK packaging
+        if: inputs.build_macos_arm64
+        run: |
+          mkdir -p libgodot-slices-stage/bin libgodot-slices-stage/core/extension
+          cp \
+            bin/libgodot.macos.template_release.arm64.dylib \
+            bin/libgodot.macos.template_release.x86_64.dylib \
+            bin/libgodot.ios.template_release.arm64.a \
+            bin/libgodot.ios.template_release.arm64.simulator.a \
+            libgodot-slices-stage/bin/
+          cp core/extension/gdextension_interface.gen.h libgodot-slices-stage/core/extension/
+
+      - name: Upload Apple LibGodot release artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-apple-libgodot-build
+          path: release-out/*
+          retention-days: 1
+
+      - name: Upload Apple LibGodot slice inputs for SDK packaging
+        if: inputs.build_macos_arm64
+        uses: actions/upload-artifact@v7
+        with:
+          name: internal-apple-libgodot-slices
+          path: libgodot-slices-stage
+          retention-days: 1
+
+  package-apple-libgodot:
+    name: Package Apple LibGodot SDK
+    needs:
+      - build-apple-libgodot
+      - build-macos-arm64
+    if: inputs.build_apple_libgodot && inputs.build_macos_arm64
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.4.0
+
+      - name: Download Apple LibGodot slices
+        uses: actions/download-artifact@v8
+        with:
+          name: internal-apple-libgodot-slices
+          path: .
+
+      - name: Download macOS extension API
+        uses: actions/download-artifact@v8
+        with:
+          name: internal-macos-extension-api
+          path: extension-api-in
+
+      - name: Package Apple LibGodot SDK archive
+        run: |
+          mkdir -p release-out
           uv run --project cafecito cafecito-build package-apple-libgodot \
             --configuration release \
+            --extension-api extension-api-in/extension_api.json \
             --output release-out/apple-libgodot-release.zip
           unzip -l release-out/apple-libgodot-release.zip
 
-      - name: Upload Apple LibGodot artifacts
-        uses: actions/upload-artifact@v4
+      - name: Upload Apple LibGodot SDK archive
+        uses: actions/upload-artifact@v7
         with:
-          name: apple-libgodot
+          name: release-apple-libgodot-sdk
           path: release-out/*
           retention-days: 1
 
@@ -247,46 +486,81 @@ jobs:
     if: inputs.build_android
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.4.0
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Install SCons and zstd
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y scons zstd
+      - name: Set up Gradle cache
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: false
 
       - name: Install Android NDK 29
         run: |
-          yes | "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" "ndk;29.0.14206865"
+          if [ ! -d "${ANDROID_HOME}/ndk/29.0.14206865" ]; then
+            yes | "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" "ndk;29.0.14206865"
+          fi
 
       - name: Restore SCons cache
-        uses: actions/cache@v4
+        id: restore-cache
+        uses: actions/cache/restore@v6
+        continue-on-error: true
         with:
-          path: ${{ github.workspace }}/.scons-cache
-          key: android-${{ hashFiles('core/**/*.h', 'core/**/*.cpp', 'SConstruct') }}
-          restore-keys: android-
+          path: ${{ env.SCONS_CACHE_DIR }}
+          key: release-v2-android-${{ github.sha }}
+          restore-keys: |
+            release-v2-android-
+            android-
+
+      - name: Record build start timestamp
+        run: |
+          sleep 1
+          echo "CACHE_TIMESTAMP=$(date +%s)" >> "${GITHUB_ENV}"
 
       - name: Build Android native slices and package Relink Kits
         run: |
           mkdir -p release-out
           for target in template_release template_debug; do
             for arch in arm64 x86_64; do
-              uv run --project cafecito cafecito-build build --platform android --target "$target" --arch "$arch"
+              uv run --project cafecito --with "scons==${SCONS_VERSION}" cafecito-build build \
+                --platform android \
+                --target "$target" \
+                --arch "$arch" \
+                --extra-flag "cache_path=${SCONS_CACHE_DIR}" \
+                --extra-flag "cache_limit=${SCONS_CACHE_LIMIT_GIB}"
               uv run --project cafecito cafecito-build package-relink-kit \
                 --manifest "bin/libgodot.android.${target}.${arch}.so.relink.json" \
                 --output-dir release-out
             done
           done
 
+      - name: Prune SCons cache
+        id: prune-cache
+        if: steps.restore-cache.outputs.cache-hit != 'true'
+        run: |
+          python3 misc/scripts/purge_cache.py "${CACHE_TIMESTAMP}" "${SCONS_CACHE_DIR}"
+          if [ -d "${SCONS_CACHE_DIR}" ] && [ -n "$(find "${SCONS_CACHE_DIR}" -mindepth 2 -type f -print -quit)" ]; then
+            echo "has_files=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "has_files=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Save SCons cache
+        if: steps.prune-cache.outputs.has_files == 'true'
+        uses: actions/cache/save@v6
+        continue-on-error: true
+        with:
+          path: ${{ env.SCONS_CACHE_DIR }}
+          key: release-v2-android-${{ github.sha }}
+
       - name: Generate Android template APKs
         run: |
-          (cd platform/android/java && ./gradlew generateGodotTemplates)
+          (cd platform/android/java && uv run --with "scons==${SCONS_VERSION}" -- ./gradlew generateGodotTemplates)
           uv run --project cafecito cafecito-build package-android-templates \
             --bin-dir bin \
             --output-zip release-out/android.zip \
@@ -294,9 +568,9 @@ jobs:
             --abi x86_64
 
       - name: Upload Android artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
-          name: android
+          name: release-android
           path: release-out/*
           retention-days: 1
 
@@ -305,28 +579,35 @@ jobs:
     if: inputs.build_linux
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
-
-      - name: Install Linux build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential scons pkg-config zstd libx11-dev libxcursor-dev \
-            libxinerama-dev libgl1-mesa-dev libglu1-mesa-dev libasound2-dev libpulse-dev \
-            libudev-dev libxi-dev libxrandr-dev yasm
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.4.0
 
       - name: Restore SCons cache
-        uses: actions/cache@v4
+        id: restore-cache
+        uses: actions/cache/restore@v6
+        continue-on-error: true
         with:
-          path: ${{ github.workspace }}/.scons-cache
-          key: linux-templates-${{ hashFiles('core/**/*.h', 'core/**/*.cpp', 'SConstruct') }}
-          restore-keys: linux-templates-
+          path: ${{ env.SCONS_CACHE_DIR }}
+          key: release-v2-linux-templates-${{ github.sha }}
+          restore-keys: |
+            release-v2-linux-templates-
+            linux-templates-
+
+      - name: Record build start timestamp
+        run: |
+          sleep 1
+          echo "CACHE_TIMESTAMP=$(date +%s)" >> "${GITHUB_ENV}"
 
       - name: Build Linux release and debug templates
         run: |
           mkdir -p release-out
           for target in template_release template_debug; do
-            uv run --project cafecito cafecito-build build --platform linuxbsd --target "$target" --arch x86_64
+            uv run --project cafecito --with "scons==${SCONS_VERSION}" cafecito-build build \
+              --platform linuxbsd \
+              --target "$target" \
+              --arch x86_64 \
+              --extra-flag "cache_path=${SCONS_CACHE_DIR}" \
+              --extra-flag "cache_limit=${SCONS_CACHE_LIMIT_GIB}"
             strip "bin/godot.linuxbsd.${target}.x86_64"
             tar czf "release-out/linux-${target}.tar.gz" -C bin "godot.linuxbsd.${target}.x86_64"
             uv run --project cafecito cafecito-build package-relink-kit \
@@ -334,10 +615,29 @@ jobs:
               --output-dir release-out
           done
 
-      - name: Upload Linux template artifacts
-        uses: actions/upload-artifact@v4
+      - name: Prune SCons cache
+        id: prune-cache
+        if: steps.restore-cache.outputs.cache-hit != 'true'
+        run: |
+          python3 misc/scripts/purge_cache.py "${CACHE_TIMESTAMP}" "${SCONS_CACHE_DIR}"
+          if [ -d "${SCONS_CACHE_DIR}" ] && [ -n "$(find "${SCONS_CACHE_DIR}" -mindepth 2 -type f -print -quit)" ]; then
+            echo "has_files=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "has_files=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Save SCons cache
+        if: steps.prune-cache.outputs.has_files == 'true'
+        uses: actions/cache/save@v6
+        continue-on-error: true
         with:
-          name: linux-templates
+          path: ${{ env.SCONS_CACHE_DIR }}
+          key: release-v2-linux-templates-${{ github.sha }}
+
+      - name: Upload Linux template artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-linux-templates
           path: release-out/*
           retention-days: 1
 
@@ -346,37 +646,63 @@ jobs:
     if: inputs.build_linux_editor
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
-
-      - name: Install Linux build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential scons pkg-config zstd libx11-dev libxcursor-dev \
-            libxinerama-dev libgl1-mesa-dev libglu1-mesa-dev libasound2-dev libpulse-dev \
-            libudev-dev libxi-dev libxrandr-dev yasm
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.4.0
 
       - name: Restore SCons cache
-        uses: actions/cache@v4
+        id: restore-cache
+        uses: actions/cache/restore@v6
+        continue-on-error: true
         with:
-          path: ${{ github.workspace }}/.scons-cache
-          key: linux-editor-${{ hashFiles('core/**/*.h', 'core/**/*.cpp', 'SConstruct') }}
-          restore-keys: linux-editor-
+          path: ${{ env.SCONS_CACHE_DIR }}
+          key: release-v2-linux-editor-${{ github.sha }}
+          restore-keys: |
+            release-v2-linux-editor-
+            linux-editor-
+
+      - name: Record build start timestamp
+        run: |
+          sleep 1
+          echo "CACHE_TIMESTAMP=$(date +%s)" >> "${GITHUB_ENV}"
 
       - name: Build Linux editor and Relink Kit
         run: |
           mkdir -p release-out
-          uv run --project cafecito cafecito-build build --platform linuxbsd --target editor --arch x86_64
+          uv run --project cafecito --with "scons==${SCONS_VERSION}" cafecito-build build \
+            --platform linuxbsd \
+            --target editor \
+            --arch x86_64 \
+            --extra-flag "cache_path=${SCONS_CACHE_DIR}" \
+            --extra-flag "cache_limit=${SCONS_CACHE_LIMIT_GIB}"
           strip bin/godot.linuxbsd.editor.x86_64
           tar czf release-out/godot_linux_editor.x86_64.tar.gz -C bin godot.linuxbsd.editor.x86_64
           uv run --project cafecito cafecito-build package-relink-kit \
             --manifest bin/godot.linuxbsd.editor.x86_64.relink.json \
             --output-dir release-out
 
-      - name: Upload Linux editor artifacts
-        uses: actions/upload-artifact@v4
+      - name: Prune SCons cache
+        id: prune-cache
+        if: steps.restore-cache.outputs.cache-hit != 'true'
+        run: |
+          python3 misc/scripts/purge_cache.py "${CACHE_TIMESTAMP}" "${SCONS_CACHE_DIR}"
+          if [ -d "${SCONS_CACHE_DIR}" ] && [ -n "$(find "${SCONS_CACHE_DIR}" -mindepth 2 -type f -print -quit)" ]; then
+            echo "has_files=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "has_files=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Save SCons cache
+        if: steps.prune-cache.outputs.has_files == 'true'
+        uses: actions/cache/save@v6
+        continue-on-error: true
         with:
-          name: linux-editor
+          path: ${{ env.SCONS_CACHE_DIR }}
+          key: release-v2-linux-editor-${{ github.sha }}
+
+      - name: Upload Linux editor artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-linux-editor
           path: release-out/*
           retention-days: 1
 
@@ -385,33 +711,44 @@ jobs:
     if: inputs.build_windows
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.4.0
 
-      - name: Install MinGW and build dependencies
+      - name: Install MinGW
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential scons pkg-config zstd yasm mingw-w64 zip
+          sudo apt-get install -y --no-install-recommends mingw-w64
           sudo update-alternatives --set x86_64-w64-mingw32-gcc /usr/bin/x86_64-w64-mingw32-gcc-posix
           sudo update-alternatives --set x86_64-w64-mingw32-g++ /usr/bin/x86_64-w64-mingw32-g++-posix
 
       - name: Restore SCons cache
-        uses: actions/cache@v4
+        id: restore-cache
+        uses: actions/cache/restore@v6
+        continue-on-error: true
         with:
-          path: ${{ github.workspace }}/.scons-cache
-          key: windows-${{ hashFiles('core/**/*.h', 'core/**/*.cpp', 'SConstruct') }}
-          restore-keys: windows-
+          path: ${{ env.SCONS_CACHE_DIR }}
+          key: release-v2-windows-${{ github.sha }}
+          restore-keys: |
+            release-v2-windows-
+            windows-
+
+      - name: Record build start timestamp
+        run: |
+          sleep 1
+          echo "CACHE_TIMESTAMP=$(date +%s)" >> "${GITHUB_ENV}"
 
       - name: Build Windows templates and Relink Kits
         run: |
           mkdir -p release-out
           for target in template_release template_debug; do
-            uv run --project cafecito cafecito-build build \
+            uv run --project cafecito --with "scons==${SCONS_VERSION}" cafecito-build build \
               --platform windows \
               --target "$target" \
               --arch x86_64 \
               --extra-flag use_mingw=yes \
-              --extra-flag d3d12=no
+              --extra-flag d3d12=no \
+              --extra-flag "cache_path=${SCONS_CACHE_DIR}" \
+              --extra-flag "cache_limit=${SCONS_CACHE_LIMIT_GIB}"
             x86_64-w64-mingw32-strip "bin/godot.windows.${target}.x86_64.exe"
             (cd bin && zip -q "../release-out/windows-${target}.zip" "godot.windows.${target}.x86_64.exe")
             uv run --project cafecito cafecito-build package-relink-kit \
@@ -419,10 +756,29 @@ jobs:
               --output-dir release-out
           done
 
-      - name: Upload Windows artifacts
-        uses: actions/upload-artifact@v4
+      - name: Prune SCons cache
+        id: prune-cache
+        if: steps.restore-cache.outputs.cache-hit != 'true'
+        run: |
+          python3 misc/scripts/purge_cache.py "${CACHE_TIMESTAMP}" "${SCONS_CACHE_DIR}"
+          if [ -d "${SCONS_CACHE_DIR}" ] && [ -n "$(find "${SCONS_CACHE_DIR}" -mindepth 2 -type f -print -quit)" ]; then
+            echo "has_files=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "has_files=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Save SCons cache
+        if: steps.prune-cache.outputs.has_files == 'true'
+        uses: actions/cache/save@v6
+        continue-on-error: true
         with:
-          name: windows
+          path: ${{ env.SCONS_CACHE_DIR }}
+          key: release-v2-windows-${{ github.sha }}
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-windows
           path: release-out/*
           retention-days: 1
 
@@ -433,12 +789,14 @@ jobs:
       - build-macos-arm64
       - build-ios
       - build-apple-libgodot
+      - package-apple-libgodot
       - build-android
       - build-linux
       - build-linux-editor
       - build-windows
     if: |
       always() &&
+      inputs.publish_release &&
       needs.generate-tag.result == 'success' &&
       !contains(needs.*.result, 'failure') &&
       !contains(needs.*.result, 'cancelled')
@@ -446,12 +804,13 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.4.0
 
-      - name: Download all build artifacts
-        uses: actions/download-artifact@v4
+      - name: Download all release artifacts
+        uses: actions/download-artifact@v8
         with:
+          pattern: release-*
           path: artifacts
           merge-multiple: true
 
