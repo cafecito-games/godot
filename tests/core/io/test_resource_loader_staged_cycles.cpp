@@ -786,8 +786,8 @@ TEST_CASE("[ResourceLoader] Staged cycle blocks unrelated threads on both root a
 		Thread unrelated_b_thread;
 		unrelated_a_thread.start(_concurrent_load_worker, &unrelated_a_data);
 		unrelated_b_thread.start(_concurrent_load_worker, &unrelated_b_data);
-		WorkerThreadPool::TaskID unrelated_pool_task = WorkerThreadPool::get_singleton()->add_native_task(&_concurrent_load_worker, &unrelated_pool_b_data);
-		WorkerThreadPool::GroupID unrelated_group_task = WorkerThreadPool::get_singleton()->add_native_group_task(&_concurrent_load_group_worker, &unrelated_group_b_data, 1, 1);
+		WorkerThreadPool::TaskID unrelated_pool_task = WorkerThreadPool::get_singleton()->add_native_task(&_concurrent_load_worker, &unrelated_pool_b_data, true);
+		WorkerThreadPool::GroupID unrelated_group_task = WorkerThreadPool::get_singleton()->add_native_group_task(&_concurrent_load_group_worker, &unrelated_group_b_data, 1, 1, true);
 
 		REQUIRE(_wait_for_flag(unrelated_a_data.started));
 		REQUIRE(_wait_for_flag(unrelated_b_data.started));

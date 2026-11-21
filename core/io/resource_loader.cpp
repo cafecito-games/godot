@@ -583,6 +583,7 @@ void ResourceLoader::_run_load_task(void *p_userdata) {
 	String thread_waiting_on_backup;
 
 	bool wait = false;
+	LoadToken *already_done_token = nullptr;
 	{
 		MutexLock thread_load_lock(thread_load_mutex);
 		if (cleaning_tasks) {
@@ -590,7 +591,9 @@ void ResourceLoader::_run_load_task(void *p_userdata) {
 			return;
 		}
 
-		if (load_task.started_load && load_task.thread_index != thread_index) {
+		if (load_task.status != THREAD_LOAD_IN_PROGRESS) {
+			already_done_token = load_task.load_token;
+		} else if (load_task.started_load && load_task.thread_index != thread_index) {
 			// If we were already waiting for task completion in a previous
 			// step make sure we don't clobber the old wait.
 			if (thread_waiting_on.has(thread_index)) {
@@ -610,6 +613,13 @@ void ResourceLoader::_run_load_task(void *p_userdata) {
 			load_task.started_load = true;
 			load_task.thread_index = thread_index;
 		}
+	}
+
+	if (already_done_token != nullptr) {
+		if (already_done_token->unreference()) {
+			memdelete(already_done_token);
+		}
+		return;
 	}
 
 	ThreadLoadTask *curr_load_task_backup = curr_load_task;
