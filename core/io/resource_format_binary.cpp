@@ -880,9 +880,9 @@ void ResourceLoaderBinary::get_classes_used(Ref<FileAccess> p_f, HashSet<StringN
 	}
 
 	for (const IntResource &res : internal_resources) {
-		p_f->seek(res.offset);
+		f->seek(res.offset);
 		String t = get_unicode_string();
-		if (!p_f->get_error() && t != String() && ClassDB::class_exists(t)) {
+		if (!f->get_error() && t != String() && ClassDB::class_exists(t)) {
 			p_classes->insert(t);
 		}
 	}
