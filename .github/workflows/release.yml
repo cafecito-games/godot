@@ -103,11 +103,19 @@ jobs:
 
       - name: Build macOS arm64 editor and templates
         run: |
-          uv run --project cafecito cafecito-build build --platform macos --target editor --arch arm64
-          uv run --project cafecito cafecito-build build --platform macos --target template_release --arch arm64
-          uv run --project cafecito cafecito-build build --platform macos --target template_debug --arch arm64
+          mkdir -p release-out
+          # A target's loose `platform/macos` objects live at paths SCons qualifies by
+          # neither target nor architecture, so every build overwrites the previous
+          # one's. Each kit is packaged while the objects its manifest names are still
+          # the ones it was built from, as the Linux, Android and Windows jobs do.
+          for target in editor template_release template_debug; do
+            uv run --project cafecito cafecito-build build --platform macos --target "$target" --arch arm64
+            uv run --project cafecito cafecito-build package-relink-kit \
+              --manifest "bin/godot.macos.${target}.arm64.relink.json" \
+              --output-dir release-out
+          done
 
-      - name: Package public macOS bundles and Relink Kits
+      - name: Package public macOS bundles
         run: |
           mkdir -p release-out
           uv run --project cafecito cafecito-build package-macos-editor \
@@ -117,9 +125,6 @@ jobs:
             --release-binary bin/godot.macos.template_release.arm64 \
             --debug-binary bin/godot.macos.template_debug.arm64 \
             --output release-out/macos-arm64.zip
-          for manifest in bin/godot.macos.*.arm64.relink.json; do
-            uv run --project cafecito cafecito-build package-relink-kit --manifest "$manifest" --output-dir release-out
-          done
 
       - name: Upload macOS arm64 artifacts
         uses: actions/upload-artifact@v4
@@ -158,21 +163,28 @@ jobs:
 
       - name: Build iOS slices (release + debug; device + simulator)
         run: |
+          mkdir -p release-out
+          # As on macOS, a slice's loose `platform/ios` objects live at paths SCons
+          # qualifies by neither target nor simulator, so each kit is packaged while the
+          # objects its manifest names are still the ones it was built from.
           for target in template_release template_debug; do
             uv run --project cafecito cafecito-build build --platform ios --target "$target" --arch arm64 --extra-flag ios_simulator=no
+            uv run --project cafecito cafecito-build package-relink-kit \
+              --manifest "bin/libgodot.ios.${target}.arm64.a.relink.json" \
+              --output-dir release-out
             uv run --project cafecito cafecito-build build --platform ios --target "$target" --arch arm64 --extra-flag ios_simulator=yes
+            uv run --project cafecito cafecito-build package-relink-kit \
+              --manifest "bin/libgodot.ios.${target}.arm64.simulator.a.relink.json" \
+              --output-dir release-out
           done
 
-      - name: Generate and finalize ios.zip + Relink Kits
+      - name: Generate and finalize ios.zip
         run: |
           mkdir -p release-out
           uv run --project cafecito cafecito-build build --platform ios --target template_release --arch arm64 --no-relink-kit --extra-flag generate_bundle=yes
           uv run --project cafecito cafecito-build finalize-ios-template \
             --input-zip bin/godot_ios.zip \
             --output-zip release-out/ios.zip
-          for manifest in bin/libgodot.ios.*.relink.json; do
-            uv run --project cafecito cafecito-build package-relink-kit --manifest "$manifest" --output-dir release-out
-          done
 
       - name: Upload iOS artifacts
         uses: actions/upload-artifact@v4
@@ -212,14 +224,16 @@ jobs:
       - name: Build and package Apple LibGodot SDK + Relink Kits
         run: |
           mkdir -p release-out
-          uv run --project cafecito cafecito-build build-apple-libgodot --configuration release
+          # Each slice's kit is packaged as that slice finishes. The macOS slices share
+          # unqualified `platform/macos` object paths, so a kit packaged after the whole
+          # build carries the last architecture built rather than its own.
+          uv run --project cafecito cafecito-build build-apple-libgodot \
+            --configuration release \
+            --kit-output-dir release-out
           uv run --project cafecito cafecito-build package-apple-libgodot \
             --configuration release \
             --output release-out/apple-libgodot-release.zip
           unzip -l release-out/apple-libgodot-release.zip
-          for manifest in bin/libgodot.*.relink.json; do
-            uv run --project cafecito cafecito-build package-relink-kit --manifest "$manifest" --output-dir release-out
-          done
 
       - name: Upload Apple LibGodot artifacts
         uses: actions/upload-artifact@v4

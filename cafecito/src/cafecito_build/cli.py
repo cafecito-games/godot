@@ -125,6 +125,9 @@ def _command_build_apple_libgodot(arguments: argparse.Namespace) -> int:
         arguments.configuration,
         relink_kit=not arguments.no_relink_kit,
         jobs=arguments.jobs,
+        kit_output_directory=(
+            Path(arguments.kit_output_dir).resolve() if arguments.kit_output_dir else None
+        ),
     )
     for output_path in outputs:
         print(f"[cafecito-build] Built Apple LibGodot slice: {output_path}")
@@ -233,6 +236,15 @@ def build_argument_parser() -> argparse.ArgumentParser:
     )
     apple_libgodot_parser.add_argument("--configuration", default="release", choices=("release", "debug"))
     apple_libgodot_parser.add_argument("--no-relink-kit", action="store_true")
+    apple_libgodot_parser.add_argument(
+        "--kit-output-dir",
+        default=None,
+        help=(
+            "Package each slice's Relink Kit here as soon as that slice builds. "
+            "Required for correct macOS kits: the slices share unqualified object paths, "
+            "so packaging after the full build captures the last architecture built."
+        ),
+    )
     apple_libgodot_parser.add_argument("-j", "--jobs", type=int, default=None)
     apple_libgodot_parser.set_defaults(handler=_command_build_apple_libgodot)
 
