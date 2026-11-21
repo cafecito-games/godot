@@ -33,6 +33,13 @@ class AppleLibGodotSlice:
     output_filename: str
     simulator: bool = False
 
+    @property
+    def slice_name(self) -> str:
+        if self.godot_platform == "ios":
+            variant = "simulator" if self.simulator else "device"
+            return f"ios-{self.architecture}-{variant}"
+        return f"{self.godot_platform}-{self.architecture}"
+
     def extra_flags(self) -> tuple[str, ...]:
         flags = list(SHARED_APPLE_LIBGODOT_FLAGS)
         if self.godot_platform == "ios":
@@ -244,8 +251,9 @@ def build_apple_libgodot_slices(
     jobs: int | None = None,
     kit_output_directory: Path | None = None,
     extra_flags: tuple[str, ...] = (),
+    slice_names: tuple[str, ...] | None = None,
 ) -> list[Path]:
-    """Build all four Apple LibGodot slices for the requested configuration.
+    """Build Apple LibGodot slices for the requested configuration.
 
     Every slice builds into one workspace, and a platform directory's loose
     objects live at paths SCons does not qualify by architecture. The macOS
@@ -258,10 +266,20 @@ def build_apple_libgodot_slices(
     if configuration not in APPLE_LIBGODOT_SLICES:
         raise ValueError(f"Unsupported Apple LibGodot configuration: {configuration!r}")
 
-    target, slices = APPLE_LIBGODOT_SLICES[configuration]
+    target, all_slices = APPLE_LIBGODOT_SLICES[configuration]
+    if slice_names:
+        slices_by_name = {item.slice_name: item for item in all_slices}
+        unknown = [name for name in slice_names if name not in slices_by_name]
+        if unknown:
+            valid = ", ".join(sorted(slices_by_name))
+            raise ValueError(f"Unsupported Apple LibGodot slice(s): {', '.join(unknown)} (valid: {valid})")
+        selected_slices = tuple(slices_by_name[name] for name in slice_names)
+    else:
+        selected_slices = all_slices
+
     bin_directory = repository_root / "bin"
     built_outputs: list[Path] = []
-    for slice_specification in slices:
+    for slice_specification in selected_slices:
         run_scons_build(
             BuildRequest(
                 repository_root=repository_root,

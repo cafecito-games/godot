@@ -90,6 +90,27 @@ class AppleLibGodotSliceMatrixTest(unittest.TestCase):
         ios_simulator_flags = release_slices[3].scons_flags(target)
         self.assertIn("ios_simulator=no", ios_device_flags)
         self.assertIn("ios_simulator=yes", ios_simulator_flags)
+        self.assertEqual(
+            [item.slice_name for item in release_slices],
+            ["macos-arm64", "macos-x86_64", "ios-arm64-device", "ios-arm64-simulator"],
+        )
+
+    def test_build_slices_filters_by_slice_name_and_rejects_unknown(self) -> None:
+        from cafecito_build.apple_libgodot import build_apple_libgodot_slices
+
+        with tempfile.TemporaryDirectory() as temporary_root:
+            repo_root = Path(temporary_root)
+            with patch("cafecito_build.apple_libgodot.run_scons_build") as mock_build:
+                outputs = build_apple_libgodot_slices(
+                    repo_root,
+                    "release",
+                    relink_kit=False,
+                    slice_names=("ios-arm64-simulator",),
+                )
+            mock_build.assert_called_once()
+            self.assertEqual(outputs, [repo_root / "bin" / "libgodot.ios.template_release.arm64.simulator.a"])
+            with self.assertRaises(ValueError):
+                build_apple_libgodot_slices(repo_root, "release", slice_names=("unknown-slice",))
 
 
 class AppleLibGodotBuildInfoTest(unittest.TestCase):
@@ -327,12 +348,17 @@ class AppleLibGodotCliTest(unittest.TestCase):
             "build-apple-libgodot",
             "--configuration",
             "release",
+            "--slice",
+            "macos-arm64",
+            "--slice",
+            "ios-arm64-device",
             "--extra-flag",
             "cache_path=/tmp/cache",
             "--extra-flag",
             "cache_limit=7",
         ])
         self.assertEqual(arguments.configuration, "release")
+        self.assertEqual(arguments.slice, ["macos-arm64", "ios-arm64-device"])
         self.assertEqual(arguments.extra_flag, ["cache_path=/tmp/cache", "cache_limit=7"])
 
     def test_package_apple_libgodot_arguments(self) -> None:
