@@ -14,6 +14,7 @@ from cafecito_build.identity import resolve_build_identity
 from cafecito_build.packaging import (
     finalize_ios_template_zip,
     package_android_templates_zip,
+    package_ios_template_bundle,
     package_macos_editor_bundle,
     package_macos_template_bundle,
     write_sha256sums,
@@ -98,6 +99,21 @@ def _command_package_macos_editor(arguments: argparse.Namespace) -> int:
     return 0
 
 
+def _command_package_ios_template(arguments: argparse.Namespace) -> int:
+    repository_root = Path(arguments.repo_root).resolve()
+    output_path = package_ios_template_bundle(
+        repository_root,
+        Path(arguments.bin_dir).resolve(),
+        Path(arguments.output_zip).resolve(),
+        moltenvk_xcframework=(
+            Path(arguments.moltenvk_xcframework).resolve() if arguments.moltenvk_xcframework else None
+        ),
+        single_arch_arm64_simulator=not arguments.keep_x86_64_simulator,
+    )
+    print(f"[cafecito-build] Packaged iOS template bundle: {output_path}")
+    return 0
+
+
 def _command_finalize_ios_template(arguments: argparse.Namespace) -> int:
     output_path = finalize_ios_template_zip(
         Path(arguments.input_zip).resolve(),
@@ -129,6 +145,7 @@ def _command_build_apple_libgodot(arguments: argparse.Namespace) -> int:
             Path(arguments.kit_output_dir).resolve() if arguments.kit_output_dir else None
         ),
         extra_flags=tuple(arguments.extra_flag or ()),
+        slice_names=tuple(arguments.slice) if arguments.slice else None,
     )
     for output_path in outputs:
         print(f"[cafecito-build] Built Apple LibGodot slice: {output_path}")
@@ -220,6 +237,16 @@ def build_argument_parser() -> argparse.ArgumentParser:
     macos_ed_parser.add_argument("--output", default="bin/godot_macos_editor.arm64.zip", help="Output zip path")
     macos_ed_parser.set_defaults(handler=_command_package_macos_editor)
 
+    ios_pkg_parser = subparsers.add_parser(
+        "package-ios-template",
+        help="Assemble exporter-ready ios.zip directly from built iOS slices and MoltenVK",
+    )
+    ios_pkg_parser.add_argument("--bin-dir", default="bin")
+    ios_pkg_parser.add_argument("--output-zip", default="bin/ios.zip")
+    ios_pkg_parser.add_argument("--moltenvk-xcframework", default=None)
+    ios_pkg_parser.add_argument("--keep-x86-64-simulator", action="store_true")
+    ios_pkg_parser.set_defaults(handler=_command_package_ios_template)
+
     ios_zip_parser = subparsers.add_parser("finalize-ios-template", help="Normalize godot_ios.zip into ios.zip")
     ios_zip_parser.add_argument("--input-zip", default="bin/godot_ios.zip")
     ios_zip_parser.add_argument("--output-zip", default="bin/ios.zip")
@@ -248,6 +275,11 @@ def build_argument_parser() -> argparse.ArgumentParser:
         ),
     )
     apple_libgodot_parser.add_argument("-j", "--jobs", type=int, default=None)
+    apple_libgodot_parser.add_argument(
+        "--slice",
+        action="append",
+        help="Build only the named slice(s) (repeatable: macos-arm64, macos-x86_64, ios-arm64-device, ios-arm64-simulator)",
+    )
     apple_libgodot_parser.add_argument("--extra-flag", action="append", help="Additional SCons flag (repeatable)")
     apple_libgodot_parser.set_defaults(handler=_command_build_apple_libgodot)
 
