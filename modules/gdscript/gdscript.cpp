@@ -2220,6 +2220,8 @@ void GDScriptLanguage::remove_named_global_constant(const StringName &p_name) {
 }
 
 void GDScriptLanguage::init() {
+	GDScriptCache::reset_cleared();
+
 	//populate global constants
 	int gcc = CoreConstants::get_global_constant_count();
 	for (int i = 0; i < gcc; i++) {

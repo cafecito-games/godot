@@ -1171,12 +1171,15 @@ TEST_CASE("[Editor][Export][GDScript] Headless CLI --export-pack returns 0 on va
 				"platform=\"Linux\"\n"
 				"runnable=true\n"
 				"export_filter=\"resources\"\n"
+				"include_filter=\"\"\n"
+				"exclude_filter=\"\"\n"
 				"export_files=PackedStringArray(" +
 				export_files_literal +
 				")\n"
 				"script_export_mode=3\n"
 				"\n"
-				"[preset.0.options]\n";
+				"[preset.0.options]\n"
+				"custom_template/debug=\"\"\n";
 		{
 			Ref<FileAccess> presets_file = FileAccess::open(project_dir.path_join("export_presets.cfg"), FileAccess::WRITE);
 			REQUIRE(presets_file.is_valid());
@@ -1186,6 +1189,8 @@ TEST_CASE("[Editor][Export][GDScript] Headless CLI --export-pack returns 0 on va
 		r_pck_path = output_dir.path_join(p_pck_name);
 		List<String> args;
 		args.push_back("--headless");
+		args.push_back("--audio-driver");
+		args.push_back("Dummy");
 		args.push_back("--path");
 		args.push_back(project_dir);
 		args.push_back("--export-pack");
@@ -1195,6 +1200,7 @@ TEST_CASE("[Editor][Export][GDScript] Headless CLI --export-pack returns 0 on va
 		String cli_output;
 		r_exit_code = -1;
 		const Error exec_err = OS::get_singleton()->execute(executable_path, args, &cli_output, &r_exit_code, true);
+		INFO("CLI output: " << cli_output.utf8().get_data());
 		REQUIRE(exec_err == OK);
 	};
 

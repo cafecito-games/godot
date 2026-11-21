@@ -1010,72 +1010,72 @@ TEST_CASE("[ResourceLoader] Staged cycle failure discards uncommitted resources 
 
 #endif // THREADS_ENABLED
 
+class PreExistingInjectLoader : public ResourceFormatLoader {
+	GDSOFTCLASS(PreExistingInjectLoader, ResourceFormatLoader);
+
+public:
+	String path_a;
+	String path_b;
+	Ref<CycleNodeResource> pre_existing_b;
+
+	virtual Ref<Resource> load(const String &p_path, const String &p_original_path = "", Error *r_error = nullptr, bool p_use_sub_threads = false, float *r_progress = nullptr, CacheMode p_cache_mode = CACHE_MODE_REUSE) override {
+		if (r_error) {
+			*r_error = OK;
+		}
+		Ref<CycleNodeResource> node;
+		node.instantiate();
+		node->set_path_cache(p_path);
+		if (p_path == path_a) {
+			node->label = "RootA";
+			ResourceLoader::register_current_load_partial_resource(node, p_path);
+			Error dep_err = OK;
+			Ref<Resource> dep_b = ResourceLoader::load(path_b, "", p_cache_mode, &dep_err);
+			if (dep_err != OK || dep_b.is_null()) {
+				if (r_error) {
+					*r_error = FAILED;
+				}
+				return Ref<Resource>();
+			}
+			node->dependencies.push_back(dep_b);
+			// Publish pre_existing_b directly into ResourceCache before A commits.
+			pre_existing_b->set_path(path_b);
+		} else if (p_path == path_b) {
+			node->label = "LoadedB";
+			Error dep_err = OK;
+			Ref<Resource> dep_a = ResourceLoader::load(path_a, "", p_cache_mode, &dep_err);
+			if (dep_err != OK || dep_a.is_null()) {
+				if (r_error) {
+					*r_error = FAILED;
+				}
+				return Ref<Resource>();
+			}
+			node->dependencies.push_back(dep_a);
+		}
+		node->finalized = true;
+		return node;
+	}
+
+	virtual bool exists(const String &p_path) const override {
+		return recognize_path(p_path);
+	}
+	virtual void get_recognized_extensions(List<String> *p_extensions) const override {
+		p_extensions->push_back("stagednocl");
+	}
+	virtual bool recognize_path(const String &p_path, const String &p_for_type = String()) const override {
+		return p_path.get_extension() == "stagednocl";
+	}
+	virtual bool handles_type(const String &p_type) const override {
+		return p_type.is_empty() || p_type == "Resource";
+	}
+	virtual String get_resource_type(const String &p_path) const override {
+		return recognize_path(p_path) ? "Resource" : String();
+	}
+};
+
 TEST_CASE("[ResourceLoader] Staged cycle commit preserves pre-existing ResourceCache entry without clobbering") {
 	Ref<CycleNodeResource> pre_existing_b;
 	pre_existing_b.instantiate();
 	pre_existing_b->label = "PreExistingB";
-
-	class PreExistingInjectLoader : public ResourceFormatLoader {
-		GDSOFTCLASS(PreExistingInjectLoader, ResourceFormatLoader);
-
-	public:
-		String path_a;
-		String path_b;
-		Ref<CycleNodeResource> pre_existing_b;
-
-		virtual Ref<Resource> load(const String &p_path, const String &p_original_path = "", Error *r_error = nullptr, bool p_use_sub_threads = false, float *r_progress = nullptr, CacheMode p_cache_mode = CACHE_MODE_REUSE) override {
-			if (r_error) {
-				*r_error = OK;
-			}
-			Ref<CycleNodeResource> node;
-			node.instantiate();
-			node->set_path_cache(p_path);
-			if (p_path == path_a) {
-				node->label = "RootA";
-				ResourceLoader::register_current_load_partial_resource(node, p_path);
-				Error dep_err = OK;
-				Ref<Resource> dep_b = ResourceLoader::load(path_b, "", p_cache_mode, &dep_err);
-				if (dep_err != OK || dep_b.is_null()) {
-					if (r_error) {
-						*r_error = FAILED;
-					}
-					return Ref<Resource>();
-				}
-				node->dependencies.push_back(dep_b);
-				// Publish pre_existing_b directly into ResourceCache before A commits.
-				pre_existing_b->set_path(path_b);
-			} else if (p_path == path_b) {
-				node->label = "LoadedB";
-				Error dep_err = OK;
-				Ref<Resource> dep_a = ResourceLoader::load(path_a, "", p_cache_mode, &dep_err);
-				if (dep_err != OK || dep_a.is_null()) {
-					if (r_error) {
-						*r_error = FAILED;
-					}
-					return Ref<Resource>();
-				}
-				node->dependencies.push_back(dep_a);
-			}
-			node->finalized = true;
-			return node;
-		}
-
-		virtual bool exists(const String &p_path) const override {
-			return recognize_path(p_path);
-		}
-		virtual void get_recognized_extensions(List<String> *p_extensions) const override {
-			p_extensions->push_back("stagednocl");
-		}
-		virtual bool recognize_path(const String &p_path, const String &p_for_type = String()) const override {
-			return p_path.get_extension() == "stagednocl";
-		}
-		virtual bool handles_type(const String &p_type) const override {
-			return p_type.is_empty() || p_type == "Resource";
-		}
-		virtual String get_resource_type(const String &p_path) const override {
-			return recognize_path(p_path) ? "Resource" : String();
-		}
-	};
 
 	Ref<PreExistingInjectLoader> inject_loader;
 	inject_loader.instantiate();

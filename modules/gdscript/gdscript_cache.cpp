@@ -619,6 +619,7 @@ Ref<GDScript> GDScriptCache::get_shallow_script(const String &p_path, Error &r_e
 			return Ref<GDScript>();
 		}
 
+		singleton->cleared = false;
 		singleton->shallow_gdscript_cache[p_path] = script;
 		return script;
 	}
@@ -650,6 +651,7 @@ Ref<GDScript> GDScriptCache::get_shallow_script(const String &p_path, Error &r_e
 		GDScriptCompiler::make_scripts(script.ptr(), parser_ref->get_parser()->get_tree(), true);
 	}
 
+	singleton->cleared = false;
 	singleton->shallow_gdscript_cache[p_path] = script;
 
 	return script;
@@ -810,6 +812,7 @@ Ref<GDScript> GDScriptCache::get_full_script(const String &p_path, Error &r_erro
 				WorkerThreadPool::get_singleton() != nullptr
 				? WorkerThreadPool::get_singleton()->get_caller_task_id()
 				: WorkerThreadPool::INVALID_TASK_ID;
+		singleton->cleared = false;
 		singleton->in_flight_bytecode_loads[p_path] = in_flight;
 
 		const bool registered_partial = ResourceLoader::register_current_load_partial_resource(script, p_path);
@@ -999,6 +1002,7 @@ void GDScriptCache::add_static_script(Ref<GDScript> p_script) {
 #endif
 	ERR_FAIL_COND_MSG(p_script.is_null(), "Trying to cache empty script as static.");
 	ERR_FAIL_COND_MSG(!p_script->is_valid(), "Trying to cache non-compiled script as static.");
+	singleton->cleared = false;
 	singleton->static_gdscript_cache[p_script->get_fully_qualified_name()] = p_script;
 }
 
@@ -1082,6 +1086,14 @@ void GDScriptCache::clear() {
 	singleton->shallow_gdscript_cache.clear();
 	singleton->full_gdscript_cache.clear();
 	singleton->static_gdscript_cache.clear();
+}
+
+void GDScriptCache::reset_cleared() {
+	if (singleton == nullptr) {
+		return;
+	}
+	MutexLock lock(singleton->mutex);
+	singleton->cleared = false;
 }
 
 GDScriptCache::GDScriptCache() {

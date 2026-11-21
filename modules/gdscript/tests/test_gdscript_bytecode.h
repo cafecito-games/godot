@@ -907,6 +907,7 @@ func fn_a(x: int) -> int:
 	}
 
 	TEST_CASE("Zero-source-leak check in release bytecode profile preserves MethodInfo parameter names") {
+		GDScriptLanguage::get_singleton()->init();
 		const String script_path = TestUtils::get_temp_path("test_bytecode_zero_leak.gd");
 		{
 			Ref<FileAccess> file = FileAccess::open(script_path, FileAccess::WRITE);
