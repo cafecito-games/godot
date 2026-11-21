@@ -502,7 +502,7 @@ func get_native_class():
 		CHECK(loaded_constants[StringName("C_DEFAULT_SIGNAL")].get_type() == Variant::SIGNAL);
 		CHECK(loaded_constants[StringName("C_DEFAULT_SIGNAL")].operator Signal().is_null());
 		CHECK(loaded_constants[StringName("C_DEFAULT_RID")].get_type() == Variant::RID);
-		CHECK(!loaded_constants[StringName("C_DEFAULT_RID")].operator RID().is_valid());
+		CHECK(!loaded_constants[StringName("C_DEFAULT_RID")].operator ::RID().is_valid());
 
 		// Verify exporter rejects freed object, unknown live Object, unnamed Resource, live Callable, live Signal, valid RID.
 		{
