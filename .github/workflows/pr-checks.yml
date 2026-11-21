@@ -9,6 +9,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 concurrency:
   group: pr-checks-${{ github.event.pull_request.number || github.ref_name }}
@@ -37,35 +38,52 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
       - name: Detect engine or test changes
         id: changes
         env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           EVENT_NAME: ${{ github.event_name }}
-          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
           PUSH_BEFORE_SHA: ${{ github.event.before }}
         run: |
+          set -euo pipefail
+
           if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
             echo "run=true" >> "${GITHUB_OUTPUT}"
             exit 0
           fi
 
-          base_sha=""
-          if [ "${EVENT_NAME}" = "pull_request" ]; then
-            base_sha="${PR_BASE_SHA}"
+          changed_files=""
+          if [ "${EVENT_NAME}" = "pull_request" ] && [ -n "${PR_NUMBER}" ]; then
+            if ! changed_files="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" --jq '.[].filename')"; then
+              echo "Could not query PR files via API; running C++ tests."
+              echo "run=true" >> "${GITHUB_OUTPUT}"
+              exit 0
+            fi
+            file_count="$(printf '%s\n' "${changed_files}" | grep -c . || true)"
+            if [ "${file_count}" -eq 0 ] || [ "${file_count}" -ge 3000 ]; then
+              echo "PR file list empty or at API pagination cap (${file_count}); running C++ tests."
+              echo "run=true" >> "${GITHUB_OUTPUT}"
+              exit 0
+            fi
           elif [ "${EVENT_NAME}" = "push" ] && [ -n "${PUSH_BEFORE_SHA}" ] && [ "${PUSH_BEFORE_SHA}" != "0000000000000000000000000000000000000000" ]; then
-            base_sha="${PUSH_BEFORE_SHA}"
-          fi
-
-          if [ -z "${base_sha}" ] || ! git fetch --no-tags --filter=blob:none --depth=1 origin "${base_sha}"; then
+            if ! changed_files="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${PUSH_BEFORE_SHA}...${GITHUB_SHA}" --jq '.files[].filename')"; then
+              echo "Could not query push diff via API; running C++ tests."
+              echo "run=true" >> "${GITHUB_OUTPUT}"
+              exit 0
+            fi
+            file_count="$(printf '%s\n' "${changed_files}" | grep -c . || true)"
+            if [ "${file_count}" -eq 0 ] || [ "${file_count}" -ge 300 ]; then
+              echo "Push diff empty or at compare API cap (${file_count}); running C++ tests."
+              echo "run=true" >> "${GITHUB_OUTPUT}"
+              exit 0
+            fi
+          else
             echo "Could not resolve base commit; running C++ tests."
             echo "run=true" >> "${GITHUB_OUTPUT}"
             exit 0
           fi
 
-          changed_files="$(git diff --no-renames --name-only "${base_sha}" HEAD)"
           echo "Changed files:"
           echo "${changed_files}"
 
@@ -76,32 +94,57 @@ jobs:
             echo "run=false" >> "${GITHUB_OUTPUT}"
           fi
 
+      - name: Checkout
+        if: steps.changes.outputs.run == 'true'
+        uses: actions/checkout@v7
+
       - name: Set up uv
         if: steps.changes.outputs.run == 'true'
         uses: astral-sh/setup-uv@v10.4.0
 
-      - name: Install Linux build dependencies
+      - name: Install mold linker
         if: steps.changes.outputs.run == 'true'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends build-essential pkg-config scons mold yasm
+        uses: rui314/setup-mold@v1
 
-      - name: Restore SCons cache
-        id: restore-cache
+      - name: Restore main SCons cache
+        id: restore-main-cache
         if: steps.changes.outputs.run == 'true'
         uses: actions/cache/restore@v6
         continue-on-error: true
         with:
           path: ${{ env.SCONS_CACHE_DIR }}
-          key: pr-linux-tests-v1-${{ github.ref_name }}-${{ github.sha }}
+          key: pr-linux-tests-v2-main-${{ github.sha }}
           restore-keys: |
-            pr-linux-tests-v1-${{ github.ref_name }}-
-            pr-linux-tests-v1-main-
+            pr-linux-tests-v2-main-
+
+      - name: Record baseline cache files
+        if: steps.changes.outputs.run == 'true' && github.ref_name != 'main' && steps.restore-main-cache.outputs.cache-matched-key != ''
+        run: |
+          if [ -d "${SCONS_CACHE_DIR}" ]; then
+            find "${SCONS_CACHE_DIR}" -mindepth 2 -type f > redundant.txt
+          fi
+
+      - name: Restore PR SCons cache
+        id: restore-pr-cache
+        if: steps.changes.outputs.run == 'true' && github.ref_name != 'main'
+        uses: actions/cache/restore@v6
+        continue-on-error: true
+        with:
+          path: ${{ env.SCONS_CACHE_DIR }}
+          key: pr-linux-tests-v2-${{ github.ref_name }}-${{ github.sha }}
+          restore-keys: |
+            pr-linux-tests-v2-${{ github.ref_name }}-
+
+      - name: Record build start timestamp
+        if: steps.changes.outputs.run == 'true'
+        run: |
+          sleep 1
+          echo "CACHE_TIMESTAMP=$(date +%s)" >> "${GITHUB_ENV}"
 
       - name: Build Godot with C++ unit tests
         if: steps.changes.outputs.run == 'true'
         run: |
-          uv run --project cafecito cafecito-build build \
+          uv run --project cafecito --with "scons==4.10.1" cafecito-build build \
             --platform linuxbsd \
             --target editor \
             --arch x86_64 \
@@ -110,18 +153,53 @@ jobs:
             --extra-flag optimize=none \
             --extra-flag linker=mold \
             --extra-flag use_static_cpp=no \
+            --extra-flag scu_limit=48 \
             --extra-flag wayland=no \
             --extra-flag accesskit=no \
+            --extra-flag sdl=no \
+            --extra-flag alsa=no \
+            --extra-flag pulseaudio=no \
+            --extra-flag dbus=no \
+            --extra-flag speechd=no \
+            --extra-flag fontconfig=no \
+            --extra-flag udev=no \
+            --extra-flag touch=no \
             --extra-flag "cache_path=${SCONS_CACHE_DIR}" \
             --extra-flag cache_limit=5
 
+      - name: Prune SCons cache
+        id: prune-cache
+        if: >-
+          steps.changes.outputs.run == 'true' &&
+          ((github.ref_name == 'main' && steps.restore-main-cache.outputs.cache-hit != 'true') ||
+           (github.ref_name != 'main' && steps.restore-pr-cache.outputs.cache-hit != 'true'))
+        run: |
+          python3 misc/scripts/purge_cache.py "${CACHE_TIMESTAMP}" "${SCONS_CACHE_DIR}"
+          rm -f redundant.txt
+          if [ -d "${SCONS_CACHE_DIR}" ] && [ -n "$(find "${SCONS_CACHE_DIR}" -mindepth 2 -type f -print -quit)" ]; then
+            echo "has_files=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "has_files=false" >> "${GITHUB_OUTPUT}"
+          fi
+
       - name: Save SCons cache
-        if: steps.changes.outputs.run == 'true' && steps.restore-cache.outputs.cache-hit != 'true'
+        if: steps.prune-cache.outputs.has_files == 'true'
         uses: actions/cache/save@v6
         continue-on-error: true
         with:
           path: ${{ env.SCONS_CACHE_DIR }}
-          key: pr-linux-tests-v1-${{ github.ref_name }}-${{ github.sha }}
+          key: pr-linux-tests-v2-${{ github.ref_name }}-${{ github.sha }}
+
+      - name: Ping main SCons cache
+        if: steps.changes.outputs.run == 'true' && github.ref_name != 'main'
+        uses: actions/cache/restore@v6
+        continue-on-error: true
+        with:
+          path: ${{ env.SCONS_CACHE_DIR }}
+          key: pr-linux-tests-v2-main-${{ github.sha }}
+          restore-keys: |
+            pr-linux-tests-v2-main-
+          lookup-only: true
 
       - name: Run C++ unit tests
         if: steps.changes.outputs.run == 'true'

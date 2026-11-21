@@ -10,10 +10,48 @@ from pathlib import Path
 from typing import Any
 
 
-def _copy_relative_file(repository_root: Path, relative_path: str, destination_root: Path) -> Path:
+APPLE_PLATFORMS = frozenset({"macos", "ios"})
+
+
+def _verify_apple_architecture(source_path: Path, expected_architecture: str) -> None:
+    """Refuse a kit input that was not built for the architecture the manifest names.
+
+    SCons qualifies the per-module archives by architecture but writes a platform
+    directory's loose objects to unqualified paths, so building a second
+    architecture into the same workspace overwrites the first one's objects. A
+    relink that links the wrong architecture does not fail: the linker only warns
+    about the files it ignores, and because it pulls archive members lazily, the
+    ignored objects take the whole engine out of the link. The result is a valid,
+    nearly empty library produced with a zero exit status, which is why this has
+    to be caught where the inputs are gathered.
+    """
+    result = subprocess.run(
+        ["lipo", "-archs", str(source_path)], capture_output=True, text=True, check=False
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or f"exit code {result.returncode}"
+        raise ValueError(f"Could not read architectures from {source_path}: {detail}")
+    architectures = result.stdout.split()
+    if expected_architecture not in architectures:
+        raise ValueError(
+            f"Relink kit input {source_path} holds [{' '.join(architectures) or 'no architecture'}], "
+            f"but the manifest names arch {expected_architecture}. The workspace most likely built "
+            f"another architecture after this one, overwriting its objects."
+        )
+
+
+def _copy_relative_file(
+    repository_root: Path,
+    relative_path: str,
+    destination_root: Path,
+    *,
+    expected_architecture: str | None = None,
+) -> Path:
     source_path = repository_root / relative_path
     if not source_path.is_file():
         raise FileNotFoundError(f"Relink kit input missing: {source_path}")
+    if expected_architecture is not None:
+        _verify_apple_architecture(source_path, expected_architecture)
     destination_path = destination_root / relative_path
     destination_path.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source_path, destination_path)
@@ -52,18 +90,28 @@ def package_relink_kit(
         shutil.rmtree(kit_directory)
     kit_directory.mkdir(parents=True, exist_ok=True)
 
+    # `lipo` reads Mach-O only, so the architecture guard applies to the Apple kits —
+    # which is also where unqualified object paths are shared between architectures.
+    expected_architecture = (
+        str(manifest["arch"]) if str(manifest.get("platform")) in APPLE_PLATFORMS else None
+    )
+
     for header_relative in manifest.get("headers", []):
         _copy_relative_file(repository_root, header_relative, kit_directory / "include")
 
     for object_relative in manifest.get("object_files", []):
         if Path(object_relative).is_absolute():
             continue
-        _copy_relative_file(repository_root, object_relative, kit_directory)
+        _copy_relative_file(
+            repository_root, object_relative, kit_directory, expected_architecture=expected_architecture
+        )
 
     for library_relative in manifest.get("static_libraries", []):
         if Path(library_relative).is_absolute():
             continue
-        _copy_relative_file(repository_root, library_relative, kit_directory)
+        _copy_relative_file(
+            repository_root, library_relative, kit_directory, expected_architecture=expected_architecture
+        )
 
     (kit_directory / "relink_manifest.json").write_text(
         json.dumps(manifest, indent=2) + "\n",

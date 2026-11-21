@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 
+import os
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from cafecito_build.apple_toolchain import XcodeCandidate, choose_best_xcode, parse_sdk_version
+from cafecito_build.apple_toolchain import (
+    XcodeCandidate,
+    _append_github_path,
+    choose_best_xcode,
+    parse_sdk_version,
+)
 
 
 class AppleToolchainTest(unittest.TestCase):
@@ -53,6 +61,19 @@ class AppleToolchainTest(unittest.TestCase):
             is_prerelease=False,
         )
         self.assertEqual(choose_best_xcode([sdk27_stable, sdk28_stable], 27), sdk28_stable)
+
+    def test_append_github_path_writes_existing_toolchain_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_root:
+            root = Path(temporary_root)
+            github_path_file = root / "github_path.txt"
+            toolchain_bin = root / "Xcode.app" / "Contents" / "Developer" / "Toolchains" / "usr" / "bin"
+            toolchain_bin.mkdir(parents=True)
+
+            with patch.dict(os.environ, {"GITHUB_PATH": str(github_path_file)}):
+                _append_github_path(toolchain_bin)
+                _append_github_path(root / "missing")
+
+            self.assertEqual(github_path_file.read_text(encoding="utf-8"), f"{toolchain_bin}\n")
 
 
 if __name__ == "__main__":

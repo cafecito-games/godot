@@ -13,6 +13,7 @@ from typing import Any
 
 from cafecito_build.environment import detect_architecture
 from cafecito_build.identity import BuildIdentity, resolve_build_identity
+from cafecito_build.relink_kit import package_relink_kit
 from cafecito_build.scons import BuildRequest, run_scons_build
 
 SHARED_APPLE_LIBGODOT_FLAGS: tuple[str, ...] = (
@@ -31,6 +32,13 @@ class AppleLibGodotSlice:
     library_type: str
     output_filename: str
     simulator: bool = False
+
+    @property
+    def slice_name(self) -> str:
+        if self.godot_platform == "ios":
+            variant = "simulator" if self.simulator else "device"
+            return f"ios-{self.architecture}-{variant}"
+        return f"{self.godot_platform}-{self.architecture}"
 
     def extra_flags(self) -> tuple[str, ...]:
         flags = list(SHARED_APPLE_LIBGODOT_FLAGS)
@@ -119,6 +127,7 @@ def ensure_macos_editor(
     *,
     editor_binary: Path | None = None,
     jobs: int | None = None,
+    extra_flags: tuple[str, ...] = (),
 ) -> Path:
     """Return an existing macOS editor binary or build one for dumping extension_api.json."""
     if editor_binary is not None:
@@ -139,7 +148,7 @@ def ensure_macos_editor(
             architecture=host_architecture,
             relink_kit=False,
             jobs=jobs,
-            extra_flags=SHARED_APPLE_LIBGODOT_FLAGS,
+            extra_flags=(*SHARED_APPLE_LIBGODOT_FLAGS, "optimize=none", *extra_flags),
         )
     )
     if not default_binary.is_file():
@@ -240,14 +249,37 @@ def build_apple_libgodot_slices(
     *,
     relink_kit: bool = True,
     jobs: int | None = None,
+    kit_output_directory: Path | None = None,
+    extra_flags: tuple[str, ...] = (),
+    slice_names: tuple[str, ...] | None = None,
 ) -> list[Path]:
-    """Build all four Apple LibGodot slices for the requested configuration."""
+    """Build Apple LibGodot slices for the requested configuration.
+
+    Every slice builds into one workspace, and a platform directory's loose
+    objects live at paths SCons does not qualify by architecture. The macOS
+    slices therefore overwrite each other's `platform/macos` objects, and a kit
+    packaged after the whole loop carries whichever architecture built last.
+    Passing `kit_output_directory` packages each slice's Relink Kit immediately
+    after that slice builds, which is the only point at which the objects its
+    manifest names are still the ones it was built from.
+    """
     if configuration not in APPLE_LIBGODOT_SLICES:
         raise ValueError(f"Unsupported Apple LibGodot configuration: {configuration!r}")
 
-    target, slices = APPLE_LIBGODOT_SLICES[configuration]
+    target, all_slices = APPLE_LIBGODOT_SLICES[configuration]
+    if slice_names:
+        slices_by_name = {item.slice_name: item for item in all_slices}
+        unknown = [name for name in slice_names if name not in slices_by_name]
+        if unknown:
+            valid = ", ".join(sorted(slices_by_name))
+            raise ValueError(f"Unsupported Apple LibGodot slice(s): {', '.join(unknown)} (valid: {valid})")
+        selected_slices = tuple(slices_by_name[name] for name in slice_names)
+    else:
+        selected_slices = all_slices
+
+    bin_directory = repository_root / "bin"
     built_outputs: list[Path] = []
-    for slice_specification in slices:
+    for slice_specification in selected_slices:
         run_scons_build(
             BuildRequest(
                 repository_root=repository_root,
@@ -257,10 +289,14 @@ def build_apple_libgodot_slices(
                 library_type=slice_specification.library_type,
                 relink_kit=relink_kit,
                 jobs=jobs,
-                extra_flags=slice_specification.extra_flags(),
+                extra_flags=(*slice_specification.extra_flags(), *extra_flags),
             )
         )
-        built_outputs.append(repository_root / "bin" / slice_specification.output_filename)
+        built_outputs.append(bin_directory / slice_specification.output_filename)
+        if relink_kit and kit_output_directory is not None:
+            manifest_path = bin_directory / f"{slice_specification.output_filename}.relink.json"
+            kit_path = package_relink_kit(repository_root, manifest_path, kit_output_directory)
+            print(f"[cafecito-build] Packaged {kit_path}")
     return built_outputs
 
 
@@ -272,6 +308,7 @@ def package_apple_libgodot_sdk(
     editor_binary: Path | None = None,
     extension_api_path: Path | None = None,
     jobs: int | None = None,
+    extra_flags: tuple[str, ...] = (),
 ) -> Path:
     """Package built Apple LibGodot slices, headers, API dump, license files, and BUILD_INFO.json."""
     if configuration not in APPLE_LIBGODOT_SLICES:
@@ -303,6 +340,7 @@ def package_apple_libgodot_sdk(
                 repository_root,
                 editor_binary=editor_binary,
                 jobs=jobs,
+                extra_flags=extra_flags,
             )
             staged_files[EXTENSION_API_FILENAME] = dump_extension_api(resolved_editor, temporary_directory)
 

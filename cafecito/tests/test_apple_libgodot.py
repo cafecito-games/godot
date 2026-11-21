@@ -90,6 +90,27 @@ class AppleLibGodotSliceMatrixTest(unittest.TestCase):
         ios_simulator_flags = release_slices[3].scons_flags(target)
         self.assertIn("ios_simulator=no", ios_device_flags)
         self.assertIn("ios_simulator=yes", ios_simulator_flags)
+        self.assertEqual(
+            [item.slice_name for item in release_slices],
+            ["macos-arm64", "macos-x86_64", "ios-arm64-device", "ios-arm64-simulator"],
+        )
+
+    def test_build_slices_filters_by_slice_name_and_rejects_unknown(self) -> None:
+        from cafecito_build.apple_libgodot import build_apple_libgodot_slices
+
+        with tempfile.TemporaryDirectory() as temporary_root:
+            repo_root = Path(temporary_root)
+            with patch("cafecito_build.apple_libgodot.run_scons_build") as mock_build:
+                outputs = build_apple_libgodot_slices(
+                    repo_root,
+                    "release",
+                    relink_kit=False,
+                    slice_names=("ios-arm64-simulator",),
+                )
+            mock_build.assert_called_once()
+            self.assertEqual(outputs, [repo_root / "bin" / "libgodot.ios.template_release.arm64.simulator.a"])
+            with self.assertRaises(ValueError):
+                build_apple_libgodot_slices(repo_root, "release", slice_names=("unknown-slice",))
 
 
 class AppleLibGodotBuildInfoTest(unittest.TestCase):
@@ -256,7 +277,13 @@ class AppleLibGodotPackagingTest(unittest.TestCase):
                 patch("cafecito_build.apple_libgodot.detect_architecture", return_value="arm64"),
                 patch("cafecito_build.apple_libgodot.run_scons_build", side_effect=fake_scons_build) as mock_build,
             ):
-                package_apple_libgodot_sdk(repository_root, "release", output_zip, jobs=6)
+                package_apple_libgodot_sdk(
+                    repository_root,
+                    "release",
+                    output_zip,
+                    jobs=6,
+                    extra_flags=("cache_path=/tmp/scons-cache",),
+                )
 
             mock_build.assert_called_once()
             build_request = mock_build.call_args.args[0]
@@ -265,7 +292,10 @@ class AppleLibGodotPackagingTest(unittest.TestCase):
             self.assertEqual(build_request.architecture, "arm64")
             self.assertFalse(build_request.relink_kit)
             self.assertEqual(build_request.jobs, 6)
-            self.assertEqual(build_request.extra_flags, SHARED_APPLE_LIBGODOT_FLAGS)
+            self.assertEqual(
+                build_request.extra_flags,
+                (*SHARED_APPLE_LIBGODOT_FLAGS, "optimize=none", "cache_path=/tmp/scons-cache"),
+            )
 
     def test_package_fails_closed_when_required_static_asset_missing(self) -> None:
         for relative_source in STATIC_PACKAGE_ASSETS.values():
@@ -312,6 +342,25 @@ class AppleLibGodotPackagingTest(unittest.TestCase):
 
 
 class AppleLibGodotCliTest(unittest.TestCase):
+    def test_build_apple_libgodot_arguments(self) -> None:
+        parser = build_argument_parser()
+        arguments = parser.parse_args([
+            "build-apple-libgodot",
+            "--configuration",
+            "release",
+            "--slice",
+            "macos-arm64",
+            "--slice",
+            "ios-arm64-device",
+            "--extra-flag",
+            "cache_path=/tmp/cache",
+            "--extra-flag",
+            "cache_limit=7",
+        ])
+        self.assertEqual(arguments.configuration, "release")
+        self.assertEqual(arguments.slice, ["macos-arm64", "ios-arm64-device"])
+        self.assertEqual(arguments.extra_flag, ["cache_path=/tmp/cache", "cache_limit=7"])
+
     def test_package_apple_libgodot_arguments(self) -> None:
         parser = build_argument_parser()
         arguments = parser.parse_args([
@@ -326,12 +375,15 @@ class AppleLibGodotCliTest(unittest.TestCase):
             "tmp/extension_api.json",
             "--jobs",
             "8",
+            "--extra-flag",
+            "cache_path=/tmp/cache",
         ])
         self.assertEqual(arguments.configuration, "debug")
         self.assertEqual(arguments.output, "release-out/apple-libgodot-debug.zip")
         self.assertEqual(arguments.editor_binary, "bin/godot.macos.editor.arm64")
         self.assertEqual(arguments.extension_api, "tmp/extension_api.json")
         self.assertEqual(arguments.jobs, 8)
+        self.assertEqual(arguments.extra_flag, ["cache_path=/tmp/cache"])
 
 
 if __name__ == "__main__":
