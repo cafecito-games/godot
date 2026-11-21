@@ -983,7 +983,7 @@ class GDScriptBytecodeLoader::LoadContext {
 					return reader.fail(ERR_CANT_RESOLVE, vformat("Cannot resolve TAG_EXTERNAL_RESOURCE \"%s\".", resource_path));
 				}
 				Error resolve_error = OK;
-				Ref<Resource> resource = resolver->resolve_resource(resource_path, "Resource", resolve_error);
+				Ref<Resource> resource = resolver->resolve_resource(resource_path, String(), resolve_error);
 				if (resolve_error != OK || resource.is_null()) {
 					return reader.fail(resolve_error != OK ? resolve_error : ERR_CANT_RESOLVE, vformat("Failed to resolve external Resource \"%s\".", resource_path));
 				}
@@ -2688,7 +2688,8 @@ Ref<Resource> GDScriptBytecodeCacheResolver::resolve_resource(const String &p_pa
 		return Ref<Resource>();
 	}
 
-	Ref<Resource> resource = ResourceLoader::load(p_path, p_type_hint, ResourceFormatLoader::CACHE_MODE_REUSE, &r_error);
+	const String effective_type_hint = (p_type_hint == "Resource") ? String() : p_type_hint;
+	Ref<Resource> resource = ResourceLoader::load(p_path, effective_type_hint, ResourceFormatLoader::CACHE_MODE_REUSE, &r_error);
 	if (r_error != OK || resource.is_null()) {
 		if (r_error == OK) {
 			r_error = ERR_CANT_RESOLVE;

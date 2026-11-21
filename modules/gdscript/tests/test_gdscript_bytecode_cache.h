@@ -1062,6 +1062,45 @@ TEST_CASE("[GDScript][BytecodeCache] Compressed zstd .gdb scripts load through R
 	CHECK(wait_for_resource_cache_eviction(base_path));
 }
 
+TEST_CASE("[GDScript][BytecodeCache] Bytecode script resolves preloaded .gdshader external resource") {
+	ensure_gdscript_language_initialized();
+	const String suite_directory = make_temp_suite_dir("gdscript_bytecode_cache_shader");
+	const String shader_path = suite_directory.path_join("tint.gdshader");
+	const String script_path = suite_directory.path_join("uses_shader.gd");
+
+	write_text_file(
+			shader_path,
+			"shader_type canvas_item;\n"
+			"void fragment() {\n"
+			"\tCOLOR = vec4(1.0);\n"
+			"}\n");
+	write_text_file(
+			script_path,
+			vformat("extends RefCounted\n"
+					"const TINT_SHADER := preload(\"%s\")\n"
+					"func has_shader() -> bool:\n"
+					"\treturn TINT_SHADER != null and TINT_SHADER is Shader\n",
+					shader_path));
+
+	Vector<String> scripts;
+	scripts.push_back(script_path);
+	export_scripts_to_bytecode_and_delete_sources(scripts, true, GDScriptBytecodeFormat::COMPRESSION_ZSTD);
+
+	Ref<GDScript> loaded_script = ResourceLoader::load(script_path, "GDScript");
+	REQUIRE(loaded_script.is_valid());
+	CHECK(loaded_script->is_valid());
+	CHECK(loaded_script->is_bytecode_backed());
+
+	Ref<RefCounted> instance = memnew(RefCounted);
+	instance->set_script(loaded_script);
+	CHECK(bool(instance->call(StringName("has_shader"))));
+
+	instance.unref();
+	loaded_script.unref();
+	cleanup_cached_scripts(scripts);
+	CHECK(wait_for_resource_cache_eviction(script_path));
+}
+
 } // namespace TestGDScriptBytecodeCache
 
 #endif // GDSCRIPT_BYTECODE_EXPORT_ENABLED
