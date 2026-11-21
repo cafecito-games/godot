@@ -13,6 +13,7 @@ from typing import Any
 
 from cafecito_build.environment import detect_architecture
 from cafecito_build.identity import BuildIdentity, resolve_build_identity
+from cafecito_build.relink_kit import package_relink_kit
 from cafecito_build.scons import BuildRequest, run_scons_build
 
 SHARED_APPLE_LIBGODOT_FLAGS: tuple[str, ...] = (
@@ -240,12 +241,23 @@ def build_apple_libgodot_slices(
     *,
     relink_kit: bool = True,
     jobs: int | None = None,
+    kit_output_directory: Path | None = None,
 ) -> list[Path]:
-    """Build all four Apple LibGodot slices for the requested configuration."""
+    """Build all four Apple LibGodot slices for the requested configuration.
+
+    Every slice builds into one workspace, and a platform directory's loose
+    objects live at paths SCons does not qualify by architecture. The macOS
+    slices therefore overwrite each other's `platform/macos` objects, and a kit
+    packaged after the whole loop carries whichever architecture built last.
+    Passing `kit_output_directory` packages each slice's Relink Kit immediately
+    after that slice builds, which is the only point at which the objects its
+    manifest names are still the ones it was built from.
+    """
     if configuration not in APPLE_LIBGODOT_SLICES:
         raise ValueError(f"Unsupported Apple LibGodot configuration: {configuration!r}")
 
     target, slices = APPLE_LIBGODOT_SLICES[configuration]
+    bin_directory = repository_root / "bin"
     built_outputs: list[Path] = []
     for slice_specification in slices:
         run_scons_build(
@@ -260,7 +272,11 @@ def build_apple_libgodot_slices(
                 extra_flags=slice_specification.extra_flags(),
             )
         )
-        built_outputs.append(repository_root / "bin" / slice_specification.output_filename)
+        built_outputs.append(bin_directory / slice_specification.output_filename)
+        if relink_kit and kit_output_directory is not None:
+            manifest_path = bin_directory / f"{slice_specification.output_filename}.relink.json"
+            kit_path = package_relink_kit(repository_root, manifest_path, kit_output_directory)
+            print(f"[cafecito-build] Packaged {kit_path}")
     return built_outputs
 
 
