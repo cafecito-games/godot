@@ -733,6 +733,425 @@ void GDScriptFunction::debug_get_stack_member_state(int p_line, List<Pair<String
 	}
 }
 
+static bool _is_zero_bit_default_variant_type(Variant::Type p_type) {
+	switch (p_type) {
+		case Variant::BOOL:
+		case Variant::INT:
+		case Variant::FLOAT:
+		case Variant::VECTOR2:
+		case Variant::VECTOR2I:
+		case Variant::VECTOR3:
+		case Variant::VECTOR3I:
+		case Variant::RECT2:
+		case Variant::RECT2I:
+		case Variant::VECTOR4:
+		case Variant::VECTOR4I:
+		case Variant::RID:
+			return true;
+		default:
+			return false;
+	}
+}
+
+void GDScriptFunction::prepare_vm_frame_metadata() {
+	_zero_init_temp_slots.clear();
+	_complex_temp_slots.clear();
+	_deinit_slot_mask = UINT64_MAX;
+	_has_deinit_slot_mask = false;
+	_all_args_fast_check = false;
+	_frame_bytes = 0;
+
+	if (_stack_size > 0 && _instruction_args_size >= 0) {
+		const size_t total_frame_bytes = sizeof(Variant) * static_cast<size_t>(_stack_size) + sizeof(Variant *) * static_cast<size_t>(_instruction_args_size);
+		if (total_frame_bytes <= UINT32_MAX) {
+			_frame_bytes = static_cast<uint32_t>(total_frame_bytes);
+		}
+	}
+
+	for (const Pair<int, Variant::Type> &entry : temporary_slots) {
+		if (entry.first >= FIXED_ADDRESSES_MAX && entry.first <= UINT16_MAX && _is_zero_bit_default_variant_type(entry.second)) {
+			_zero_init_temp_slots.push_back(ZeroInitTempSlot{ static_cast<uint16_t>(entry.first), static_cast<uint8_t>(entry.second) });
+		} else {
+			_complex_temp_slots.push_back(entry);
+		}
+	}
+
+	if (_argument_count >= 0 && _argument_count <= FAST_ARG_TYPE_SLOTS && argument_types.size() == _argument_count) {
+		bool all_fast = true;
+		for (int arg_index = 0; arg_index < _argument_count; arg_index++) {
+			const GDScriptDataType &arg_type = argument_types[arg_index];
+			if (arg_type.kind == GDScriptDataType::VARIANT) {
+				_fast_arg_types[arg_index] = Variant::NIL;
+			} else if (arg_type.kind == GDScriptDataType::BUILTIN && arg_type.builtin_type != Variant::NIL && arg_type.builtin_type != Variant::ARRAY && arg_type.builtin_type != Variant::DICTIONARY) {
+				_fast_arg_types[arg_index] = static_cast<uint8_t>(arg_type.builtin_type);
+			} else {
+				all_fast = false;
+				break;
+			}
+		}
+		_all_args_fast_check = all_fast;
+	}
+
+	if (_stack_size < FIXED_ADDRESSES_MAX || _stack_size > 64 || _code_ptr == nullptr || _code_size <= 0 || argument_types.size() < _argument_count) {
+		return;
+	}
+
+	uint64_t mask = 0;
+	auto mark_stack_slot = [&](int p_slot) {
+		if (p_slot >= FIXED_ADDRESSES_MAX && p_slot < _stack_size) {
+			mask |= (uint64_t(1) << p_slot);
+		}
+	};
+	auto mark_stack_address = [&](int p_address) {
+		const int address_type = (p_address & ADDR_TYPE_MASK) >> ADDR_BITS;
+		if (address_type == ADDR_TYPE_STACK) {
+			mark_stack_slot(p_address & ADDR_MASK);
+		}
+	};
+
+	for (int arg_index = 0; arg_index < _argument_count; arg_index++) {
+		const GDScriptDataType &arg_type = argument_types[arg_index];
+		const bool is_trivial_builtin = arg_type.kind == GDScriptDataType::BUILTIN && arg_type.builtin_type >= 0 && arg_type.builtin_type < Variant::VARIANT_MAX && !VariantInternal::type_needs_deinit(arg_type.builtin_type);
+		if (!is_trivial_builtin) {
+			mark_stack_slot(FIXED_ADDRESSES_MAX + arg_index);
+		}
+	}
+	if (is_vararg()) {
+		mark_stack_slot(_vararg_index);
+	}
+	for (const Pair<int, Variant::Type> &entry : temporary_slots) {
+		if (entry.second < 0 || entry.second >= Variant::VARIANT_MAX || VariantInternal::type_needs_deinit(entry.second)) {
+			mark_stack_slot(entry.first);
+		}
+	}
+
+	LocalVector<Pair<uint8_t, uint8_t>> stack_copy_edges;
+	int ip = 0;
+	while (ip < _code_size) {
+		const int raw_opcode = _code_ptr[ip];
+		if (raw_opcode < 0 || raw_opcode > OPCODE_END) {
+			return;
+		}
+		const Opcode opcode = static_cast<Opcode>(raw_opcode);
+		const GDScriptBytecodeFormat::OpcodeLayout &layout = get_opcode_layout(opcode);
+
+		int instr_arg_count = 0;
+		int instruction_length = layout.word_count;
+		if (layout.is_vararg) {
+			if (ip + 1 >= _code_size) {
+				return;
+			}
+			instr_arg_count = _code_ptr[ip + 1];
+			if (instr_arg_count < 0 || ip + 2 + instr_arg_count + layout.word_count > _code_size) {
+				return;
+			}
+			instruction_length = 2 + instr_arg_count + layout.word_count;
+		} else if (ip + instruction_length > _code_size) {
+			return;
+		}
+
+		switch (opcode) {
+			// Guaranteed non-deinit destination writes and pure read/control-flow opcodes.
+			case OPCODE_INT_ADD:
+			case OPCODE_INT_SUB:
+			case OPCODE_INT_MUL:
+			case OPCODE_INT_BIT_AND:
+			case OPCODE_INT_BIT_OR:
+			case OPCODE_INT_BIT_XOR:
+			case OPCODE_INT_EQ:
+			case OPCODE_INT_NE:
+			case OPCODE_INT_LT:
+			case OPCODE_INT_LE:
+			case OPCODE_INT_GT:
+			case OPCODE_INT_GE:
+			case OPCODE_FLOAT_ADD:
+			case OPCODE_FLOAT_SUB:
+			case OPCODE_FLOAT_MUL:
+			case OPCODE_FLOAT_DIV:
+			case OPCODE_FLOAT_LT:
+			case OPCODE_FLOAT_LE:
+			case OPCODE_FLOAT_GT:
+			case OPCODE_FLOAT_GE:
+			case OPCODE_VECTOR2_ADD:
+			case OPCODE_VECTOR2_SUB:
+			case OPCODE_VECTOR2_MUL_FLOAT:
+			case OPCODE_VECTOR2_MUL:
+			case OPCODE_INT_SHIFT_LEFT:
+			case OPCODE_INT_SHIFT_RIGHT:
+			case OPCODE_FLOAT_EQ:
+			case OPCODE_FLOAT_NE:
+			case OPCODE_VECTOR2I_ADD:
+			case OPCODE_VECTOR2I_SUB:
+			case OPCODE_VECTOR2I_EQ:
+			case OPCODE_VECTOR2I_NE:
+			case OPCODE_INT_NEGATE:
+			case OPCODE_FLOAT_NEGATE:
+			case OPCODE_VECTOR2_GET_X:
+			case OPCODE_VECTOR2_GET_Y:
+			case OPCODE_VECTOR2_SET_X:
+			case OPCODE_VECTOR2_SET_Y:
+			case OPCODE_VECTOR2I_GET_X:
+			case OPCODE_VECTOR2I_GET_Y:
+			case OPCODE_VECTOR2I_SET_X:
+			case OPCODE_VECTOR2I_SET_Y:
+			case OPCODE_ARRAY_SIZE:
+			case OPCODE_ARRAY_IS_EMPTY:
+			case OPCODE_ARRAY_APPEND:
+			case OPCODE_VECTOR2_LENGTH_SQUARED:
+			case OPCODE_VECTOR2_DOT:
+			case OPCODE_UTILITY_ABSI:
+			case OPCODE_UTILITY_ABSF:
+			case OPCODE_UTILITY_MINI:
+			case OPCODE_UTILITY_MAXI:
+			case OPCODE_UTILITY_MINF:
+			case OPCODE_UTILITY_MAXF:
+			case OPCODE_UTILITY_CLAMPI:
+			case OPCODE_UTILITY_CLAMPF:
+			case OPCODE_UTILITY_LERPF:
+			case OPCODE_TYPE_TEST_BUILTIN:
+			case OPCODE_TYPE_TEST_ARRAY:
+			case OPCODE_TYPE_TEST_DICTIONARY:
+			case OPCODE_TYPE_TEST_NATIVE:
+			case OPCODE_TYPE_TEST_SCRIPT:
+			case OPCODE_SET_KEYED:
+			case OPCODE_SET_KEYED_VALIDATED:
+			case OPCODE_SET_INDEXED_VALIDATED:
+			case OPCODE_SET_NAMED:
+			case OPCODE_SET_NAMED_VALIDATED:
+			case OPCODE_SET_MEMBER:
+			case OPCODE_SET_STATIC_VARIABLE:
+			case OPCODE_ASSIGN_NULL:
+			case OPCODE_ASSIGN_TRUE:
+			case OPCODE_ASSIGN_FALSE:
+			case OPCODE_CALL:
+			case OPCODE_CALL_METHOD_BIND:
+			case OPCODE_CALL_METHOD_BIND_VALIDATED_NO_RETURN:
+			case OPCODE_CALL_NATIVE_STATIC_VALIDATED_NO_RETURN:
+			case OPCODE_AWAIT:
+			case OPCODE_JUMP:
+			case OPCODE_JUMP_IF:
+			case OPCODE_JUMP_IF_NOT:
+			case OPCODE_JUMP_IF_NOT_INT_EQ:
+			case OPCODE_JUMP_IF_NOT_INT_NE:
+			case OPCODE_JUMP_IF_NOT_INT_LT:
+			case OPCODE_JUMP_IF_NOT_INT_LE:
+			case OPCODE_JUMP_IF_NOT_INT_GT:
+			case OPCODE_JUMP_IF_NOT_INT_GE:
+			case OPCODE_JUMP_IF_NOT_FLOAT_LT:
+			case OPCODE_JUMP_IF_NOT_FLOAT_LE:
+			case OPCODE_JUMP_IF_NOT_FLOAT_GT:
+			case OPCODE_JUMP_IF_NOT_FLOAT_GE:
+			case OPCODE_JUMP_TO_DEF_ARGUMENT:
+			case OPCODE_JUMP_IF_SHARED:
+			case OPCODE_RETURN:
+			case OPCODE_RETURN_TYPED_BUILTIN:
+			case OPCODE_RETURN_TYPED_ARRAY:
+			case OPCODE_RETURN_TYPED_DICTIONARY:
+			case OPCODE_RETURN_TYPED_NATIVE:
+			case OPCODE_RETURN_TYPED_SCRIPT:
+			case OPCODE_ITERATE_BEGIN_INT:
+			case OPCODE_ITERATE_BEGIN_FLOAT:
+			case OPCODE_ITERATE_BEGIN_VECTOR2:
+			case OPCODE_ITERATE_BEGIN_VECTOR2I:
+			case OPCODE_ITERATE_BEGIN_VECTOR3:
+			case OPCODE_ITERATE_BEGIN_VECTOR3I:
+			case OPCODE_ITERATE_BEGIN_PACKED_BYTE_ARRAY:
+			case OPCODE_ITERATE_BEGIN_PACKED_INT32_ARRAY:
+			case OPCODE_ITERATE_BEGIN_PACKED_INT64_ARRAY:
+			case OPCODE_ITERATE_BEGIN_PACKED_FLOAT32_ARRAY:
+			case OPCODE_ITERATE_BEGIN_PACKED_FLOAT64_ARRAY:
+			case OPCODE_ITERATE_BEGIN_PACKED_VECTOR2_ARRAY:
+			case OPCODE_ITERATE_BEGIN_PACKED_VECTOR3_ARRAY:
+			case OPCODE_ITERATE_BEGIN_PACKED_COLOR_ARRAY:
+			case OPCODE_ITERATE_BEGIN_PACKED_VECTOR4_ARRAY:
+			case OPCODE_ITERATE_BEGIN_RANGE:
+			case OPCODE_ITERATE_INT:
+			case OPCODE_ITERATE_FLOAT:
+			case OPCODE_ITERATE_VECTOR2:
+			case OPCODE_ITERATE_VECTOR2I:
+			case OPCODE_ITERATE_VECTOR3:
+			case OPCODE_ITERATE_VECTOR3I:
+			case OPCODE_ITERATE_PACKED_BYTE_ARRAY:
+			case OPCODE_ITERATE_PACKED_INT32_ARRAY:
+			case OPCODE_ITERATE_PACKED_INT64_ARRAY:
+			case OPCODE_ITERATE_PACKED_FLOAT32_ARRAY:
+			case OPCODE_ITERATE_PACKED_FLOAT64_ARRAY:
+			case OPCODE_ITERATE_PACKED_VECTOR2_ARRAY:
+			case OPCODE_ITERATE_PACKED_VECTOR3_ARRAY:
+			case OPCODE_ITERATE_PACKED_COLOR_ARRAY:
+			case OPCODE_ITERATE_PACKED_VECTOR4_ARRAY:
+			case OPCODE_ITERATE_RANGE:
+			case OPCODE_TYPE_ADJUST_BOOL:
+			case OPCODE_TYPE_ADJUST_INT:
+			case OPCODE_TYPE_ADJUST_FLOAT:
+			case OPCODE_TYPE_ADJUST_VECTOR2:
+			case OPCODE_TYPE_ADJUST_VECTOR2I:
+			case OPCODE_TYPE_ADJUST_RECT2:
+			case OPCODE_TYPE_ADJUST_RECT2I:
+			case OPCODE_TYPE_ADJUST_VECTOR3:
+			case OPCODE_TYPE_ADJUST_VECTOR3I:
+			case OPCODE_TYPE_ADJUST_VECTOR4:
+			case OPCODE_TYPE_ADJUST_VECTOR4I:
+			case OPCODE_TYPE_ADJUST_PLANE:
+			case OPCODE_TYPE_ADJUST_QUATERNION:
+			case OPCODE_TYPE_ADJUST_COLOR:
+			case OPCODE_TYPE_ADJUST_RID:
+			case OPCODE_ASSERT:
+			case OPCODE_BREAKPOINT:
+			case OPCODE_LINE:
+			case OPCODE_END:
+				break;
+
+			case OPCODE_ASSIGN: {
+				const int destination_address = _code_ptr[ip + 1];
+				const int source_address = _code_ptr[ip + 2];
+				const int destination_type = (destination_address & ADDR_TYPE_MASK) >> ADDR_BITS;
+				const int destination_slot = destination_address & ADDR_MASK;
+				if (destination_type == ADDR_TYPE_STACK && destination_slot >= FIXED_ADDRESSES_MAX && destination_slot < _stack_size) {
+					const int source_type = (source_address & ADDR_TYPE_MASK) >> ADDR_BITS;
+					const int source_index = source_address & ADDR_MASK;
+					if (source_type == ADDR_TYPE_CONSTANT && source_index >= 0 && source_index < _constant_count && _constants_ptr != nullptr) {
+						const Variant::Type constant_type = _constants_ptr[source_index].get_type();
+						if (VariantInternal::type_needs_deinit(constant_type)) {
+							mark_stack_slot(destination_slot);
+						}
+					} else if (source_type == ADDR_TYPE_STACK) {
+						if (source_index == ADDR_STACK_NIL) {
+							// NIL never requires deinit.
+						} else if (source_index == ADDR_STACK_SELF || source_index == ADDR_STACK_CLASS) {
+							mark_stack_slot(destination_slot);
+						} else if (source_index >= FIXED_ADDRESSES_MAX && source_index < _stack_size) {
+							stack_copy_edges.push_back(Pair<uint8_t, uint8_t>(static_cast<uint8_t>(destination_slot), static_cast<uint8_t>(source_index)));
+						} else {
+							mark_stack_slot(destination_slot);
+						}
+					} else {
+						mark_stack_slot(destination_slot);
+					}
+				}
+			} break;
+
+			case OPCODE_ASSIGN_TYPED_BUILTIN: {
+				const int builtin_type = _code_ptr[ip + 3];
+				if (builtin_type < 0 || builtin_type >= Variant::VARIANT_MAX || VariantInternal::type_needs_deinit(static_cast<Variant::Type>(builtin_type))) {
+					mark_stack_address(_code_ptr[ip + 1]);
+				}
+			} break;
+
+			case OPCODE_CAST_TO_BUILTIN: {
+				const int builtin_type = _code_ptr[ip + 3];
+				if (builtin_type < 0 || builtin_type >= Variant::VARIANT_MAX || VariantInternal::type_needs_deinit(static_cast<Variant::Type>(builtin_type))) {
+					mark_stack_address(_code_ptr[ip + 2]);
+				}
+			} break;
+
+			case OPCODE_GET_MEMBER:
+			case OPCODE_GET_STATIC_VARIABLE:
+			case OPCODE_AWAIT_RESUME:
+			case OPCODE_STORE_GLOBAL:
+			case OPCODE_STORE_NAMED_GLOBAL:
+			case OPCODE_ASSIGN_TYPED_ARRAY:
+			case OPCODE_ASSIGN_TYPED_DICTIONARY:
+			case OPCODE_ASSIGN_TYPED_NATIVE:
+			case OPCODE_ASSIGN_TYPED_SCRIPT:
+			case OPCODE_TYPE_ADJUST_STRING:
+			case OPCODE_TYPE_ADJUST_TRANSFORM2D:
+			case OPCODE_TYPE_ADJUST_AABB:
+			case OPCODE_TYPE_ADJUST_BASIS:
+			case OPCODE_TYPE_ADJUST_TRANSFORM3D:
+			case OPCODE_TYPE_ADJUST_PROJECTION:
+			case OPCODE_TYPE_ADJUST_STRING_NAME:
+			case OPCODE_TYPE_ADJUST_NODE_PATH:
+			case OPCODE_TYPE_ADJUST_OBJECT:
+			case OPCODE_TYPE_ADJUST_CALLABLE:
+			case OPCODE_TYPE_ADJUST_SIGNAL:
+			case OPCODE_TYPE_ADJUST_DICTIONARY:
+			case OPCODE_TYPE_ADJUST_ARRAY:
+			case OPCODE_TYPE_ADJUST_PACKED_BYTE_ARRAY:
+			case OPCODE_TYPE_ADJUST_PACKED_INT32_ARRAY:
+			case OPCODE_TYPE_ADJUST_PACKED_INT64_ARRAY:
+			case OPCODE_TYPE_ADJUST_PACKED_FLOAT32_ARRAY:
+			case OPCODE_TYPE_ADJUST_PACKED_FLOAT64_ARRAY:
+			case OPCODE_TYPE_ADJUST_PACKED_STRING_ARRAY:
+			case OPCODE_TYPE_ADJUST_PACKED_VECTOR2_ARRAY:
+			case OPCODE_TYPE_ADJUST_PACKED_VECTOR3_ARRAY:
+			case OPCODE_TYPE_ADJUST_PACKED_COLOR_ARRAY:
+			case OPCODE_TYPE_ADJUST_PACKED_VECTOR4_ARRAY:
+				mark_stack_address(_code_ptr[ip + 1]);
+				break;
+
+			case OPCODE_GET_NAMED:
+			case OPCODE_GET_NAMED_VALIDATED:
+			case OPCODE_CAST_TO_NATIVE:
+			case OPCODE_CAST_TO_SCRIPT:
+				mark_stack_address(_code_ptr[ip + 2]);
+				break;
+
+			case OPCODE_OPERATOR:
+			case OPCODE_OPERATOR_VALIDATED:
+			case OPCODE_GET_KEYED:
+			case OPCODE_GET_KEYED_VALIDATED:
+			case OPCODE_GET_INDEXED_VALIDATED:
+				mark_stack_address(_code_ptr[ip + 3]);
+				break;
+
+			case OPCODE_CALL_RETURN:
+			case OPCODE_CALL_ASYNC:
+			case OPCODE_CALL_METHOD_BIND_RET:
+			case OPCODE_CALL_METHOD_BIND_VALIDATED_RETURN:
+			case OPCODE_CALL_UTILITY:
+			case OPCODE_CALL_UTILITY_VALIDATED:
+			case OPCODE_CALL_GDSCRIPT_UTILITY:
+			case OPCODE_CALL_BUILTIN_TYPE_VALIDATED:
+			case OPCODE_CALL_SELF_BASE:
+			case OPCODE_CALL_BUILTIN_STATIC:
+			case OPCODE_CALL_NATIVE_STATIC:
+			case OPCODE_CALL_NATIVE_STATIC_VALIDATED_RETURN:
+			case OPCODE_CONSTRUCT:
+			case OPCODE_CONSTRUCT_VALIDATED:
+			case OPCODE_CONSTRUCT_ARRAY:
+			case OPCODE_CONSTRUCT_DICTIONARY:
+			case OPCODE_CREATE_LAMBDA:
+			case OPCODE_CREATE_SELF_LAMBDA:
+				if (instr_arg_count > 0) {
+					mark_stack_address(_code_ptr[ip + 2 + instr_arg_count - 1]);
+				}
+				break;
+
+			default: {
+				if (layout.is_vararg) {
+					for (int arg_index = 0; arg_index < instr_arg_count; arg_index++) {
+						mark_stack_address(_code_ptr[ip + 2 + arg_index]);
+					}
+				} else {
+					for (int operand_index = 0; operand_index < layout.operand_count; operand_index++) {
+						if (layout.operands[operand_index] == GDScriptBytecodeFormat::OPERAND_ADDRESS) {
+							mark_stack_address(_code_ptr[ip + 1 + operand_index]);
+						}
+					}
+				}
+			} break;
+		}
+
+		ip += instruction_length;
+	}
+
+	bool changed = true;
+	while (changed) {
+		changed = false;
+		for (const Pair<uint8_t, uint8_t> &edge : stack_copy_edges) {
+			if ((mask & (uint64_t(1) << edge.second)) != 0 && (mask & (uint64_t(1) << edge.first)) == 0) {
+				mask |= (uint64_t(1) << edge.first);
+				changed = true;
+			}
+		}
+	}
+
+	mask &= ~((uint64_t(1) << FIXED_ADDRESSES_MAX) - 1);
+	_deinit_slot_mask = mask;
+	_has_deinit_slot_mask = true;
+}
+
 GDScriptFunction::GDScriptFunction() {
 	name = "<anonymous>";
 #ifdef DEBUG_ENABLED

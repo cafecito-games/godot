@@ -1222,6 +1222,7 @@ GDScriptFunction *GDScriptByteCodeGenerator::write_end() {
 	function->export_fixups = export_fixups;
 #endif
 
+	function->prepare_vm_frame_metadata();
 	ended = true;
 	return function;
 }

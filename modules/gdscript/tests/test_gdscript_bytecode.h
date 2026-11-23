@@ -2301,6 +2301,150 @@ func exercise_locked_native_call() -> Dictionary:
 		}
 #endif
 	}
+
+	TEST_CASE("Inline VM call frames preserve recursion, refcounting, getters/setters, void returns, re-entrancy, and call stacks") {
+		Ref<GDScript> script = compile_source(R"(
+extends RefCounted
+
+class Box extends RefCounted:
+	var _val: int = 0
+	var scaled: int:
+		get:
+			return _val * 3
+		set(new_value):
+			_val = new_value + 1
+	var next_box: Box = null
+
+	func _init(initial: int = 0) -> void:
+		_val = initial
+
+	func add_and_clear_owner(owner_holder: Array, delta: int) -> int:
+		# Drops the caller's only external reference to `self` mid-call; self must stay alive until return.
+		owner_holder.clear()
+		var local_str: String = "v:" + str(_val + delta)
+		return local_str.length() + _val + delta
+
+	func get_self_via_getter() -> Box:
+		return next_box
+
+	func get_scaled_plus(offset: int = 5) -> int:
+		return scaled + offset
+
+class NodeTarget extends Node:
+	var count: int = 0
+
+	func bump(amount: int) -> int:
+		count += amount
+		return count
+
+func fib(n: int) -> int:
+	if n <= 1:
+		return n
+	return fib(n - 1) + fib(n - 2)
+
+func implicit_nil_return(flag: bool):
+	if flag:
+		return 1
+
+func strict_float_return(x: int) -> float:
+	return x
+
+func reentrant_inner(v: int) -> int:
+	return fib(v) + 1
+
+func reentrant_outer(v: int) -> int:
+	# Exercises GDScript -> Object::call -> GDScript -> inline VM frames.
+	return int(call("reentrant_inner", v))
+
+func stack_depth_leaf() -> int:
+	return get_stack().size()
+
+func stack_depth_mid() -> int:
+	return stack_depth_leaf()
+
+func run_frame_tests() -> Dictionary:
+	var fib_12: int = fib(12)
+
+	# Implicit OPCODE_END return must overwrite a non-null destination slot cleanly.
+	var slot_val: Variant = "non_null_before"
+	slot_val = implicit_nil_return(false)
+	var void_became_nil: bool = (slot_val == null)
+
+	# Strict int -> float return conversion across inline frame.
+	var flt_ret: float = strict_float_return(7)
+
+	# Property setter + getter inline frames, including default args and src == dst aliasing.
+	var b1 := Box.new(2)
+	b1.scaled = 4
+	var b1_scaled: int = b1.scaled
+	var b1_default: int = b1.get_scaled_plus()
+	var b2 := Box.new(9)
+	b1.next_box = b2
+	var alias_ref: Variant = b1
+	alias_ref = alias_ref.get_self_via_getter()
+	var alias_val: int = alias_ref.scaled
+
+	# Cross-instance RefCounted call where caller's sole reference is cleared mid-call.
+	var holder: Array = [Box.new(10)]
+	var survivor_res: int = holder[0].add_and_clear_owner(holder, 5)
+	var holder_empty: bool = holder.is_empty()
+
+	# Non-RefCounted Node receiver inline call.
+	var node := NodeTarget.new()
+	var node_sum: int = node.bump(3) + node.bump(4)
+	node.free()
+
+	# Re-entrant C++ -> GDScript -> inline GDScript call.
+	var reentrant_val: int = reentrant_outer(8)
+
+	# Call stack depth increases across inline frames when stack tracking is active.
+	var depth_root: int = get_stack().size()
+	var depth_nested: int = stack_depth_mid()
+
+	return {
+		"fib_12": fib_12,
+		"void_became_nil": void_became_nil,
+		"flt_ret": int(flt_ret),
+		"b1_scaled": b1_scaled,
+		"b1_default": b1_default,
+		"alias_val": alias_val,
+		"survivor_res": survivor_res,
+		"holder_empty": holder_empty,
+		"node_sum": node_sum,
+		"reentrant_val": reentrant_val,
+		"depth_delta": depth_nested - depth_root,
+	}
+)",
+				"res://tier2a_inline_frames.gd");
+
+		const Vector<uint8_t> bytes = export_script_bytes(script);
+		Ref<GDScript> loaded = load_script_bytes(bytes, "res://tier2a_inline_frames.gd");
+		REQUIRE(GDScriptBytecodeVerifier::verify_class(loaded.ptr()) == OK);
+
+		Ref<RefCounted> orig_inst = memnew(RefCounted);
+		orig_inst->set_script(script);
+		Ref<RefCounted> loaded_inst = memnew(RefCounted);
+		loaded_inst->set_script(loaded);
+
+		for (int repeat = 0; repeat < 3; repeat++) {
+			Dictionary orig_res = orig_inst->call("run_frame_tests");
+			Dictionary loaded_res = loaded_inst->call("run_frame_tests");
+			CHECK(orig_res == loaded_res);
+			CHECK(int(loaded_res["fib_12"]) == 144);
+			CHECK(bool(loaded_res["void_became_nil"]) == true);
+			CHECK(int(loaded_res["flt_ret"]) == 7);
+			CHECK(int(loaded_res["b1_scaled"]) == 15);
+			CHECK(int(loaded_res["b1_default"]) == 20);
+			CHECK(int(loaded_res["alias_val"]) == 27);
+			CHECK(int(loaded_res["survivor_res"]) == (4 + 10 + 5));
+			CHECK(bool(loaded_res["holder_empty"]) == true);
+			CHECK(int(loaded_res["node_sum"]) == (3 + 7));
+			CHECK(int(loaded_res["reentrant_val"]) == (21 + 1));
+#ifdef DEBUG_ENABLED
+			CHECK(int(loaded_res["depth_delta"]) == 2);
+#endif
+		}
+	}
 }
 
 } // namespace TestGDScriptBytecode
