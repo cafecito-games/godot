@@ -2078,6 +2078,17 @@ class NativeHolder extends Node2D:
 		position += Vector2(1.0, 2.0)
 		return Vector2(position.x + rotation, position.y)
 
+class FreeOverrideNode extends Node:
+	static var intercepted_count: int = 0
+
+	@warning_ignore("native_method_override")
+	func free() -> void:
+		intercepted_count += 1
+
+func destroy_untyped(target) -> bool:
+	target.free()
+	return is_instance_valid(target)
+
 func run_all(limit: int, bonus: int = 2 + 3) -> Dictionary:
 	# Exercises inline int/float/Vector2 ops, fused compare-and-jump, and redundant-assign folding.
 	var total: int = 0
@@ -2134,6 +2145,12 @@ func run_all(limit: int, bonus: int = 2 + 3) -> Dictionary:
 	holder.free()
 	plain.free()
 
+	# Verify call inline cache never lets a script-defined free() bypass Object::callp deletion.
+	FreeOverrideNode.intercepted_count = 0
+	var victim := FreeOverrideNode.new()
+	var victim_still_valid: bool = destroy_untyped(victim)
+	var free_intercepted: int = FreeOverrideNode.intercepted_count
+
 	return {
 		"total": total + bonus,
 		"f_acc": int(round(f_acc * 100.0)),
@@ -2145,6 +2162,8 @@ func run_all(limit: int, bonus: int = 2 + 3) -> Dictionary:
 		"self_x": int(round(self_vec.x * 100.0)),
 		"self_y": int(round(self_vec.y * 100.0)),
 		"plain_sum": int(round(plain_sum * 100.0)),
+		"victim_still_valid": victim_still_valid,
+		"free_intercepted": free_intercepted,
 	}
 )",
 				"res://perf_opts_roundtrip.gd");
@@ -2191,6 +2210,8 @@ func run_all(limit: int, bonus: int = 2 + 3) -> Dictionary:
 			CHECK(int(loaded_res["self_x"]) == 450);
 			CHECK(int(loaded_res["self_y"]) == 600);
 			CHECK(int(loaded_res["plain_sum"]) == 1625);
+			CHECK(bool(loaded_res["victim_still_valid"]) == false);
+			CHECK(int(loaded_res["free_intercepted"]) == 0);
 		}
 	}
 }

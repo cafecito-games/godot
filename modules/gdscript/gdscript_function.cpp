@@ -32,6 +32,7 @@
 
 #include "gdscript.h"
 
+#include "core/core_string_names.h"
 #include "core/object/class_db.h"
 #include "scene/scene_string_names.h"
 
@@ -39,7 +40,9 @@ std::atomic<uint64_t> GDScriptFunction::_script_clear_epoch{ 1 };
 
 GDScriptFunction *GDScriptFunction::_populate_call_cache(int p_methodname_idx, const GDScript *p_target_script) const {
 	const StringName &method_name = _global_names_ptr[p_methodname_idx];
-	if (unlikely(method_name == SceneStringName(_ready))) {
+	// `_ready` requires recursive implicit-ready dispatch in GDScriptInstance::callp,
+	// and `free` is intercepted unconditionally by Object::callp before script dispatch.
+	if (unlikely(method_name == SceneStringName(_ready) || method_name == CoreStringName(free_))) {
 		return nullptr;
 	}
 
