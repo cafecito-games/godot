@@ -441,7 +441,6 @@ class GDScriptLanguage : public ScriptLanguage {
 		Variant *stack = nullptr;
 		GDScriptFunction *function = nullptr;
 		GDScriptInstance *instance = nullptr;
-		int *ip = nullptr;
 		int *line = nullptr;
 		CallLevel *prev = nullptr; // Reverse linked list (stack).
 	};
@@ -491,7 +490,7 @@ public:
 	bool debug_break(const String &p_error, bool p_allow_continue = true);
 	bool debug_break_parse(const String &p_file, int p_line, const String &p_error);
 
-	_FORCE_INLINE_ void enter_function(CallLevel *call_level, GDScriptInstance *p_instance, GDScriptFunction *p_function, Variant *p_stack, int *p_ip, int *p_line) {
+	_FORCE_INLINE_ void enter_function(CallLevel *call_level, GDScriptInstance *p_instance, GDScriptFunction *p_function, Variant *p_stack, int *p_line) {
 		if (!track_call_stack) {
 			return;
 		}
@@ -520,7 +519,6 @@ public:
 		call_level->stack = p_stack;
 		call_level->instance = p_instance;
 		call_level->function = p_function;
-		call_level->ip = p_ip;
 		call_level->line = p_line;
 		_call_stack_size++;
 	}

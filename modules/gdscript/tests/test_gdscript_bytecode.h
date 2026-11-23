@@ -707,7 +707,7 @@ class ChildHelper extends BaseHelper:
 		# 9. OPCODE_CALL_UTILITY (unvalidated)
 		var util_unval = str(untyped_a, ":", untyped_b)
 		# 10. OPCODE_CALL_UTILITY_VALIDATED
-		var util_val: float = clampf(typed_float, 0.0, 1.0)
+		var util_val: float = sin(typed_float)
 		# 11. OPCODE_CALL_GDSCRIPT_UTILITY
 		var gds_util: int = len(typed_str)
 		# 12. OPCODE_CALL_BUILTIN_TYPE_VALIDATED
@@ -802,7 +802,7 @@ class ChildHelper extends BaseHelper:
 		CHECK(Vector2(res["v_val"]) == Vector2(0.5, 0.5));
 		CHECK(int(res["call_ret"]) == 8);
 		CHECK(String(res["util_unval"]) == "1.0:2.0");
-		CHECK(double(res["util_val"]) == doctest::Approx(0.5));
+		CHECK(double(res["util_val"]) == doctest::Approx(Math::sin(0.5)));
 		CHECK(int(res["gds_util"]) == 3);
 		CHECK(String(res["upper_s"]) == "ABC");
 		CHECK(int(res["super_res"]) == 105);
@@ -1037,13 +1037,13 @@ func exercise_debug(x: float, bad_len_arg) -> Dictionary:
 	var a: int = 3
 	var b: int = 4
 	var sum: int = a + b
-	var neg_a: int = -a
-	var v: Vector2 = Vector2(x, x)
+	var neg_a: int = ~a
+	var v: Vector3 = Vector3(x, x, x)
 	v.x = 9.0
 	var vx: float = v.x
 	var s: String = "hi"
 	var u: String = s.to_upper()
-	var c: float = clampf(x, 0.0, 1.0)
+	var c: float = sin(x)
 	var l: int = len(u)
 	var pair = [func(n): return n + 1, func(n): return n + 2, func(n): return (func(m): return m * 2).call(n)]
 	return { "sum": sum + neg_a - neg_a, "vx": vx, "c": c, "l": l, "p0": pair[0].call(1), "p1": pair[1].call(1), "p2": pair[2].call(3) }
@@ -1417,7 +1417,7 @@ class Derived extends Base:
 
 	func test_fn(p1: int, p2: int = 5) -> int:
 		var tmp: int = p1 + p2
-		var shifted: int = p1 << 1
+		var shifted: int = ~p1
 		var dyn = p1 + p2
 		return tmp + shifted + dyn
 )",
@@ -2151,6 +2151,41 @@ func run_all(limit: int, bonus: int = 2 + 3) -> Dictionary:
 	var victim_still_valid: bool = destroy_untyped(victim)
 	var free_intercepted: int = FreeOverrideNode.intercepted_count
 
+	# Exercises shifts, negate, Vector2/Vector2i properties, Array/Vector2 builtins, utilities,
+	# integer JUMP_IF fusion (or), native MethodBind PIC, and type-test/cast caches.
+	var shift_val: int = ((limit << 2) >> 1) + (-limit)
+	var tile := Vector2i(3, 4)
+	tile.x = tile.x + 2
+	tile.y = tile.y - 1
+	var tile_sum: Vector2i = tile + Vector2i(1, 2) - Vector2i(0, 1)
+	var tile_eq_ok: bool = (tile_sum == Vector2i(6, 4)) and (tile_sum != Vector2i(0, 0))
+	var or_branch_hits: int = 0
+	for k: int in range(6):
+		if k < 2 or k >= 5:
+			or_branch_hits += 1
+
+	var util_arr: Array[int] = []
+	var arr_was_empty: bool = util_arr.is_empty()
+	util_arr.append(absi(-7))
+	util_arr.append(mini(9, 4))
+	util_arr.append(maxi(3, 8))
+	util_arr.append(clampi(15, 0, 10))
+	var arr_len: int = util_arr.size()
+	var f_util: float = absf(-2.5) + minf(3.0, 1.5) + maxf(0.5, 2.0) + clampf(5.0, 0.0, 3.0) + lerpf(1.0, 5.0, 0.25)
+	var v_dot_len: float = vec_a.length_squared() + vec_a.dot(vec_b)
+	vec_a.x = -vec_a.x
+	vec_a.y = vec_a.y + 1.0
+	var f_eq_ok: bool = (f_util == 11.0) and (f_util != 0.0)
+
+	var dyn_node: Object = Node2D.new()
+	dyn_node.set_position(Vector2(2.0, 3.0))
+	var dyn_pos: Vector2 = dyn_node.get_position()
+	var is_node2d: bool = dyn_node is Node2D
+	var is_node: bool = dyn_node is Node
+	var is_ctrl: bool = dyn_node is Control
+	var cast_ok: bool = (dyn_node as Node2D) != null and (dyn_node as Control) == null
+	dyn_node.free()
+
 	return {
 		"total": total + bonus,
 		"f_acc": int(round(f_acc * 100.0)),
@@ -2164,6 +2199,15 @@ func run_all(limit: int, bonus: int = 2 + 3) -> Dictionary:
 		"plain_sum": int(round(plain_sum * 100.0)),
 		"victim_still_valid": victim_still_valid,
 		"free_intercepted": free_intercepted,
+		"shift_val": shift_val,
+		"tile_eq_ok": tile_eq_ok,
+		"or_branch_hits": or_branch_hits,
+		"arr_was_empty": arr_was_empty,
+		"arr_len": arr_len,
+		"f_eq_ok": f_eq_ok,
+		"v_dot_len": int(round(v_dot_len * 100.0)),
+		"dyn_pos_sum": int(round((dyn_pos.x + dyn_pos.y) * 100.0)),
+		"type_flags": (1 if is_node2d else 0) + (2 if is_node else 0) + (4 if not is_ctrl else 0) + (8 if cast_ok else 0),
 	}
 )",
 				"res://perf_opts_roundtrip.gd");
@@ -2212,7 +2256,50 @@ func run_all(limit: int, bonus: int = 2 + 3) -> Dictionary:
 			CHECK(int(loaded_res["plain_sum"]) == 1625);
 			CHECK(bool(loaded_res["victim_still_valid"]) == false);
 			CHECK(int(loaded_res["free_intercepted"]) == 0);
+			CHECK(int(loaded_res["shift_val"]) == 10);
+			CHECK(bool(loaded_res["tile_eq_ok"]) == true);
+			CHECK(int(loaded_res["or_branch_hits"]) == 3);
+			CHECK(bool(loaded_res["arr_was_empty"]) == true);
+			CHECK(int(loaded_res["arr_len"]) == 4);
+			CHECK(bool(loaded_res["f_eq_ok"]) == true);
+			CHECK(int(loaded_res["dyn_pos_sum"]) == 500);
+			CHECK(int(loaded_res["type_flags"]) == 15);
 		}
+
+#ifdef DEBUG_ENABLED
+		// Verify DEBUG_ENABLED native calls still acquire OBJ_DEBUG_LOCK so callbacks cannot free the receiver mid-call.
+		{
+			Ref<GDScript> lock_script = compile_source(R"(
+extends RefCounted
+
+class SelfFreeObject extends Object:
+	var notification_count: int = 0
+
+	func _notification(what: int) -> void:
+		if what == 12345:
+			notification_count += 1
+			free()
+
+func exercise_locked_native_call() -> Dictionary:
+	var target: Variant = SelfFreeObject.new()
+	target.notification(12345, false)
+	target.notification(12345, false)
+	var still_valid: bool = is_instance_valid(target)
+	var notification_count: int = target.notification_count if still_valid else 0
+	if still_valid:
+		target.free()
+	return { "still_valid": still_valid, "notification_count": notification_count }
+)",
+					"res://debug_lock_native_call.gd");
+			Ref<RefCounted> lock_inst = memnew(RefCounted);
+			lock_inst->set_script(lock_script);
+			ERR_PRINT_OFF;
+			Dictionary lock_res = lock_inst->call("exercise_locked_native_call");
+			ERR_PRINT_ON;
+			CHECK(bool(lock_res["still_valid"]) == true);
+			CHECK(int(lock_res["notification_count"]) == 2);
+		}
+#endif
 	}
 }
 

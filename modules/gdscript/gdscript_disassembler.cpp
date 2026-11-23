@@ -175,7 +175,93 @@ void GDScriptFunction::disassemble(const Vector<String> &p_code_lines) const {
 				DISASSEMBLE_INLINE_BINARY(OPCODE_VECTOR2_SUB, "vec2_sub");
 				DISASSEMBLE_INLINE_BINARY(OPCODE_VECTOR2_MUL_FLOAT, "vec2_mul_float");
 				DISASSEMBLE_INLINE_BINARY(OPCODE_VECTOR2_MUL, "vec2_mul");
+				DISASSEMBLE_INLINE_BINARY(OPCODE_INT_SHIFT_LEFT, "int_shl");
+				DISASSEMBLE_INLINE_BINARY(OPCODE_INT_SHIFT_RIGHT, "int_shr");
+				DISASSEMBLE_INLINE_BINARY(OPCODE_FLOAT_EQ, "float_eq");
+				DISASSEMBLE_INLINE_BINARY(OPCODE_FLOAT_NE, "float_ne");
+				DISASSEMBLE_INLINE_BINARY(OPCODE_VECTOR2I_ADD, "vec2i_add");
+				DISASSEMBLE_INLINE_BINARY(OPCODE_VECTOR2I_SUB, "vec2i_sub");
+				DISASSEMBLE_INLINE_BINARY(OPCODE_VECTOR2I_EQ, "vec2i_eq");
+				DISASSEMBLE_INLINE_BINARY(OPCODE_VECTOR2I_NE, "vec2i_ne");
 #undef DISASSEMBLE_INLINE_BINARY
+			case OPCODE_INT_NEGATE: {
+				text += "int_neg ";
+				text += DADDR(2);
+				text += " = -";
+				text += DADDR(1);
+				incr += 3;
+			} break;
+			case OPCODE_FLOAT_NEGATE: {
+				text += "float_neg ";
+				text += DADDR(2);
+				text += " = -";
+				text += DADDR(1);
+				incr += 3;
+			} break;
+#define DISASSEMBLE_INLINE_UNARY(m_opcode, m_label) \
+	case m_opcode: { \
+		text += m_label " "; \
+		text += DADDR(2); \
+		text += " = "; \
+		text += DADDR(1); \
+		incr += 3; \
+	} break
+				DISASSEMBLE_INLINE_UNARY(OPCODE_VECTOR2_GET_X, "vec2_get_x");
+				DISASSEMBLE_INLINE_UNARY(OPCODE_VECTOR2_GET_Y, "vec2_get_y");
+				DISASSEMBLE_INLINE_UNARY(OPCODE_VECTOR2I_GET_X, "vec2i_get_x");
+				DISASSEMBLE_INLINE_UNARY(OPCODE_VECTOR2I_GET_Y, "vec2i_get_y");
+				DISASSEMBLE_INLINE_UNARY(OPCODE_ARRAY_SIZE, "array_size");
+				DISASSEMBLE_INLINE_UNARY(OPCODE_ARRAY_IS_EMPTY, "array_is_empty");
+				DISASSEMBLE_INLINE_UNARY(OPCODE_VECTOR2_LENGTH_SQUARED, "vec2_length_squared");
+				DISASSEMBLE_INLINE_UNARY(OPCODE_UTILITY_ABSI, "absi");
+				DISASSEMBLE_INLINE_UNARY(OPCODE_UTILITY_ABSF, "absf");
+#undef DISASSEMBLE_INLINE_UNARY
+#define DISASSEMBLE_INLINE_SET2(m_opcode, m_label) \
+	case m_opcode: { \
+		text += m_label " "; \
+		text += DADDR(1); \
+		text += ", "; \
+		text += DADDR(2); \
+		incr += 3; \
+	} break
+				DISASSEMBLE_INLINE_SET2(OPCODE_VECTOR2_SET_X, "vec2_set_x");
+				DISASSEMBLE_INLINE_SET2(OPCODE_VECTOR2_SET_Y, "vec2_set_y");
+				DISASSEMBLE_INLINE_SET2(OPCODE_VECTOR2I_SET_X, "vec2i_set_x");
+				DISASSEMBLE_INLINE_SET2(OPCODE_VECTOR2I_SET_Y, "vec2i_set_y");
+				DISASSEMBLE_INLINE_SET2(OPCODE_ARRAY_APPEND, "array_append");
+#undef DISASSEMBLE_INLINE_SET2
+#define DISASSEMBLE_INLINE_BIN2(m_opcode, m_label) \
+	case m_opcode: { \
+		text += m_label " "; \
+		text += DADDR(3); \
+		text += " = "; \
+		text += DADDR(1); \
+		text += ", "; \
+		text += DADDR(2); \
+		incr += 4; \
+	} break
+				DISASSEMBLE_INLINE_BIN2(OPCODE_VECTOR2_DOT, "vec2_dot");
+				DISASSEMBLE_INLINE_BIN2(OPCODE_UTILITY_MINI, "mini");
+				DISASSEMBLE_INLINE_BIN2(OPCODE_UTILITY_MAXI, "maxi");
+				DISASSEMBLE_INLINE_BIN2(OPCODE_UTILITY_MINF, "minf");
+				DISASSEMBLE_INLINE_BIN2(OPCODE_UTILITY_MAXF, "maxf");
+#undef DISASSEMBLE_INLINE_BIN2
+#define DISASSEMBLE_INLINE_TERNARY(m_opcode, m_label) \
+	case m_opcode: { \
+		text += m_label " "; \
+		text += DADDR(4); \
+		text += " = "; \
+		text += DADDR(1); \
+		text += ", "; \
+		text += DADDR(2); \
+		text += ", "; \
+		text += DADDR(3); \
+		incr += 5; \
+	} break
+				DISASSEMBLE_INLINE_TERNARY(OPCODE_UTILITY_CLAMPI, "clampi");
+				DISASSEMBLE_INLINE_TERNARY(OPCODE_UTILITY_CLAMPF, "clampf");
+				DISASSEMBLE_INLINE_TERNARY(OPCODE_UTILITY_LERPF, "lerpf");
+#undef DISASSEMBLE_INLINE_TERNARY
 			case OPCODE_TYPE_TEST_BUILTIN: {
 				text += "type test ";
 				text += DADDR(1);

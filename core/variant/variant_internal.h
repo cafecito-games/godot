@@ -236,6 +236,15 @@ public:
 		}
 	}
 
+	_FORCE_INLINE_ static void assign_bool_fast(Variant *p_dst, bool p_value) {
+		if (likely(!Variant::needs_deinit[p_dst->type])) {
+			p_dst->type = Variant::BOOL;
+			p_dst->_data._bool = p_value;
+		} else {
+			*p_dst = p_value;
+		}
+	}
+
 	_FORCE_INLINE_ static void assign_move_fast(Variant *p_dst, Variant &p_src) {
 		if (unlikely(Variant::needs_deinit[p_dst->type])) {
 			p_dst->_clear_internal();

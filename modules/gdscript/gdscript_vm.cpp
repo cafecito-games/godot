@@ -345,6 +345,38 @@ void (*type_init_function_table[])(Variant *) = {
 		&&OPCODE_VECTOR2_SUB, \
 		&&OPCODE_VECTOR2_MUL_FLOAT, \
 		&&OPCODE_VECTOR2_MUL, \
+		&&OPCODE_INT_SHIFT_LEFT, \
+		&&OPCODE_INT_SHIFT_RIGHT, \
+		&&OPCODE_FLOAT_EQ, \
+		&&OPCODE_FLOAT_NE, \
+		&&OPCODE_VECTOR2I_ADD, \
+		&&OPCODE_VECTOR2I_SUB, \
+		&&OPCODE_VECTOR2I_EQ, \
+		&&OPCODE_VECTOR2I_NE, \
+		&&OPCODE_INT_NEGATE, \
+		&&OPCODE_FLOAT_NEGATE, \
+		&&OPCODE_VECTOR2_GET_X, \
+		&&OPCODE_VECTOR2_GET_Y, \
+		&&OPCODE_VECTOR2_SET_X, \
+		&&OPCODE_VECTOR2_SET_Y, \
+		&&OPCODE_VECTOR2I_GET_X, \
+		&&OPCODE_VECTOR2I_GET_Y, \
+		&&OPCODE_VECTOR2I_SET_X, \
+		&&OPCODE_VECTOR2I_SET_Y, \
+		&&OPCODE_ARRAY_SIZE, \
+		&&OPCODE_ARRAY_IS_EMPTY, \
+		&&OPCODE_ARRAY_APPEND, \
+		&&OPCODE_VECTOR2_LENGTH_SQUARED, \
+		&&OPCODE_VECTOR2_DOT, \
+		&&OPCODE_UTILITY_ABSI, \
+		&&OPCODE_UTILITY_ABSF, \
+		&&OPCODE_UTILITY_MINI, \
+		&&OPCODE_UTILITY_MAXI, \
+		&&OPCODE_UTILITY_MINF, \
+		&&OPCODE_UTILITY_MAXF, \
+		&&OPCODE_UTILITY_CLAMPI, \
+		&&OPCODE_UTILITY_CLAMPF, \
+		&&OPCODE_UTILITY_LERPF, \
 		&&OPCODE_TYPE_TEST_BUILTIN, \
 		&&OPCODE_TYPE_TEST_ARRAY, \
 		&&OPCODE_TYPE_TEST_DICTIONARY, \
@@ -525,10 +557,10 @@ void (*type_init_function_table[])(Variant *) = {
 
 #ifdef DEBUG_ENABLED
 #define DISPATCH_OPCODE \
-	last_opcode = _code_ptr[ip]; \
+	last_opcode = code_ptr[ip]; \
 	goto *switch_table_ops[last_opcode]
 #else // !DEBUG_ENABLED
-#define DISPATCH_OPCODE goto *switch_table_ops[_code_ptr[ip]]
+#define DISPATCH_OPCODE goto *switch_table_ops[code_ptr[ip]]
 #endif // DEBUG_ENABLED
 
 #define OPCODE_BREAK goto OPSEXIT
@@ -812,7 +844,9 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 	String err_text;
 
 	GDScriptLanguage::CallLevel call_level;
-	GDScriptLanguage::get_singleton()->enter_function(&call_level, p_instance, this, stack, &ip, &line);
+	GDScriptLanguage::get_singleton()->enter_function(&call_level, p_instance, this, stack, &line);
+
+	const int *const code_ptr = _code_ptr;
 
 #ifdef DEBUG_ENABLED
 #define GD_ERR_BREAK(m_cond) \
@@ -829,7 +863,7 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 #define GET_VARIANT_PTR(m_v, m_code_ofs) \
 	Variant *m_v; \
 	{ \
-		int address = _code_ptr[ip + 1 + (m_code_ofs)]; \
+		int address = code_ptr[ip + 1 + (m_code_ofs)]; \
 		int address_type = (address & ADDR_TYPE_MASK) >> ADDR_BITS; \
 		if (unlikely(address_type < 0 || address_type >= ADDR_TYPE_MAX)) { \
 			err_text = "Bad address type."; \
@@ -856,14 +890,14 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 #define GET_VARIANT_PTR(m_v, m_code_ofs) \
 	Variant *m_v; \
 	{ \
-		int address = _code_ptr[ip + 1 + (m_code_ofs)]; \
+		int address = code_ptr[ip + 1 + (m_code_ofs)]; \
 		m_v = &variant_addresses[(address & ADDR_TYPE_MASK) >> ADDR_BITS][address & ADDR_MASK]; \
 	}
 
 #endif // DEBUG_ENABLED
 
 #define LOAD_INSTRUCTION_ARGS \
-	int instr_arg_count = _code_ptr[ip + 1]; \
+	int instr_arg_count = code_ptr[ip + 1]; \
 	for (int i = 0; i < instr_arg_count; i++) { \
 		GET_VARIANT_PTR(v, i + 1); \
 		instruction_args[i] = v; \
@@ -892,12 +926,12 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 
 #ifdef DEBUG_ENABLED
 	OPCODE_WHILE(ip < _code_size) {
-		int last_opcode = _code_ptr[ip];
+		int last_opcode = code_ptr[ip];
 #else
 	OPCODE_WHILE(true) {
 #endif
 
-		OPCODE_SWITCH(_code_ptr[ip]) {
+		OPCODE_SWITCH(code_ptr[ip]) {
 			OPCODE(OPCODE_OPERATOR) {
 				CHECK_SPACE(7 + OPERATOR_INLINE_CACHE_PTR_WORDS);
 
@@ -1043,7 +1077,256 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 			OPCODE_BINARY_INLINE(OPCODE_VECTOR2_SUB, get_vector2, get_vector2, get_vector2, *VariantInternal::get_vector2(a) - *VariantInternal::get_vector2(b));
 			OPCODE_BINARY_INLINE(OPCODE_VECTOR2_MUL_FLOAT, get_vector2, get_float, get_vector2, *VariantInternal::get_vector2(a) * static_cast<real_t>(*VariantInternal::get_float(b)));
 			OPCODE_BINARY_INLINE(OPCODE_VECTOR2_MUL, get_vector2, get_vector2, get_vector2, *VariantInternal::get_vector2(a) * *VariantInternal::get_vector2(b));
+			OPCODE_BINARY_INLINE(OPCODE_INT_SHIFT_LEFT, get_int, get_int, get_int, *VariantInternal::get_int(a) << *VariantInternal::get_int(b));
+			OPCODE_BINARY_INLINE(OPCODE_INT_SHIFT_RIGHT, get_int, get_int, get_int, *VariantInternal::get_int(a) >> *VariantInternal::get_int(b));
+			OPCODE_BINARY_INLINE(OPCODE_FLOAT_EQ, get_float, get_float, get_bool, *VariantInternal::get_float(a) == *VariantInternal::get_float(b));
+			OPCODE_BINARY_INLINE(OPCODE_FLOAT_NE, get_float, get_float, get_bool, *VariantInternal::get_float(a) != *VariantInternal::get_float(b));
+			OPCODE_BINARY_INLINE(OPCODE_VECTOR2I_ADD, get_vector2i, get_vector2i, get_vector2i, *VariantInternal::get_vector2i(a) + *VariantInternal::get_vector2i(b));
+			OPCODE_BINARY_INLINE(OPCODE_VECTOR2I_SUB, get_vector2i, get_vector2i, get_vector2i, *VariantInternal::get_vector2i(a) - *VariantInternal::get_vector2i(b));
+			OPCODE_BINARY_INLINE(OPCODE_VECTOR2I_EQ, get_vector2i, get_vector2i, get_bool, *VariantInternal::get_vector2i(a) == *VariantInternal::get_vector2i(b));
+			OPCODE_BINARY_INLINE(OPCODE_VECTOR2I_NE, get_vector2i, get_vector2i, get_bool, *VariantInternal::get_vector2i(a) != *VariantInternal::get_vector2i(b));
 #undef OPCODE_BINARY_INLINE
+
+			OPCODE(OPCODE_INT_NEGATE) {
+				CHECK_SPACE(3);
+				GET_VARIANT_PTR(a, 0);
+				GET_VARIANT_PTR(dst, 1);
+				*VariantInternal::get_int(dst) = -*VariantInternal::get_int(a);
+				ip += 3;
+			}
+			DISPATCH_OPCODE;
+
+			OPCODE(OPCODE_FLOAT_NEGATE) {
+				CHECK_SPACE(3);
+				GET_VARIANT_PTR(a, 0);
+				GET_VARIANT_PTR(dst, 1);
+				*VariantInternal::get_float(dst) = -*VariantInternal::get_float(a);
+				ip += 3;
+			}
+			DISPATCH_OPCODE;
+
+			OPCODE(OPCODE_VECTOR2_GET_X) {
+				CHECK_SPACE(3);
+				GET_VARIANT_PTR(src, 0);
+				GET_VARIANT_PTR(dst, 1);
+				*VariantInternal::get_float(dst) = static_cast<double>(VariantInternal::get_vector2(src)->x);
+				ip += 3;
+			}
+			DISPATCH_OPCODE;
+
+			OPCODE(OPCODE_VECTOR2_GET_Y) {
+				CHECK_SPACE(3);
+				GET_VARIANT_PTR(src, 0);
+				GET_VARIANT_PTR(dst, 1);
+				*VariantInternal::get_float(dst) = static_cast<double>(VariantInternal::get_vector2(src)->y);
+				ip += 3;
+			}
+			DISPATCH_OPCODE;
+
+			OPCODE(OPCODE_VECTOR2_SET_X) {
+				CHECK_SPACE(3);
+				GET_VARIANT_PTR(dst, 0);
+				GET_VARIANT_PTR(value, 1);
+				VariantInternal::get_vector2(dst)->x = static_cast<real_t>(*VariantInternal::get_float(value));
+				ip += 3;
+			}
+			DISPATCH_OPCODE;
+
+			OPCODE(OPCODE_VECTOR2_SET_Y) {
+				CHECK_SPACE(3);
+				GET_VARIANT_PTR(dst, 0);
+				GET_VARIANT_PTR(value, 1);
+				VariantInternal::get_vector2(dst)->y = static_cast<real_t>(*VariantInternal::get_float(value));
+				ip += 3;
+			}
+			DISPATCH_OPCODE;
+
+			OPCODE(OPCODE_VECTOR2I_GET_X) {
+				CHECK_SPACE(3);
+				GET_VARIANT_PTR(src, 0);
+				GET_VARIANT_PTR(dst, 1);
+				*VariantInternal::get_int(dst) = static_cast<int64_t>(VariantInternal::get_vector2i(src)->x);
+				ip += 3;
+			}
+			DISPATCH_OPCODE;
+
+			OPCODE(OPCODE_VECTOR2I_GET_Y) {
+				CHECK_SPACE(3);
+				GET_VARIANT_PTR(src, 0);
+				GET_VARIANT_PTR(dst, 1);
+				*VariantInternal::get_int(dst) = static_cast<int64_t>(VariantInternal::get_vector2i(src)->y);
+				ip += 3;
+			}
+			DISPATCH_OPCODE;
+
+			OPCODE(OPCODE_VECTOR2I_SET_X) {
+				CHECK_SPACE(3);
+				GET_VARIANT_PTR(dst, 0);
+				GET_VARIANT_PTR(value, 1);
+				VariantInternal::get_vector2i(dst)->x = static_cast<int32_t>(*VariantInternal::get_int(value));
+				ip += 3;
+			}
+			DISPATCH_OPCODE;
+
+			OPCODE(OPCODE_VECTOR2I_SET_Y) {
+				CHECK_SPACE(3);
+				GET_VARIANT_PTR(dst, 0);
+				GET_VARIANT_PTR(value, 1);
+				VariantInternal::get_vector2i(dst)->y = static_cast<int32_t>(*VariantInternal::get_int(value));
+				ip += 3;
+			}
+			DISPATCH_OPCODE;
+
+			OPCODE(OPCODE_ARRAY_SIZE) {
+				CHECK_SPACE(3);
+				GET_VARIANT_PTR(src, 0);
+				GET_VARIANT_PTR(dst, 1);
+				*VariantInternal::get_int(dst) = static_cast<int64_t>(VariantInternal::get_array(src)->size());
+				ip += 3;
+			}
+			DISPATCH_OPCODE;
+
+			OPCODE(OPCODE_ARRAY_IS_EMPTY) {
+				CHECK_SPACE(3);
+				GET_VARIANT_PTR(src, 0);
+				GET_VARIANT_PTR(dst, 1);
+				*VariantInternal::get_bool(dst) = VariantInternal::get_array(src)->is_empty();
+				ip += 3;
+			}
+			DISPATCH_OPCODE;
+
+			OPCODE(OPCODE_ARRAY_APPEND) {
+				CHECK_SPACE(3);
+				GET_VARIANT_PTR(base, 0);
+				GET_VARIANT_PTR(value, 1);
+				VariantInternal::get_array(base)->append(*value);
+				ip += 3;
+			}
+			DISPATCH_OPCODE;
+
+			OPCODE(OPCODE_VECTOR2_LENGTH_SQUARED) {
+				CHECK_SPACE(3);
+				GET_VARIANT_PTR(src, 0);
+				GET_VARIANT_PTR(dst, 1);
+				*VariantInternal::get_float(dst) = static_cast<double>(VariantInternal::get_vector2(src)->length_squared());
+				ip += 3;
+			}
+			DISPATCH_OPCODE;
+
+			OPCODE(OPCODE_VECTOR2_DOT) {
+				CHECK_SPACE(4);
+				GET_VARIANT_PTR(a, 0);
+				GET_VARIANT_PTR(b, 1);
+				GET_VARIANT_PTR(dst, 2);
+				*VariantInternal::get_float(dst) = static_cast<double>(VariantInternal::get_vector2(a)->dot(*VariantInternal::get_vector2(b)));
+				ip += 4;
+			}
+			DISPATCH_OPCODE;
+
+			OPCODE(OPCODE_UTILITY_ABSI) {
+				CHECK_SPACE(3);
+				GET_VARIANT_PTR(a, 0);
+				GET_VARIANT_PTR(dst, 1);
+				*VariantInternal::get_int(dst) = Math::abs(*VariantInternal::get_int(a));
+				ip += 3;
+			}
+			DISPATCH_OPCODE;
+
+			OPCODE(OPCODE_UTILITY_ABSF) {
+				CHECK_SPACE(3);
+				GET_VARIANT_PTR(a, 0);
+				GET_VARIANT_PTR(dst, 1);
+				*VariantInternal::get_float(dst) = Math::abs(*VariantInternal::get_float(a));
+				ip += 3;
+			}
+			DISPATCH_OPCODE;
+
+			OPCODE(OPCODE_UTILITY_MINI) {
+				CHECK_SPACE(4);
+				GET_VARIANT_PTR(a, 0);
+				GET_VARIANT_PTR(b, 1);
+				GET_VARIANT_PTR(dst, 2);
+				const int64_t left = *VariantInternal::get_int(a);
+				const int64_t right = *VariantInternal::get_int(b);
+				*VariantInternal::get_int(dst) = MIN(left, right);
+				ip += 4;
+			}
+			DISPATCH_OPCODE;
+
+			OPCODE(OPCODE_UTILITY_MAXI) {
+				CHECK_SPACE(4);
+				GET_VARIANT_PTR(a, 0);
+				GET_VARIANT_PTR(b, 1);
+				GET_VARIANT_PTR(dst, 2);
+				const int64_t left = *VariantInternal::get_int(a);
+				const int64_t right = *VariantInternal::get_int(b);
+				*VariantInternal::get_int(dst) = MAX(left, right);
+				ip += 4;
+			}
+			DISPATCH_OPCODE;
+
+			OPCODE(OPCODE_UTILITY_MINF) {
+				CHECK_SPACE(4);
+				GET_VARIANT_PTR(a, 0);
+				GET_VARIANT_PTR(b, 1);
+				GET_VARIANT_PTR(dst, 2);
+				const double left = *VariantInternal::get_float(a);
+				const double right = *VariantInternal::get_float(b);
+				*VariantInternal::get_float(dst) = MIN(left, right);
+				ip += 4;
+			}
+			DISPATCH_OPCODE;
+
+			OPCODE(OPCODE_UTILITY_MAXF) {
+				CHECK_SPACE(4);
+				GET_VARIANT_PTR(a, 0);
+				GET_VARIANT_PTR(b, 1);
+				GET_VARIANT_PTR(dst, 2);
+				const double left = *VariantInternal::get_float(a);
+				const double right = *VariantInternal::get_float(b);
+				*VariantInternal::get_float(dst) = MAX(left, right);
+				ip += 4;
+			}
+			DISPATCH_OPCODE;
+
+			OPCODE(OPCODE_UTILITY_CLAMPI) {
+				CHECK_SPACE(5);
+				GET_VARIANT_PTR(value, 0);
+				GET_VARIANT_PTR(minimum, 1);
+				GET_VARIANT_PTR(maximum, 2);
+				GET_VARIANT_PTR(dst, 3);
+				const int64_t v = *VariantInternal::get_int(value);
+				const int64_t lo = *VariantInternal::get_int(minimum);
+				const int64_t hi = *VariantInternal::get_int(maximum);
+				*VariantInternal::get_int(dst) = CLAMP(v, lo, hi);
+				ip += 5;
+			}
+			DISPATCH_OPCODE;
+
+			OPCODE(OPCODE_UTILITY_CLAMPF) {
+				CHECK_SPACE(5);
+				GET_VARIANT_PTR(value, 0);
+				GET_VARIANT_PTR(minimum, 1);
+				GET_VARIANT_PTR(maximum, 2);
+				GET_VARIANT_PTR(dst, 3);
+				const double v = *VariantInternal::get_float(value);
+				const double lo = *VariantInternal::get_float(minimum);
+				const double hi = *VariantInternal::get_float(maximum);
+				*VariantInternal::get_float(dst) = CLAMP(v, lo, hi);
+				ip += 5;
+			}
+			DISPATCH_OPCODE;
+
+			OPCODE(OPCODE_UTILITY_LERPF) {
+				CHECK_SPACE(5);
+				GET_VARIANT_PTR(from, 0);
+				GET_VARIANT_PTR(to, 1);
+				GET_VARIANT_PTR(weight, 2);
+				GET_VARIANT_PTR(dst, 3);
+				*VariantInternal::get_float(dst) = Math::lerp(*VariantInternal::get_float(from), *VariantInternal::get_float(to), *VariantInternal::get_float(weight));
+				ip += 5;
+			}
+			DISPATCH_OPCODE;
 
 			OPCODE(OPCODE_TYPE_TEST_BUILTIN) {
 				CHECK_SPACE(4);
@@ -1051,10 +1334,10 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 				GET_VARIANT_PTR(dst, 0);
 				GET_VARIANT_PTR(value, 1);
 
-				Variant::Type builtin_type = (Variant::Type)_code_ptr[ip + 3];
+				Variant::Type builtin_type = (Variant::Type)code_ptr[ip + 3];
 				GD_ERR_BREAK(builtin_type < 0 || builtin_type >= Variant::VARIANT_MAX);
 
-				*dst = value->get_type() == builtin_type;
+				VariantInternal::assign_bool_fast(dst, value->get_type() == builtin_type);
 				ip += 4;
 			}
 			DISPATCH_OPCODE;
@@ -1118,18 +1401,24 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 				GET_VARIANT_PTR(dst, 0);
 				GET_VARIANT_PTR(value, 1);
 
-				int native_type_idx = _code_ptr[ip + 3];
+				int native_type_idx = code_ptr[ip + 3];
 				GD_ERR_BREAK(native_type_idx < 0 || native_type_idx >= _global_names_count);
-				const StringName native_type = _global_names_ptr[native_type_idx];
+				const StringName &native_type = _global_names_ptr[native_type_idx];
 
-				bool was_freed = false;
-				Object *object = value->get_validated_object_with_check(was_freed);
-				if (was_freed) {
-					err_text = "Left operand of 'is' is a previously freed instance.";
-					OPCODE_BREAK;
+				bool result = false;
+				if (value->get_type() == Variant::OBJECT) {
+					bool was_freed = false;
+					Object *object = value->get_validated_object_with_check(was_freed);
+					if (unlikely(was_freed)) {
+						err_text = "Left operand of 'is' is a previously freed instance.";
+						OPCODE_BREAK;
+					}
+					if (likely(object != nullptr)) {
+						result = _test_native_type_cached(native_type_idx, object, native_type);
+					}
 				}
 
-				*dst = object && ClassDB::is_parent_class(object->get_class_name(), native_type);
+				VariantInternal::assign_bool_fast(dst, result);
 				ip += 4;
 			}
 			DISPATCH_OPCODE;
@@ -1144,26 +1433,42 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 				Script *script_type = Object::cast_to<Script>(type->operator Object *());
 				GD_ERR_BREAK(!script_type);
 
-				bool was_freed = false;
-				Object *object = value->get_validated_object_with_check(was_freed);
-				if (was_freed) {
-					err_text = "Left operand of 'is' is a previously freed instance.";
-					OPCODE_BREAK;
-				}
-
 				bool result = false;
-				if (object && object->get_script_instance()) {
-					Script *script_ptr = object->get_script_instance()->get_script().ptr();
-					while (script_ptr) {
-						if (script_ptr == script_type) {
-							result = true;
-							break;
+				if (value->get_type() == Variant::OBJECT) {
+					bool was_freed = false;
+					Object *object = value->get_validated_object_with_check(was_freed);
+					if (unlikely(was_freed)) {
+						err_text = "Left operand of 'is' is a previously freed instance.";
+						OPCODE_BREAK;
+					}
+
+					if (object != nullptr) {
+						ScriptInstance *script_inst = object->get_script_instance();
+						if (script_inst != nullptr) {
+							if (likely(script_inst->get_language() == GDScriptLanguage::get_singleton() && !script_inst->is_placeholder())) {
+								const GDScript *script_cursor = static_cast<const GDScriptInstance *>(script_inst)->script.ptr();
+								while (script_cursor != nullptr) {
+									if (script_cursor == script_type) {
+										result = true;
+										break;
+									}
+									script_cursor = script_cursor->base.ptr();
+								}
+							} else {
+								Script *script_ptr = script_inst->get_script().ptr();
+								while (script_ptr) {
+									if (script_ptr == script_type) {
+										result = true;
+										break;
+									}
+									script_ptr = script_ptr->get_base_script().ptr();
+								}
+							}
 						}
-						script_ptr = script_ptr->get_base_script().ptr();
 					}
 				}
 
-				*dst = result;
+				VariantInternal::assign_bool_fast(dst, result);
 				ip += 4;
 			}
 			DISPATCH_OPCODE;
@@ -2080,12 +2385,12 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 					OPCODE_BREAK;
 				}
 #endif
-				Object *src_obj = src->operator Object *();
+				Object *src_obj = (src->get_type() == Variant::OBJECT) ? src->operator Object *() : nullptr;
 
-				if (src_obj && !ClassDB::is_parent_class(src_obj->get_class_name(), nc->get_name())) {
+				if (src_obj && src_obj->get_class_name() != nc->get_name() && !ClassDB::is_parent_class(src_obj->get_class_name(), nc->get_name())) {
 					*dst = Variant(); // invalid cast, assign NULL
 				} else {
-					*dst = *src;
+					VariantInternal::assign_fast(dst, src);
 				}
 
 				ip += 4;
@@ -2115,18 +2420,30 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 
 				bool valid = false;
 
-				if (src->get_type() != Variant::NIL && src->operator Object *() != nullptr) {
-					ScriptInstance *scr_inst = src->operator Object *()->get_script_instance();
-
-					if (scr_inst) {
-						Script *src_type = src->operator Object *()->get_script_instance()->get_script().ptr();
-
-						while (src_type) {
-							if (src_type == base_type) {
-								valid = true;
-								break;
+				if (src->get_type() == Variant::OBJECT) {
+					Object *src_obj = src->operator Object *();
+					if (src_obj != nullptr) {
+						ScriptInstance *scr_inst = src_obj->get_script_instance();
+						if (scr_inst != nullptr) {
+							if (likely(scr_inst->get_language() == GDScriptLanguage::get_singleton() && !scr_inst->is_placeholder())) {
+								const GDScript *script_cursor = static_cast<const GDScriptInstance *>(scr_inst)->script.ptr();
+								while (script_cursor != nullptr) {
+									if (script_cursor == base_type) {
+										valid = true;
+										break;
+									}
+									script_cursor = script_cursor->base.ptr();
+								}
+							} else {
+								Script *src_type = scr_inst->get_script().ptr();
+								while (src_type) {
+									if (src_type == base_type) {
+										valid = true;
+										break;
+									}
+									src_type = src_type->get_base_script().ptr();
+								}
 							}
-							src_type = src_type->get_base_script().ptr();
 						}
 					}
 				}
@@ -2343,9 +2660,16 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 
 				Variant temp_ret;
 				Callable::CallError err;
+#ifndef DEBUG_ENABLED
+				Object *native_target_obj = nullptr;
+				const GDScript *native_script_key = nullptr;
+#endif
 				GDScriptInstance *gds_target_instance = nullptr;
 				if (base == &stack[ADDR_STACK_SELF] && p_instance != nullptr) {
 					gds_target_instance = p_instance;
+#ifndef DEBUG_ENABLED
+					native_target_obj = p_instance->owner;
+#endif
 				} else if (base->get_type() == Variant::OBJECT) {
 #ifdef DEBUG_ENABLED
 					Object *target_obj = base_obj;
@@ -2354,17 +2678,31 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 #endif
 					if (likely(target_obj != nullptr)) {
 						ScriptInstance *script_inst = target_obj->get_script_instance();
-						if (likely(script_inst != nullptr && script_inst->get_language() == GDScriptLanguage::get_singleton() && !script_inst->is_placeholder())) {
-							gds_target_instance = static_cast<GDScriptInstance *>(script_inst);
+						if (script_inst != nullptr) {
+							if (likely(script_inst->get_language() == GDScriptLanguage::get_singleton() && !script_inst->is_placeholder())) {
+								gds_target_instance = static_cast<GDScriptInstance *>(script_inst);
+#ifndef DEBUG_ENABLED
+								native_target_obj = target_obj;
+#endif
+							}
+#ifndef DEBUG_ENABLED
+						} else {
+							native_target_obj = target_obj;
+#endif
 						}
 					}
 				}
 
 				GDScriptFunction *cached_gdscript_func = nullptr;
-				if (likely(gds_target_instance != nullptr)) {
+				if (gds_target_instance != nullptr) {
 					const GDScript *target_script = gds_target_instance->script.ptr();
 					if (likely(target_script != nullptr && target_script->valid)) {
 						cached_gdscript_func = _resolve_gdscript_call_cached(methodname_idx, target_script);
+#ifndef DEBUG_ENABLED
+						native_script_key = target_script;
+					} else {
+						native_target_obj = nullptr;
+#endif
 					}
 				}
 
@@ -2373,6 +2711,9 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 					if (likely(cached_gdscript_func != nullptr)) {
 						Variant call_result = cached_gdscript_func->call(gds_target_instance, (const Variant **)argptrs, argc, err);
 						VariantInternal::assign_move_fast(ret, call_result);
+#ifndef DEBUG_ENABLED
+					} else if (native_target_obj != nullptr && _try_call_native_cached(methodname_idx, native_target_obj, native_script_key, base, argptrs, argc, ret, temp_ret, err)) {
+#endif
 					} else {
 						base->callp(*methodname, (const Variant **)argptrs, argc, temp_ret, err);
 #ifdef DEBUG_ENABLED
@@ -2415,6 +2756,9 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 				} else {
 					if (likely(cached_gdscript_func != nullptr)) {
 						temp_ret = cached_gdscript_func->call(gds_target_instance, (const Variant **)argptrs, argc, err);
+#ifndef DEBUG_ENABLED
+					} else if (native_target_obj != nullptr && _try_call_native_cached(methodname_idx, native_target_obj, native_script_key, base, argptrs, argc, nullptr, temp_ret, err)) {
+#endif
 					} else {
 						base->callp(*methodname, (const Variant **)argptrs, argc, temp_ret, err);
 					}

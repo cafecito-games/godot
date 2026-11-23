@@ -362,6 +362,43 @@ private:
 
 	mutable std::atomic<CallInlineCache *> _call_cache{ nullptr };
 
+#ifndef DEBUG_ENABLED
+	struct NativeCallCacheSlot {
+		static constexpr int MAX_VALIDATED_ARGS = 4;
+		const void *gdtype_key = nullptr;
+		const GDScript *script_key = nullptr;
+		MethodBind *method = nullptr;
+		uint8_t arg_count = 0;
+		bool can_validated_call = false;
+		bool has_return = false;
+		Variant::Type return_type = Variant::NIL;
+		Variant::Type arg_types[MAX_VALIDATED_ARGS] = {};
+	};
+
+	struct NativeCallInlineCache {
+		static constexpr uint32_t MAX_SLOTS = 4;
+		static constexpr uint32_t LOCKED_STATE = 0xFF;
+		std::atomic<uint64_t> epoch_and_count{ 0 };
+		NativeCallCacheSlot slots[MAX_SLOTS];
+	};
+
+	mutable std::atomic<NativeCallInlineCache *> _native_call_cache{ nullptr };
+#endif
+
+	struct TypeTestCacheSlot {
+		const void *gdtype_key = nullptr;
+		bool is_match = false;
+	};
+
+	struct TypeTestInlineCache {
+		static constexpr uint32_t MAX_SLOTS = 4;
+		static constexpr uint32_t LOCKED_STATE = 0xFF;
+		std::atomic<uint64_t> epoch_and_count{ 0 };
+		TypeTestCacheSlot slots[MAX_SLOTS];
+	};
+
+	mutable std::atomic<TypeTestInlineCache *> _type_test_cache{ nullptr };
+
 	struct MemberCacheSlot {
 		enum Kind : uint8_t {
 			NONE = 0,
@@ -393,8 +430,59 @@ private:
 
 	static GDScriptFunction *_find_gdscript_function_in_chain(const GDScript *p_script, const StringName &p_name);
 	GDScriptFunction *_populate_call_cache(int p_methodname_idx, const GDScript *p_target_script) const;
+#ifndef DEBUG_ENABLED
+	const NativeCallCacheSlot *_populate_native_call_cache(int p_methodname_idx, const Object *p_object, const GDScript *p_script_key) const;
+	_NO_INLINE_ bool _try_call_native_cached(int p_methodname_idx, Object *p_target_obj, const GDScript *p_script_key, const Variant *p_base, Variant **p_args, int p_argc, Variant *p_ret_slot, Variant &r_temp_ret, Callable::CallError &r_err) const;
+#endif
+	bool _populate_type_test_cache(int p_native_type_idx, const Object *p_object, const StringName &p_native_type) const;
 	const MemberCacheSlot *_populate_gdscript_member_cache(int p_name_idx, const GDScript *p_target_script) const;
 	const MemberCacheSlot *_populate_native_member_cache(int p_name_idx, const Object *p_object) const;
+
+#ifndef DEBUG_ENABLED
+	_FORCE_INLINE_ const NativeCallCacheSlot *_lookup_native_call_cache(int p_methodname_idx, const void *p_gdtype_key, const GDScript *p_script_key) const {
+		NativeCallInlineCache *cache_array = _native_call_cache.load(std::memory_order_acquire);
+		if (likely(cache_array != nullptr)) {
+			const NativeCallInlineCache &entry = cache_array[p_methodname_idx];
+			const uint64_t current_epoch = _script_clear_epoch.load(std::memory_order_relaxed);
+			const uint64_t meta = entry.epoch_and_count.load(std::memory_order_acquire);
+			if (likely((meta >> 8) == current_epoch)) {
+				const uint32_t count = static_cast<uint32_t>(meta & 0xFF);
+				if (likely(count <= NativeCallInlineCache::MAX_SLOTS)) {
+					for (uint32_t slot_index = 0; slot_index < count; slot_index++) {
+						if (likely(entry.slots[slot_index].gdtype_key == p_gdtype_key && entry.slots[slot_index].script_key == p_script_key)) {
+							return &entry.slots[slot_index];
+						}
+					}
+				}
+			}
+		}
+		return nullptr;
+	}
+#endif
+
+	_FORCE_INLINE_ bool _test_native_type_cached(int p_native_type_idx, const Object *p_object, const StringName &p_native_type) const {
+		if (likely(p_object->get_class_name() == p_native_type)) {
+			return true;
+		}
+		const void *gdtype_key = &p_object->get_gdtype();
+		TypeTestInlineCache *cache_array = _type_test_cache.load(std::memory_order_acquire);
+		if (likely(cache_array != nullptr)) {
+			const TypeTestInlineCache &entry = cache_array[p_native_type_idx];
+			const uint64_t current_epoch = _script_clear_epoch.load(std::memory_order_relaxed);
+			const uint64_t meta = entry.epoch_and_count.load(std::memory_order_acquire);
+			if (likely((meta >> 8) == current_epoch)) {
+				const uint32_t count = static_cast<uint32_t>(meta & 0xFF);
+				if (likely(count <= TypeTestInlineCache::MAX_SLOTS)) {
+					for (uint32_t slot_index = 0; slot_index < count; slot_index++) {
+						if (likely(entry.slots[slot_index].gdtype_key == gdtype_key)) {
+							return entry.slots[slot_index].is_match;
+						}
+					}
+				}
+			}
+		}
+		return _populate_type_test_cache(p_native_type_idx, p_object, p_native_type);
+	}
 
 	_FORCE_INLINE_ const MemberCacheSlot *_lookup_member_cache(int p_name_idx, const void *p_key) const {
 		MemberInlineCache *cache_array = _member_cache.load(std::memory_order_acquire);

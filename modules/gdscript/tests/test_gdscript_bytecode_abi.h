@@ -213,15 +213,15 @@ func exercise_all_fixups(untyped_left, untyped_right, runtime_float: float) -> D
 	var typed_left: int = 10
 	var typed_right: int = 5
 	var validated_sum: int = typed_left + typed_right
-	var validated_shift: int = typed_left << 1
-	var validated_neg: int = -typed_left
+	var validated_shift: int = typed_left ** 2
+	var validated_neg: int = ~typed_left
 
 	# Unvalidated dynamic OPCODE_OPERATOR (binary + unary).
 	var dynamic_sum = untyped_left + untyped_right
 	var dynamic_neg = -untyped_left
 
 	# Validated setters and getters on builtin member.
-	var vector_value: Vector2 = Vector2(3.0, 4.0)
+	var vector_value: Vector3 = Vector3(3.0, 4.0, 5.0)
 	vector_value.x = 6.0
 	var vector_x: float = vector_value.x
 
@@ -240,7 +240,7 @@ func exercise_all_fixups(untyped_left, untyped_right, runtime_float: float) -> D
 	var upper_text: String = text_value.to_upper()
 
 	# Validated utility and GDScript utility (non-constant inputs to avoid constant folding).
-	var clamped_value: float = clampf(runtime_float, 0.0, 1.0)
+	var clamped_value: float = sin(runtime_float)
 	var text_length: int = len(upper_text)
 
 	# Validated and non-validated MethodBinds (instance and native static).
@@ -413,14 +413,14 @@ func exercise_all_fixups(untyped_left, untyped_right, runtime_float: float) -> D
 			REQUIRE(result_variant.get_type() == Variant::DICTIONARY);
 			Dictionary result = result_variant;
 			CHECK(int(result["validated_sum"]) == 15);
-			CHECK(int(result["validated_neg"]) == -10);
+			CHECK(int(result["validated_neg"]) == -11);
 			CHECK(int(result["dynamic_sum"]) == 42);
 			CHECK(int(result["dynamic_neg"]) == -20);
 			CHECK(double(result["vector_x"]) == doctest::Approx(6.0));
 			CHECK(int(result["indexed_value"]) == 42);
 			CHECK(int(result["keyed_value"]) == 99);
 			CHECK(String(result["upper_text"]) == "GODOT");
-			CHECK(double(result["clamped_value"]) == doctest::Approx(1.0));
+			CHECK(double(result["clamped_value"]) == doctest::Approx(Math::sin(1.5)));
 			CHECK(int(result["text_length"]) == 5);
 			CHECK(String(result["object_class"]) == "RefCounted");
 			CHECK(bool(result["missing_file"]) == false);
@@ -436,7 +436,7 @@ func exercise_all_fixups(untyped_left, untyped_right, runtime_float: float) -> D
 		Dictionary float_result = float_result_variant;
 		CHECK(double(float_result["dynamic_sum"]) == doctest::Approx(4.0));
 		CHECK(double(float_result["dynamic_neg"]) == doctest::Approx(-1.5));
-		CHECK(double(float_result["clamped_value"]) == doctest::Approx(0.25));
+		CHECK(double(float_result["clamped_value"]) == doctest::Approx(Math::sin(0.25)));
 
 		// Verify detached export compilation records placeholder index 0 with the exact autoload name in global_stores.
 		const String detached_script_path = TestUtils::get_temp_path("test_bytecode_abi_detached_autoload.gd");
