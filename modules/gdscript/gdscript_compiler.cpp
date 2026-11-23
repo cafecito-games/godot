@@ -56,19 +56,23 @@ bool GDScriptCompiler::_is_class_member_property(CodeGen &codegen, const StringN
 	return _is_class_member_property(codegen.script, p_name);
 }
 
-bool GDScriptCompiler::_is_class_member_property(GDScript *owner, const StringName &p_name) {
-	GDScript *scr = owner;
-	GDScriptNativeClass *nc = nullptr;
-	while (scr) {
-		if (scr->native.is_valid()) {
-			nc = scr->native.ptr();
+StringName GDScriptCompiler::_get_native_class_name(GDScript *p_owner) {
+	GDScript *script_cursor = p_owner;
+	GDScriptNativeClass *native_class = nullptr;
+	while (script_cursor) {
+		if (script_cursor->native.is_valid()) {
+			native_class = script_cursor->native.ptr();
 		}
-		scr = scr->base.ptr();
+		script_cursor = script_cursor->base.ptr();
 	}
+	return native_class ? native_class->get_name() : StringName();
+}
 
-	ERR_FAIL_NULL_V(nc, false);
+bool GDScriptCompiler::_is_class_member_property(GDScript *owner, const StringName &p_name) {
+	StringName native_class_name = _get_native_class_name(owner);
+	ERR_FAIL_COND_V(native_class_name == StringName(), false);
 
-	return ClassDB::has_property(nc->get_name(), p_name);
+	return ClassDB::has_property(native_class_name, p_name);
 }
 
 bool GDScriptCompiler::_is_local_or_parameter(CodeGen &codegen, const StringName &p_name) {
@@ -254,6 +258,48 @@ static bool _can_use_validate_call(const MethodBind *p_method, const Vector<GDSc
 	return true;
 }
 
+void GDScriptCompiler::_write_get_class_member_property(CodeGen &codegen, const GDScriptCodeGenerator::Address &p_target, const StringName &p_name) {
+	StringName native_class_name = _get_native_class_name(codegen.script);
+	if (native_class_name != StringName()) {
+		bool valid_index = false;
+		int property_index = ClassDB::get_property_index(native_class_name, p_name, &valid_index);
+		if (valid_index && property_index < 0) {
+			StringName getter_name = ClassDB::get_property_getter(native_class_name, p_name);
+			if (getter_name != StringName()) {
+				MethodBind *getter = ClassDB::get_method(native_class_name, getter_name);
+				Vector<GDScriptCodeGenerator::Address> arguments;
+				if (getter && !getter->is_static() && getter->has_return() && _can_use_validate_call(getter, arguments)) {
+					GDScriptCodeGenerator::Address self(GDScriptCodeGenerator::Address::SELF);
+					codegen.generator->write_call_method_bind_validated(p_target, self, getter, arguments);
+					return;
+				}
+			}
+		}
+	}
+	codegen.generator->write_get_member(p_target, p_name);
+}
+
+void GDScriptCompiler::_write_set_class_member_property(CodeGen &codegen, const GDScriptCodeGenerator::Address &p_value, const StringName &p_name) {
+	StringName native_class_name = _get_native_class_name(codegen.script);
+	if (native_class_name != StringName()) {
+		bool valid_index = false;
+		int property_index = ClassDB::get_property_index(native_class_name, p_name, &valid_index);
+		if (valid_index && property_index < 0) {
+			StringName setter_name = ClassDB::get_property_setter(native_class_name, p_name);
+			if (setter_name != StringName()) {
+				MethodBind *setter = ClassDB::get_method(native_class_name, setter_name);
+				Vector<GDScriptCodeGenerator::Address> arguments = { p_value };
+				if (setter && !setter->is_static() && !setter->has_return() && _can_use_validate_call(setter, arguments)) {
+					GDScriptCodeGenerator::Address self(GDScriptCodeGenerator::Address::SELF);
+					codegen.generator->write_call_method_bind_validated(GDScriptCodeGenerator::Address(), self, setter, arguments);
+					return;
+				}
+			}
+		}
+	}
+	codegen.generator->write_set_member(p_value, p_name);
+}
+
 GDScriptCodeGenerator::Address GDScriptCompiler::_parse_expression(CodeGen &codegen, Error &r_error, const GDScriptParser::ExpressionNode *p_expression, bool p_root, bool p_initializer) {
 	if (p_expression->is_constant && !(p_expression->get_datatype().is_meta_type && p_expression->get_datatype().kind == GDScriptParser::DataType::CLASS)) {
 		return codegen.add_constant(p_expression->reduced_value);
@@ -295,7 +341,7 @@ GDScriptCodeGenerator::Address GDScriptCompiler::_parse_expression(CodeGen &code
 					if (_is_class_member_property(codegen, identifier)) {
 						// Get property.
 						GDScriptCodeGenerator::Address temp = codegen.add_temporary(_gdtype_from_datatype(p_expression->get_datatype(), codegen.script));
-						gen->write_get_member(temp, identifier);
+						_write_get_class_member_property(codegen, temp, identifier);
 						return temp;
 					}
 
@@ -1219,7 +1265,7 @@ GDScriptCodeGenerator::Address GDScriptCompiler::_parse_expression(CodeGen &code
 						if (!known_type) {
 							gen->write_jump_if_shared(assigned);
 						}
-						gen->write_set_member(assigned, assign_class_member_property);
+						_write_set_class_member_property(codegen, assigned, assign_class_member_property);
 						if (!known_type) {
 							gen->write_end_jump_if_shared();
 						}
@@ -1274,13 +1320,13 @@ GDScriptCodeGenerator::Address GDScriptCompiler::_parse_expression(CodeGen &code
 				if (has_operation) {
 					GDScriptCodeGenerator::Address op_result = codegen.add_temporary(_gdtype_from_datatype(assignment->get_datatype(), codegen.script));
 					GDScriptCodeGenerator::Address member = codegen.add_temporary(_gdtype_from_datatype(assignment->assignee->get_datatype(), codegen.script));
-					gen->write_get_member(member, name);
+					_write_get_class_member_property(codegen, member, name);
 					gen->write_binary_operator(op_result, assignment->variant_op, member, assigned_value);
 					gen->pop_temporary(); // Pop member temp.
 					to_assign = op_result;
 				}
 
-				gen->write_set_member(to_assign, name);
+				_write_set_class_member_property(codegen, to_assign, name);
 
 				if (to_assign.mode == GDScriptCodeGenerator::Address::TEMPORARY) {
 					gen->pop_temporary(); // Pop the assigned expression or the temp result if it has operation.

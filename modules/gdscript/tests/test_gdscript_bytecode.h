@@ -1037,6 +1037,7 @@ func exercise_debug(x: float, bad_len_arg) -> Dictionary:
 	var a: int = 3
 	var b: int = 4
 	var sum: int = a + b
+	var neg_a: int = -a
 	var v: Vector2 = Vector2(x, x)
 	v.x = 9.0
 	var vx: float = v.x
@@ -1045,7 +1046,7 @@ func exercise_debug(x: float, bad_len_arg) -> Dictionary:
 	var c: float = clampf(x, 0.0, 1.0)
 	var l: int = len(u)
 	var pair = [func(n): return n + 1, func(n): return n + 2, func(n): return (func(m): return m * 2).call(n)]
-	return { "sum": sum, "vx": vx, "c": c, "l": l, "p0": pair[0].call(1), "p1": pair[1].call(1), "p2": pair[2].call(3) }
+	return { "sum": sum + neg_a - neg_a, "vx": vx, "c": c, "l": l, "p0": pair[0].call(1), "p1": pair[1].call(1), "p2": pair[2].call(3) }
 
 func trigger_gds_utility_error(bad_arg):
 	return len(bad_arg)
@@ -1416,8 +1417,9 @@ class Derived extends Base:
 
 	func test_fn(p1: int, p2: int = 5) -> int:
 		var tmp: int = p1 + p2
+		var shifted: int = p1 << 1
 		var dyn = p1 + p2
-		return tmp + dyn
+		return tmp + shifted + dyn
 )",
 				"res://verifier_hardening.gd");
 
@@ -2041,6 +2043,154 @@ func evaluate(base_value: int) -> Dictionary:
 			with_trailing.push_back(0xAD);
 			Ref<GDScript> target = memnew(GDScript);
 			CHECK(GDScriptBytecodeLoader::load_full(with_trailing, target, "res://zstd_trailing.gd", &resolver) == ERR_FILE_CORRUPT);
+		}
+	}
+
+	TEST_CASE("Inline scalar/Vector2 opcodes, fused compare-jumps, peephole assign folding, and call/member inline caches round-trip cleanly") {
+		Ref<GDScript> script = compile_source(R"(
+extends RefCounted
+
+class ChainNode extends RefCounted:
+	var value: int = 0
+	var next_node: ChainNode = null
+	var _backed: int = 0
+	var prop: int:
+		get:
+			return _backed
+		set(new_val):
+			_backed = new_val * 2
+
+	func eval(x: int) -> int:
+		return x + value
+
+class ChainDouble extends ChainNode:
+	func eval(x: int) -> int:
+		return x * 2 + value
+
+class ChainTriple extends ChainNode:
+	func eval(x: int) -> int:
+		return x * 3 + value
+
+class NativeHolder extends Node2D:
+	func update_self_props() -> Vector2:
+		position = Vector2(3.0, 4.0)
+		rotation = 0.5
+		position += Vector2(1.0, 2.0)
+		return Vector2(position.x + rotation, position.y)
+
+func run_all(limit: int, bonus: int = 2 + 3) -> Dictionary:
+	# Exercises inline int/float/Vector2 ops, fused compare-and-jump, and redundant-assign folding.
+	var total: int = 0
+	var index: int = 0
+	while index < limit:
+		var masked: int = (index * 3 + 1) & 15
+		if (masked ^ 1) != 0 and masked <= 12:
+			total = total + masked
+		index += 1
+
+	var flt: float = 1.5
+	var step: float = 0.25
+	var f_acc: float = 0.0
+	for i: int in range(6):
+		flt = (flt + step) * 1.1 - 0.05
+		if flt > 2.0:
+			f_acc += flt / 2.0
+		else:
+			f_acc += flt
+
+	var vec_a := Vector2(1.0, 2.0)
+	var vec_b := Vector2(0.5, -0.25)
+	vec_a = (vec_a + vec_b) * 2.0 - vec_b * Vector2(2.0, 4.0)
+
+	# Exercises polymorphic call cache, direct member cache, accessor cache, and src == dst aliasing.
+	var n1 := ChainNode.new()
+	n1.value = 10
+	n1.prop = 7
+	var n2 := ChainDouble.new()
+	n2.value = 20
+	n1.next_node = n2
+	var n3 := ChainTriple.new()
+	n3.value = 30
+	n2.next_node = n3
+
+	var poly: Array[ChainNode] = [n1, n2, n3]
+	var poly_sum: int = 0
+	for item: ChainNode in poly:
+		poly_sum += item.eval(4)
+
+	var cursor: ChainNode = n1
+	var chain_sum: int = 0
+	while cursor != null:
+		chain_sum += cursor.value
+		cursor = cursor.next_node
+
+	# Exercises self native property validated MethodBind + cross-object native property member cache.
+	var holder := NativeHolder.new()
+	var self_vec: Vector2 = holder.update_self_props()
+	var plain := Node2D.new()
+	plain.position = Vector2(7.0, 8.0)
+	plain.rotation = 1.25
+	var plain_sum: float = plain.position.x + plain.position.y + plain.rotation
+	holder.free()
+	plain.free()
+
+	return {
+		"total": total + bonus,
+		"f_acc": int(round(f_acc * 100.0)),
+		"vec_x": int(round(vec_a.x * 100.0)),
+		"vec_y": int(round(vec_a.y * 100.0)),
+		"prop": n1.prop,
+		"poly_sum": poly_sum,
+		"chain_sum": chain_sum,
+		"self_x": int(round(self_vec.x * 100.0)),
+		"self_y": int(round(self_vec.y * 100.0)),
+		"plain_sum": int(round(plain_sum * 100.0)),
+	}
+)",
+				"res://perf_opts_roundtrip.gd");
+
+		// Verify fused jump opcodes were actually emitted in run_all.
+		GDScriptFunction *orig_fn = script->get_member_functions()[StringName("run_all")];
+		REQUIRE(orig_fn != nullptr);
+		bool saw_fused_jump = false;
+		bool saw_inline_int = false;
+		const Vector<int> &orig_code = GDScriptBytecodeTestAccessor::mutable_code(orig_fn);
+		for (int ip = 0; ip < orig_code.size();) {
+			const auto opcode = static_cast<GDScriptFunction::Opcode>(orig_code[ip]);
+			if (opcode == GDScriptFunction::OPCODE_JUMP_IF_NOT_INT_LT || opcode == GDScriptFunction::OPCODE_JUMP_IF_NOT_FLOAT_GT) {
+				saw_fused_jump = true;
+			}
+			if (opcode == GDScriptFunction::OPCODE_INT_ADD || opcode == GDScriptFunction::OPCODE_INT_MUL) {
+				saw_inline_int = true;
+			}
+			const auto &layout = GDScriptFunction::get_opcode_layout(opcode);
+			ip += layout.is_vararg ? (2 + orig_code[ip + 1] + layout.word_count) : layout.word_count;
+		}
+		CHECK(saw_fused_jump);
+		CHECK(saw_inline_int);
+
+		const Vector<uint8_t> bytes = export_script_bytes(script);
+		Ref<GDScript> loaded = load_script_bytes(bytes, "res://perf_opts_roundtrip.gd");
+		REQUIRE(GDScriptBytecodeVerifier::verify_class(loaded.ptr()) == OK);
+
+		Ref<RefCounted> orig_inst = memnew(RefCounted);
+		orig_inst->set_script(script);
+		Ref<RefCounted> loaded_inst = memnew(RefCounted);
+		loaded_inst->set_script(loaded);
+		REQUIRE(orig_inst->get_script_instance() != nullptr);
+		REQUIRE(loaded_inst->get_script_instance() != nullptr);
+
+		// Execute multiple times to exercise cold + warm inline caches and default arguments.
+		for (int repeat = 0; repeat < 3; repeat++) {
+			Dictionary orig_res = orig_inst->call("run_all", 10);
+			Dictionary loaded_res = loaded_inst->call("run_all", 10);
+			CHECK(orig_res == loaded_res);
+			CHECK(int(loaded_res["prop"]) == 14);
+			CHECK(int(loaded_res["poly_sum"]) == (14 + 28 + 42));
+			CHECK(int(loaded_res["chain_sum"]) == 60);
+			CHECK(int(loaded_res["self_x"]) == 450);
+			CHECK(int(loaded_res["self_y"]) == 600);
+			CHECK(int(loaded_res["plain_sum"]) == 1625);
 		}
 	}
 }

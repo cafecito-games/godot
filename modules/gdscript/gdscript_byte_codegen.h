@@ -85,6 +85,7 @@ class GDScriptByteCodeGenerator : public GDScriptCodeGenerator {
 	RBMap<StringName, int> local_constants;
 
 	Vector<StackSlot> locals;
+	Vector<Variant::Type> local_slot_types;
 	HashSet<int> dirty_locals;
 
 	Vector<StackSlot> temporaries;
@@ -468,6 +469,8 @@ class GDScriptByteCodeGenerator : public GDScriptCodeGenerator {
 	void patch_jump(int p_address) {
 		opcodes.write[p_address] = opcodes.size();
 	}
+
+	void optimize_bytecode();
 
 public:
 	virtual uint32_t add_parameter(const StringName &p_name, bool p_is_optional, const GDScriptDataType &p_type) override;

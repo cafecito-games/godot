@@ -321,6 +321,30 @@ void (*type_init_function_table[])(Variant *) = {
 	static const void *switch_table_ops[] = { \
 		&&OPCODE_OPERATOR, \
 		&&OPCODE_OPERATOR_VALIDATED, \
+		&&OPCODE_INT_ADD, \
+		&&OPCODE_INT_SUB, \
+		&&OPCODE_INT_MUL, \
+		&&OPCODE_INT_BIT_AND, \
+		&&OPCODE_INT_BIT_OR, \
+		&&OPCODE_INT_BIT_XOR, \
+		&&OPCODE_INT_EQ, \
+		&&OPCODE_INT_NE, \
+		&&OPCODE_INT_LT, \
+		&&OPCODE_INT_LE, \
+		&&OPCODE_INT_GT, \
+		&&OPCODE_INT_GE, \
+		&&OPCODE_FLOAT_ADD, \
+		&&OPCODE_FLOAT_SUB, \
+		&&OPCODE_FLOAT_MUL, \
+		&&OPCODE_FLOAT_DIV, \
+		&&OPCODE_FLOAT_LT, \
+		&&OPCODE_FLOAT_LE, \
+		&&OPCODE_FLOAT_GT, \
+		&&OPCODE_FLOAT_GE, \
+		&&OPCODE_VECTOR2_ADD, \
+		&&OPCODE_VECTOR2_SUB, \
+		&&OPCODE_VECTOR2_MUL_FLOAT, \
+		&&OPCODE_VECTOR2_MUL, \
 		&&OPCODE_TYPE_TEST_BUILTIN, \
 		&&OPCODE_TYPE_TEST_ARRAY, \
 		&&OPCODE_TYPE_TEST_DICTIONARY, \
@@ -381,6 +405,16 @@ void (*type_init_function_table[])(Variant *) = {
 		&&OPCODE_JUMP, \
 		&&OPCODE_JUMP_IF, \
 		&&OPCODE_JUMP_IF_NOT, \
+		&&OPCODE_JUMP_IF_NOT_INT_EQ, \
+		&&OPCODE_JUMP_IF_NOT_INT_NE, \
+		&&OPCODE_JUMP_IF_NOT_INT_LT, \
+		&&OPCODE_JUMP_IF_NOT_INT_LE, \
+		&&OPCODE_JUMP_IF_NOT_INT_GT, \
+		&&OPCODE_JUMP_IF_NOT_INT_GE, \
+		&&OPCODE_JUMP_IF_NOT_FLOAT_LT, \
+		&&OPCODE_JUMP_IF_NOT_FLOAT_LE, \
+		&&OPCODE_JUMP_IF_NOT_FLOAT_GT, \
+		&&OPCODE_JUMP_IF_NOT_FLOAT_GE, \
 		&&OPCODE_JUMP_TO_DEF_ARGUMENT, \
 		&&OPCODE_JUMP_IF_SHARED, \
 		&&OPCODE_RETURN, \
@@ -660,61 +694,60 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 		stack = reinterpret_cast<Variant *>(frame_buffer);
 
 		const int non_vararg_arg_count = MIN(p_argcount, _argument_count);
+		const GDScriptDataType *arg_types_ptr = argument_types.ptr();
 		for (int i = 0; i < non_vararg_arg_count; i++) {
-			if (!argument_types[i].has_type()) {
-				memnew_placement(&stack[i + FIXED_ADDRESSES_MAX], Variant(*p_args[i]));
-				continue;
-			}
+			const Variant &arg = *p_args[i];
 			// If types already match, don't call Variant::construct(). Constructors of some types
 			// (e.g. packed arrays) do copies, whereas they pass by reference when inside a Variant.
-			if (argument_types[i].is_type(*p_args[i], false)) {
-				memnew_placement(&stack[i + FIXED_ADDRESSES_MAX], Variant(*p_args[i]));
+			if (likely(arg_types_ptr[i].is_type_exact_fast(arg))) {
+				VariantInternal::construct_copy_fast(&stack[i + FIXED_ADDRESSES_MAX], &arg);
 				continue;
 			}
-			if (!argument_types[i].is_type(*p_args[i], true)) {
+			if (!arg_types_ptr[i].is_type(arg, true)) {
 				for (int cleanup_index = 0; cleanup_index < i; cleanup_index++) {
 					stack[cleanup_index + FIXED_ADDRESSES_MAX].~Variant();
 				}
 				r_err.error = Callable::CallError::CALL_ERROR_INVALID_ARGUMENT;
 				r_err.argument = i;
-				r_err.expected = argument_types[i].builtin_type;
+				r_err.expected = arg_types_ptr[i].builtin_type;
 				call_depth--;
 				return _get_default_variant_for_data_type(return_type);
 			}
-			if (argument_types[i].kind == GDScriptDataType::BUILTIN) {
-				if (argument_types[i].builtin_type == Variant::DICTIONARY && argument_types[i].has_container_element_types()) {
-					const GDScriptDataType &arg_key_type = argument_types[i].get_container_element_type_or_variant(0);
-					const GDScriptDataType &arg_value_type = argument_types[i].get_container_element_type_or_variant(1);
-					Dictionary dict(p_args[i]->operator Dictionary(), arg_key_type.builtin_type, arg_key_type.native_type, arg_key_type.script_type, arg_value_type.builtin_type, arg_value_type.native_type, arg_value_type.script_type);
+			if (arg_types_ptr[i].kind == GDScriptDataType::BUILTIN) {
+				if (arg_types_ptr[i].builtin_type == Variant::DICTIONARY && arg_types_ptr[i].has_container_element_types()) {
+					const GDScriptDataType &arg_key_type = arg_types_ptr[i].get_container_element_type_or_variant(0);
+					const GDScriptDataType &arg_value_type = arg_types_ptr[i].get_container_element_type_or_variant(1);
+					Dictionary dict(arg.operator Dictionary(), arg_key_type.builtin_type, arg_key_type.native_type, arg_key_type.script_type, arg_value_type.builtin_type, arg_value_type.native_type, arg_value_type.script_type);
 					memnew_placement(&stack[i + FIXED_ADDRESSES_MAX], Variant(dict));
-				} else if (argument_types[i].builtin_type == Variant::ARRAY && argument_types[i].has_container_element_type(0)) {
-					const GDScriptDataType &arg_type = argument_types[i].container_element_types[0];
-					Array array(p_args[i]->operator Array(), arg_type.builtin_type, arg_type.native_type, arg_type.script_type);
+				} else if (arg_types_ptr[i].builtin_type == Variant::ARRAY && arg_types_ptr[i].has_container_element_type(0)) {
+					const GDScriptDataType &arg_type = arg_types_ptr[i].container_element_types[0];
+					Array array(arg.operator Array(), arg_type.builtin_type, arg_type.native_type, arg_type.script_type);
 					memnew_placement(&stack[i + FIXED_ADDRESSES_MAX], Variant(array));
 				} else {
 					Variant variant;
-					Variant::construct(argument_types[i].builtin_type, variant, &p_args[i], 1, r_err);
+					Variant::construct(arg_types_ptr[i].builtin_type, variant, &p_args[i], 1, r_err);
 					if (unlikely(r_err.error)) {
 						for (int cleanup_index = 0; cleanup_index < i; cleanup_index++) {
 							stack[cleanup_index + FIXED_ADDRESSES_MAX].~Variant();
 						}
 						r_err.error = Callable::CallError::CALL_ERROR_INVALID_ARGUMENT;
 						r_err.argument = i;
-						r_err.expected = argument_types[i].builtin_type;
+						r_err.expected = arg_types_ptr[i].builtin_type;
 						call_depth--;
 						return _get_default_variant_for_data_type(return_type);
 					}
 					memnew_placement(&stack[i + FIXED_ADDRESSES_MAX], Variant(variant));
 				}
 			} else {
-				memnew_placement(&stack[i + FIXED_ADDRESSES_MAX], Variant(*p_args[i]));
+				VariantInternal::construct_copy_fast(&stack[i + FIXED_ADDRESSES_MAX], &arg);
 			}
 		}
-		for (int i = non_vararg_arg_count + FIXED_ADDRESSES_MAX; i < _stack_size; i++) {
-			memnew_placement(&stack[i], Variant);
+		const int remaining_start = non_vararg_arg_count + FIXED_ADDRESSES_MAX;
+		if (remaining_start < _stack_size) {
+			memset(static_cast<void *>(&stack[remaining_start]), 0, sizeof(Variant) * static_cast<size_t>(_stack_size - remaining_start));
 		}
 
-		if (is_vararg()) {
+		if (unlikely(is_vararg())) {
 			Array vararg;
 			stack[_vararg_index] = vararg;
 			if (p_argcount > _argument_count) {
@@ -732,7 +765,33 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 		}
 
 		for (const Pair<int, Variant::Type> &E : temporary_slots) {
-			type_init_function_table[E.second](&stack[E.first]);
+			Variant *slot = &stack[E.first];
+			switch (E.second) {
+				case Variant::BOOL:
+					VariantInternal::init_generic<bool>(slot);
+					break;
+				case Variant::INT:
+					VariantInternal::init_generic<int64_t>(slot);
+					break;
+				case Variant::FLOAT:
+					VariantInternal::init_generic<double>(slot);
+					break;
+				case Variant::VECTOR2:
+					VariantInternal::init_generic<Vector2>(slot);
+					break;
+				case Variant::VECTOR2I:
+					VariantInternal::init_generic<Vector2i>(slot);
+					break;
+				case Variant::VECTOR3:
+					VariantInternal::init_generic<Vector3>(slot);
+					break;
+				case Variant::VECTOR3I:
+					VariantInternal::init_generic<Vector3i>(slot);
+					break;
+				default:
+					type_init_function_table[E.second](slot);
+					break;
+			}
 		}
 	}
 
@@ -799,8 +858,6 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 	{ \
 		int address = _code_ptr[ip + 1 + (m_code_ofs)]; \
 		m_v = &variant_addresses[(address & ADDR_TYPE_MASK) >> ADDR_BITS][address & ADDR_MASK]; \
-		if (unlikely(!m_v)) \
-			OPCODE_BREAK; \
 	}
 
 #endif // DEBUG_ENABLED
@@ -880,7 +937,9 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 						OPCODE_BREAK;
 					} else {
 						Variant::Type ret_type = Variant::get_operator_return_type(op, a_type, b_type);
-						VariantInternal::initialize(dst, ret_type);
+						if (unlikely(dst->get_type() != ret_type)) {
+							VariantInternal::initialize(dst, ret_type);
+						}
 						op_func(a, b, dst);
 
 						// Check again in case another thread already set it.
@@ -901,7 +960,9 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 					memcpy(&op_func, &_code_ptr[ip + 7], sizeof(op_func));
 
 					// Make sure the return value has the correct type.
-					VariantInternal::initialize(dst, ret_type);
+					if (unlikely(dst->get_type() != ret_type)) {
+						VariantInternal::initialize(dst, ret_type);
+					}
 					op_func(a, b, dst);
 				} else {
 					// If the signature doesn't match, we have to use the slow path.
@@ -946,6 +1007,43 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 				ip += 5;
 			}
 			DISPATCH_OPCODE;
+
+#define OPCODE_BINARY_INLINE(m_opcode, m_left_getter, m_right_getter, m_dst_getter, m_expr) \
+	OPCODE(m_opcode) { \
+		CHECK_SPACE(4); \
+		GET_VARIANT_PTR(a, 0); \
+		GET_VARIANT_PTR(b, 1); \
+		GET_VARIANT_PTR(dst, 2); \
+		*VariantInternal::m_dst_getter(dst) = (m_expr); \
+		ip += 4; \
+	} \
+	DISPATCH_OPCODE
+
+			OPCODE_BINARY_INLINE(OPCODE_INT_ADD, get_int, get_int, get_int, *VariantInternal::get_int(a) + *VariantInternal::get_int(b));
+			OPCODE_BINARY_INLINE(OPCODE_INT_SUB, get_int, get_int, get_int, *VariantInternal::get_int(a) - *VariantInternal::get_int(b));
+			OPCODE_BINARY_INLINE(OPCODE_INT_MUL, get_int, get_int, get_int, *VariantInternal::get_int(a) * *VariantInternal::get_int(b));
+			OPCODE_BINARY_INLINE(OPCODE_INT_BIT_AND, get_int, get_int, get_int, *VariantInternal::get_int(a) & *VariantInternal::get_int(b));
+			OPCODE_BINARY_INLINE(OPCODE_INT_BIT_OR, get_int, get_int, get_int, *VariantInternal::get_int(a) | *VariantInternal::get_int(b));
+			OPCODE_BINARY_INLINE(OPCODE_INT_BIT_XOR, get_int, get_int, get_int, *VariantInternal::get_int(a) ^ *VariantInternal::get_int(b));
+			OPCODE_BINARY_INLINE(OPCODE_INT_EQ, get_int, get_int, get_bool, *VariantInternal::get_int(a) == *VariantInternal::get_int(b));
+			OPCODE_BINARY_INLINE(OPCODE_INT_NE, get_int, get_int, get_bool, *VariantInternal::get_int(a) != *VariantInternal::get_int(b));
+			OPCODE_BINARY_INLINE(OPCODE_INT_LT, get_int, get_int, get_bool, *VariantInternal::get_int(a) < *VariantInternal::get_int(b));
+			OPCODE_BINARY_INLINE(OPCODE_INT_LE, get_int, get_int, get_bool, *VariantInternal::get_int(a) <= *VariantInternal::get_int(b));
+			OPCODE_BINARY_INLINE(OPCODE_INT_GT, get_int, get_int, get_bool, *VariantInternal::get_int(a) > *VariantInternal::get_int(b));
+			OPCODE_BINARY_INLINE(OPCODE_INT_GE, get_int, get_int, get_bool, *VariantInternal::get_int(a) >= *VariantInternal::get_int(b));
+			OPCODE_BINARY_INLINE(OPCODE_FLOAT_ADD, get_float, get_float, get_float, *VariantInternal::get_float(a) + *VariantInternal::get_float(b));
+			OPCODE_BINARY_INLINE(OPCODE_FLOAT_SUB, get_float, get_float, get_float, *VariantInternal::get_float(a) - *VariantInternal::get_float(b));
+			OPCODE_BINARY_INLINE(OPCODE_FLOAT_MUL, get_float, get_float, get_float, *VariantInternal::get_float(a) * *VariantInternal::get_float(b));
+			OPCODE_BINARY_INLINE(OPCODE_FLOAT_DIV, get_float, get_float, get_float, *VariantInternal::get_float(a) / *VariantInternal::get_float(b));
+			OPCODE_BINARY_INLINE(OPCODE_FLOAT_LT, get_float, get_float, get_bool, *VariantInternal::get_float(a) < *VariantInternal::get_float(b));
+			OPCODE_BINARY_INLINE(OPCODE_FLOAT_LE, get_float, get_float, get_bool, *VariantInternal::get_float(a) <= *VariantInternal::get_float(b));
+			OPCODE_BINARY_INLINE(OPCODE_FLOAT_GT, get_float, get_float, get_bool, *VariantInternal::get_float(a) > *VariantInternal::get_float(b));
+			OPCODE_BINARY_INLINE(OPCODE_FLOAT_GE, get_float, get_float, get_bool, *VariantInternal::get_float(a) >= *VariantInternal::get_float(b));
+			OPCODE_BINARY_INLINE(OPCODE_VECTOR2_ADD, get_vector2, get_vector2, get_vector2, *VariantInternal::get_vector2(a) + *VariantInternal::get_vector2(b));
+			OPCODE_BINARY_INLINE(OPCODE_VECTOR2_SUB, get_vector2, get_vector2, get_vector2, *VariantInternal::get_vector2(a) - *VariantInternal::get_vector2(b));
+			OPCODE_BINARY_INLINE(OPCODE_VECTOR2_MUL_FLOAT, get_vector2, get_float, get_vector2, *VariantInternal::get_vector2(a) * static_cast<real_t>(*VariantInternal::get_float(b)));
+			OPCODE_BINARY_INLINE(OPCODE_VECTOR2_MUL, get_vector2, get_vector2, get_vector2, *VariantInternal::get_vector2(a) * *VariantInternal::get_vector2(b));
+#undef OPCODE_BINARY_INLINE
 
 			OPCODE(OPCODE_TYPE_TEST_BUILTIN) {
 				CHECK_SPACE(4);
@@ -1159,12 +1257,52 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 
 				int index_setter = _code_ptr[ip + 4];
 				GD_ERR_BREAK(index_setter < 0 || index_setter >= _indexed_setters_count);
-				const Variant::ValidatedIndexedSetter setter = _indexed_setters_ptr[index_setter];
 
 				int64_t int_index = *VariantInternal::get_int(index);
 
-				bool oob;
-				setter(dst, int_index, value, &oob);
+				bool oob = false;
+				switch (dst->get_type()) {
+					case Variant::PACKED_BYTE_ARRAY: {
+						Vector<uint8_t> *arr = VariantInternal::get_byte_array(dst);
+						const int64_t size = arr->size();
+						if (unlikely(int_index < 0)) {
+							int_index += size;
+						}
+						if (unlikely(static_cast<uint64_t>(int_index) >= static_cast<uint64_t>(size))) {
+							oob = true;
+						} else {
+							arr->write[int_index] = static_cast<uint8_t>(*VariantInternal::get_int(value));
+						}
+					} break;
+					case Variant::PACKED_INT32_ARRAY: {
+						Vector<int32_t> *arr = VariantInternal::get_int32_array(dst);
+						const int64_t size = arr->size();
+						if (unlikely(int_index < 0)) {
+							int_index += size;
+						}
+						if (unlikely(static_cast<uint64_t>(int_index) >= static_cast<uint64_t>(size))) {
+							oob = true;
+						} else {
+							arr->write[int_index] = static_cast<int32_t>(*VariantInternal::get_int(value));
+						}
+					} break;
+					case Variant::PACKED_FLOAT32_ARRAY: {
+						Vector<float> *arr = VariantInternal::get_float32_array(dst);
+						const int64_t size = arr->size();
+						if (unlikely(int_index < 0)) {
+							int_index += size;
+						}
+						if (unlikely(static_cast<uint64_t>(int_index) >= static_cast<uint64_t>(size))) {
+							oob = true;
+						} else {
+							arr->write[int_index] = static_cast<float>(*VariantInternal::get_float(value));
+						}
+					} break;
+					default: {
+						const Variant::ValidatedIndexedSetter setter = _indexed_setters_ptr[index_setter];
+						setter(dst, int_index, value, &oob);
+					} break;
+				}
 
 #ifdef DEBUG_ENABLED
 				if (oob) {
@@ -1267,12 +1405,79 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 
 				int index_getter = _code_ptr[ip + 4];
 				GD_ERR_BREAK(index_getter < 0 || index_getter >= _indexed_getters_count);
-				const Variant::ValidatedIndexedGetter getter = _indexed_getters_ptr[index_getter];
 
 				int64_t int_index = *VariantInternal::get_int(index);
 
-				bool oob;
-				getter(src, int_index, dst, &oob);
+				bool oob = false;
+				switch (src->get_type()) {
+					case Variant::ARRAY: {
+						const Array *array = VariantInternal::get_array(src);
+						const int64_t size = array->size();
+						if (unlikely(int_index < 0)) {
+							int_index += size;
+						}
+						if (unlikely(static_cast<uint64_t>(int_index) >= static_cast<uint64_t>(size))) {
+							oob = true;
+						} else {
+							const Variant &element = (*array)[int_index];
+							if (likely(src != dst)) {
+								VariantInternal::assign_fast(dst, &element);
+							} else {
+								Variant temp_element = element;
+								VariantInternal::assign_move_fast(dst, temp_element);
+							}
+						}
+					} break;
+					case Variant::PACKED_BYTE_ARRAY: {
+						const Vector<uint8_t> *arr = VariantInternal::get_byte_array(src);
+						const int64_t size = arr->size();
+						if (unlikely(int_index < 0)) {
+							int_index += size;
+						}
+						if (unlikely(static_cast<uint64_t>(int_index) >= static_cast<uint64_t>(size))) {
+							oob = true;
+						} else {
+							if (unlikely(dst->get_type() != Variant::INT)) {
+								VariantTypeAdjust<int64_t>::adjust(dst);
+							}
+							*VariantInternal::get_int(dst) = arr->ptr()[int_index];
+						}
+					} break;
+					case Variant::PACKED_INT32_ARRAY: {
+						const Vector<int32_t> *arr = VariantInternal::get_int32_array(src);
+						const int64_t size = arr->size();
+						if (unlikely(int_index < 0)) {
+							int_index += size;
+						}
+						if (unlikely(static_cast<uint64_t>(int_index) >= static_cast<uint64_t>(size))) {
+							oob = true;
+						} else {
+							if (unlikely(dst->get_type() != Variant::INT)) {
+								VariantTypeAdjust<int64_t>::adjust(dst);
+							}
+							*VariantInternal::get_int(dst) = arr->ptr()[int_index];
+						}
+					} break;
+					case Variant::PACKED_FLOAT32_ARRAY: {
+						const Vector<float> *arr = VariantInternal::get_float32_array(src);
+						const int64_t size = arr->size();
+						if (unlikely(int_index < 0)) {
+							int_index += size;
+						}
+						if (unlikely(static_cast<uint64_t>(int_index) >= static_cast<uint64_t>(size))) {
+							oob = true;
+						} else {
+							if (unlikely(dst->get_type() != Variant::FLOAT)) {
+								VariantTypeAdjust<double>::adjust(dst);
+							}
+							*VariantInternal::get_float(dst) = arr->ptr()[int_index];
+						}
+					} break;
+					default: {
+						const Variant::ValidatedIndexedGetter getter = _indexed_getters_ptr[index_getter];
+						getter(src, int_index, dst, &oob);
+					} break;
+				}
 
 #ifdef DEBUG_ENABLED
 				if (oob) {
@@ -1301,28 +1506,80 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 				GD_ERR_BREAK(indexname < 0 || indexname >= _global_names_count);
 				const StringName *index = &_global_names_ptr[indexname];
 
-				bool valid;
-				dst->set_named(*index, *value, valid);
-
+				bool handled = false;
+				if (likely(dst->get_type() == Variant::OBJECT)) {
 #ifdef DEBUG_ENABLED
-				if (!valid) {
-					if (dst->is_read_only()) {
-						err_text = "Invalid assignment on read-only value (on base: '" + _get_var_type(dst) + "').";
-					} else {
-						Object *obj = dst->get_validated_object();
-						bool read_only_property = false;
-						if (obj) {
-							read_only_property = ClassDB::has_property(obj->get_class_name(), *index) && (ClassDB::get_property_setter(obj->get_class_name(), *index) == StringName());
-						}
-						if (read_only_property) {
-							err_text = vformat(R"(Cannot set value into property "%s" (on base "%s") because it is read-only.)", String(*index), _get_var_type(dst));
+					Object *target_obj = dst->get_validated_object();
+#else
+					Object *target_obj = dst->is_ref_counted() ? *VariantInternal::get_object(dst) : dst->get_validated_object();
+#endif
+					if (likely(target_obj != nullptr)) {
+						ScriptInstance *script_inst = target_obj->get_script_instance();
+						if (script_inst != nullptr) {
+							if (likely(script_inst->get_language() == GDScriptLanguage::get_singleton() && !script_inst->is_placeholder())) {
+								GDScriptInstance *gds_inst = static_cast<GDScriptInstance *>(script_inst);
+								const GDScript *target_script = gds_inst->script.ptr();
+								if (likely(target_script != nullptr && target_script->valid)) {
+									const MemberCacheSlot *slot = _lookup_member_cache(indexname, target_script);
+									if (unlikely(slot == nullptr)) {
+										slot = _populate_gdscript_member_cache(indexname, target_script);
+									}
+									if (likely(slot != nullptr && slot->member_data_type->is_type_exact_fast(*value))) {
+										if (slot->kind == MemberCacheSlot::GDSCRIPT_DIRECT || slot->setter_func == nullptr) {
+											VariantInternal::assign_fast(&gds_inst->members.ptrw()[slot->member_index], value);
+											handled = true;
+										} else {
+											const Variant *arg_ptr = value;
+											Callable::CallError err;
+											slot->setter_func->call(gds_inst, &arg_ptr, 1, err);
+											if (likely(err.error == Callable::CallError::CALL_OK)) {
+												handled = true;
+											}
+										}
+									}
+								}
+							}
 						} else {
-							err_text = "Invalid assignment of property or key '" + String(*index) + "' with value of type '" + _get_var_type(value) + "' on a base object of type '" + _get_var_type(dst) + "'.";
+#ifndef TOOLS_ENABLED
+							const void *gdtype_key = &target_obj->get_gdtype();
+							const MemberCacheSlot *slot = _lookup_member_cache(indexname, gdtype_key);
+							if (unlikely(slot == nullptr)) {
+								slot = _populate_native_member_cache(indexname, target_obj);
+							}
+							if (likely(slot != nullptr && slot->native_setter != nullptr && value->get_type() == slot->setter_arg_type)) {
+								const Variant *arg_ptr = value;
+								slot->native_setter->validated_call(target_obj, &arg_ptr, nullptr);
+								handled = true;
+							}
+#endif
 						}
 					}
-					OPCODE_BREAK;
 				}
+
+				if (unlikely(!handled)) {
+					bool valid;
+					dst->set_named(*index, *value, valid);
+
+#ifdef DEBUG_ENABLED
+					if (!valid) {
+						if (dst->is_read_only()) {
+							err_text = "Invalid assignment on read-only value (on base: '" + _get_var_type(dst) + "').";
+						} else {
+							Object *obj = dst->get_validated_object();
+							bool read_only_property = false;
+							if (obj) {
+								read_only_property = ClassDB::has_property(obj->get_class_name(), *index) && (ClassDB::get_property_setter(obj->get_class_name(), *index) == StringName());
+							}
+							if (read_only_property) {
+								err_text = vformat(R"(Cannot set value into property "%s" (on base "%s") because it is read-only.)", String(*index), _get_var_type(dst));
+							} else {
+								err_text = "Invalid assignment of property or key '" + String(*index) + "' with value of type '" + _get_var_type(value) + "' on a base object of type '" + _get_var_type(dst) + "'.";
+							}
+						}
+						OPCODE_BREAK;
+					}
 #endif
+				}
 				ip += 4;
 			}
 			DISPATCH_OPCODE;
@@ -1353,21 +1610,87 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 				GD_ERR_BREAK(indexname < 0 || indexname >= _global_names_count);
 				const StringName *index = &_global_names_ptr[indexname];
 
-				bool valid;
+				bool handled = false;
+				if (likely(src->get_type() == Variant::OBJECT)) {
 #ifdef DEBUG_ENABLED
-				//allow better error message in cases where src and dst are the same stack position
-				Variant ret = src->get_named(*index, valid);
+					Object *target_obj = src->get_validated_object();
+#else
+					Object *target_obj = src->is_ref_counted() ? *VariantInternal::get_object(src) : src->get_validated_object();
+#endif
+					if (likely(target_obj != nullptr)) {
+						ScriptInstance *script_inst = target_obj->get_script_instance();
+						if (script_inst != nullptr) {
+							if (likely(script_inst->get_language() == GDScriptLanguage::get_singleton() && !script_inst->is_placeholder())) {
+								GDScriptInstance *gds_inst = static_cast<GDScriptInstance *>(script_inst);
+								const GDScript *target_script = gds_inst->script.ptr();
+								if (likely(target_script != nullptr && target_script->valid)) {
+									const MemberCacheSlot *slot = _lookup_member_cache(indexname, target_script);
+									if (unlikely(slot == nullptr)) {
+										slot = _populate_gdscript_member_cache(indexname, target_script);
+									}
+									if (likely(slot != nullptr)) {
+										if (slot->kind == MemberCacheSlot::GDSCRIPT_DIRECT || slot->getter_func == nullptr) {
+											if (likely(src != dst)) {
+												VariantInternal::assign_fast(dst, &gds_inst->members.ptr()[slot->member_index]);
+											} else {
+												Variant temp_val = gds_inst->members.ptr()[slot->member_index];
+												VariantInternal::assign_move_fast(dst, temp_val);
+											}
+											handled = true;
+										} else {
+											Callable::CallError err;
+											Variant getter_ret = slot->getter_func->call(gds_inst, nullptr, 0, err);
+											if (likely(err.error == Callable::CallError::CALL_OK)) {
+												VariantInternal::assign_move_fast(dst, getter_ret);
+											} else {
+												*dst = Variant();
+											}
+											handled = true;
+										}
+									}
+								}
+							}
+						} else {
+							const void *gdtype_key = &target_obj->get_gdtype();
+							const MemberCacheSlot *slot = _lookup_member_cache(indexname, gdtype_key);
+							if (unlikely(slot == nullptr)) {
+								slot = _populate_native_member_cache(indexname, target_obj);
+							}
+							if (likely(slot != nullptr && slot->native_getter != nullptr)) {
+								if (likely(src != dst)) {
+									if (unlikely(dst->get_type() != slot->getter_return_type)) {
+										VariantInternal::initialize(dst, slot->getter_return_type);
+									}
+									slot->native_getter->validated_call(target_obj, nullptr, dst);
+								} else {
+									Variant temp_ret;
+									VariantInternal::initialize(&temp_ret, slot->getter_return_type);
+									slot->native_getter->validated_call(target_obj, nullptr, &temp_ret);
+									VariantInternal::assign_move_fast(dst, temp_ret);
+								}
+								handled = true;
+							}
+						}
+					}
+				}
+
+				if (unlikely(!handled)) {
+					bool valid;
+#ifdef DEBUG_ENABLED
+					//allow better error message in cases where src and dst are the same stack position
+					Variant ret = src->get_named(*index, valid);
 
 #else
-				*dst = src->get_named(*index, valid);
+					*dst = src->get_named(*index, valid);
 #endif
 #ifdef DEBUG_ENABLED
-				if (!valid) {
-					err_text = "Invalid access to property or key '" + index->operator String() + "' on a base object of type '" + _get_var_type(src) + "'.";
-					OPCODE_BREAK;
-				}
-				*dst = ret;
+					if (!valid) {
+						err_text = "Invalid access to property or key '" + index->operator String() + "' on a base object of type '" + _get_var_type(src) + "'.";
+						OPCODE_BREAK;
+					}
+					*dst = ret;
 #endif
+				}
 				ip += 4;
 			}
 			DISPATCH_OPCODE;
@@ -1471,7 +1794,7 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 				GET_VARIANT_PTR(dst, 0);
 				GET_VARIANT_PTR(src, 1);
 
-				*dst = *src;
+				VariantInternal::assign_fast(dst, src);
 
 				ip += 3;
 			}
@@ -2020,12 +2343,50 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 
 				Variant temp_ret;
 				Callable::CallError err;
+				GDScriptInstance *gds_target_instance = nullptr;
+				if (base == &stack[ADDR_STACK_SELF] && p_instance != nullptr) {
+					gds_target_instance = p_instance;
+				} else if (base->get_type() == Variant::OBJECT) {
+#ifdef DEBUG_ENABLED
+					Object *target_obj = base_obj;
+#else
+					Object *target_obj = *VariantInternal::get_object(base);
+#endif
+					if (likely(target_obj != nullptr)) {
+						ScriptInstance *script_inst = target_obj->get_script_instance();
+						if (likely(script_inst != nullptr && script_inst->get_language() == GDScriptLanguage::get_singleton() && !script_inst->is_placeholder())) {
+							gds_target_instance = static_cast<GDScriptInstance *>(script_inst);
+						}
+					}
+				}
+
+				GDScriptFunction *cached_gdscript_func = nullptr;
+				if (likely(gds_target_instance != nullptr)) {
+					const GDScript *target_script = gds_target_instance->script.ptr();
+					if (likely(target_script != nullptr && target_script->valid)) {
+						cached_gdscript_func = _resolve_gdscript_call_cached(methodname_idx, target_script);
+					}
+				}
+
 				if (call_ret) {
 					GET_INSTRUCTION_ARG(ret, argc + 1);
-					base->callp(*methodname, (const Variant **)argptrs, argc, temp_ret, err);
-					*ret = temp_ret;
+					if (likely(cached_gdscript_func != nullptr)) {
+						Variant call_result = cached_gdscript_func->call(gds_target_instance, (const Variant **)argptrs, argc, err);
+						VariantInternal::assign_move_fast(ret, call_result);
+					} else {
+						base->callp(*methodname, (const Variant **)argptrs, argc, temp_ret, err);
 #ifdef DEBUG_ENABLED
-					if (ret->get_type() == Variant::NIL) {
+						if (likely(err.error == Callable::CallError::CALL_OK)) {
+							VariantInternal::assign_move_fast(ret, temp_ret);
+						} else {
+							*ret = temp_ret;
+						}
+#else
+						VariantInternal::assign_move_fast(ret, temp_ret);
+#endif
+					}
+#ifdef DEBUG_ENABLED
+					if (ret->get_type() == Variant::NIL && cached_gdscript_func == nullptr) {
 						if (base_type == Variant::OBJECT) {
 							if (base_obj) {
 								MethodBind *method = ClassDB::get_method(base_class, *methodname);
@@ -2052,7 +2413,11 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 					}
 #endif
 				} else {
-					base->callp(*methodname, (const Variant **)argptrs, argc, temp_ret, err);
+					if (likely(cached_gdscript_func != nullptr)) {
+						temp_ret = cached_gdscript_func->call(gds_target_instance, (const Variant **)argptrs, argc, err);
+					} else {
+						base->callp(*methodname, (const Variant **)argptrs, argc, temp_ret, err);
+					}
 				}
 #ifdef DEBUG_ENABLED
 
@@ -2834,7 +3199,7 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 
 				GET_VARIANT_PTR(test, 0);
 
-				bool result = test->booleanize();
+				bool result = likely(test->get_type() == Variant::BOOL) ? *VariantInternal::get_bool(test) : test->booleanize();
 
 				if (result) {
 					int to = _code_ptr[ip + 2];
@@ -2851,7 +3216,7 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 
 				GET_VARIANT_PTR(test, 0);
 
-				bool result = test->booleanize();
+				bool result = likely(test->get_type() == Variant::BOOL) ? *VariantInternal::get_bool(test) : test->booleanize();
 
 				if (!result) {
 					int to = _code_ptr[ip + 2];
@@ -2862,6 +3227,33 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 				}
 			}
 			DISPATCH_OPCODE;
+
+#define OPCODE_JUMP_IF_NOT_CMP(m_opcode, m_getter, m_cmp) \
+	OPCODE(m_opcode) { \
+		CHECK_SPACE(4); \
+		GET_VARIANT_PTR(a, 0); \
+		GET_VARIANT_PTR(b, 1); \
+		if (!(*VariantInternal::m_getter(a) m_cmp * VariantInternal::m_getter(b))) { \
+			int to = _code_ptr[ip + 3]; \
+			GD_ERR_BREAK(to < 0 || to > _code_size); \
+			ip = to; \
+		} else { \
+			ip += 4; \
+		} \
+	} \
+	DISPATCH_OPCODE
+
+			OPCODE_JUMP_IF_NOT_CMP(OPCODE_JUMP_IF_NOT_INT_EQ, get_int, ==);
+			OPCODE_JUMP_IF_NOT_CMP(OPCODE_JUMP_IF_NOT_INT_NE, get_int, !=);
+			OPCODE_JUMP_IF_NOT_CMP(OPCODE_JUMP_IF_NOT_INT_LT, get_int, <);
+			OPCODE_JUMP_IF_NOT_CMP(OPCODE_JUMP_IF_NOT_INT_LE, get_int, <=);
+			OPCODE_JUMP_IF_NOT_CMP(OPCODE_JUMP_IF_NOT_INT_GT, get_int, >);
+			OPCODE_JUMP_IF_NOT_CMP(OPCODE_JUMP_IF_NOT_INT_GE, get_int, >=);
+			OPCODE_JUMP_IF_NOT_CMP(OPCODE_JUMP_IF_NOT_FLOAT_LT, get_float, <);
+			OPCODE_JUMP_IF_NOT_CMP(OPCODE_JUMP_IF_NOT_FLOAT_LE, get_float, <=);
+			OPCODE_JUMP_IF_NOT_CMP(OPCODE_JUMP_IF_NOT_FLOAT_GT, get_float, >);
+			OPCODE_JUMP_IF_NOT_CMP(OPCODE_JUMP_IF_NOT_FLOAT_GE, get_float, >=);
+#undef OPCODE_JUMP_IF_NOT_CMP
 
 			OPCODE(OPCODE_JUMP_TO_DEF_ARGUMENT) {
 				CHECK_SPACE(2);
@@ -2887,7 +3279,7 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 			OPCODE(OPCODE_RETURN) {
 				CHECK_SPACE(2);
 				GET_VARIANT_PTR(r, 0);
-				retvalue = *r;
+				VariantInternal::assign_fast(&retvalue, r);
 #ifdef DEBUG_ENABLED
 				exit_ok = true;
 #endif
@@ -2901,7 +3293,7 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 				Variant::Type ret_type = (Variant::Type)_code_ptr[ip + 2];
 				GD_ERR_BREAK(ret_type < 0 || ret_type >= Variant::VARIANT_MAX);
 
-				if (r->get_type() != ret_type) {
+				if (unlikely(r->get_type() != ret_type)) {
 					if (Variant::can_convert_strict(r->get_type(), ret_type)) {
 						Callable::CallError ce;
 						Variant::construct(ret_type, retvalue, const_cast<const Variant **>(&r), 1, ce);
@@ -2917,7 +3309,7 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 						OPCODE_BREAK;
 					}
 				} else {
-					retvalue = *r;
+					VariantInternal::assign_fast(&retvalue, r);
 				}
 #ifdef DEBUG_ENABLED
 				exit_ok = true;
@@ -3759,7 +4151,7 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 					ip = jumpto;
 				} else {
 					GET_VARIANT_PTR(iterator, 2);
-					*iterator = array->get(*idx);
+					VariantInternal::assign_fast(iterator, &array->get(*idx));
 
 					ip += 5; // Loop again.
 				}
