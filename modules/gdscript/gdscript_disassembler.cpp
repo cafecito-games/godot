@@ -141,6 +141,41 @@ void GDScriptFunction::disassemble(const Vector<String> &p_code_lines) const {
 
 				incr += 5;
 			} break;
+#define DISASSEMBLE_INLINE_BINARY(m_opcode, m_label) \
+	case m_opcode: { \
+		text += m_label " "; \
+		text += DADDR(3); \
+		text += " = "; \
+		text += DADDR(1); \
+		text += ", "; \
+		text += DADDR(2); \
+		incr += 4; \
+	} break
+				DISASSEMBLE_INLINE_BINARY(OPCODE_INT_ADD, "int_add");
+				DISASSEMBLE_INLINE_BINARY(OPCODE_INT_SUB, "int_sub");
+				DISASSEMBLE_INLINE_BINARY(OPCODE_INT_MUL, "int_mul");
+				DISASSEMBLE_INLINE_BINARY(OPCODE_INT_BIT_AND, "int_bit_and");
+				DISASSEMBLE_INLINE_BINARY(OPCODE_INT_BIT_OR, "int_bit_or");
+				DISASSEMBLE_INLINE_BINARY(OPCODE_INT_BIT_XOR, "int_bit_xor");
+				DISASSEMBLE_INLINE_BINARY(OPCODE_INT_EQ, "int_eq");
+				DISASSEMBLE_INLINE_BINARY(OPCODE_INT_NE, "int_ne");
+				DISASSEMBLE_INLINE_BINARY(OPCODE_INT_LT, "int_lt");
+				DISASSEMBLE_INLINE_BINARY(OPCODE_INT_LE, "int_le");
+				DISASSEMBLE_INLINE_BINARY(OPCODE_INT_GT, "int_gt");
+				DISASSEMBLE_INLINE_BINARY(OPCODE_INT_GE, "int_ge");
+				DISASSEMBLE_INLINE_BINARY(OPCODE_FLOAT_ADD, "float_add");
+				DISASSEMBLE_INLINE_BINARY(OPCODE_FLOAT_SUB, "float_sub");
+				DISASSEMBLE_INLINE_BINARY(OPCODE_FLOAT_MUL, "float_mul");
+				DISASSEMBLE_INLINE_BINARY(OPCODE_FLOAT_DIV, "float_div");
+				DISASSEMBLE_INLINE_BINARY(OPCODE_FLOAT_LT, "float_lt");
+				DISASSEMBLE_INLINE_BINARY(OPCODE_FLOAT_LE, "float_le");
+				DISASSEMBLE_INLINE_BINARY(OPCODE_FLOAT_GT, "float_gt");
+				DISASSEMBLE_INLINE_BINARY(OPCODE_FLOAT_GE, "float_ge");
+				DISASSEMBLE_INLINE_BINARY(OPCODE_VECTOR2_ADD, "vec2_add");
+				DISASSEMBLE_INLINE_BINARY(OPCODE_VECTOR2_SUB, "vec2_sub");
+				DISASSEMBLE_INLINE_BINARY(OPCODE_VECTOR2_MUL_FLOAT, "vec2_mul_float");
+				DISASSEMBLE_INLINE_BINARY(OPCODE_VECTOR2_MUL, "vec2_mul");
+#undef DISASSEMBLE_INLINE_BINARY
 			case OPCODE_TYPE_TEST_BUILTIN: {
 				text += "type test ";
 				text += DADDR(1);
@@ -1058,6 +1093,27 @@ void GDScriptFunction::disassemble(const Vector<String> &p_code_lines) const {
 
 				incr = 3;
 			} break;
+#define DISASSEMBLE_JUMP_IF_NOT_CMP(m_opcode, m_label) \
+	case m_opcode: { \
+		text += "jump-if-not-" m_label " "; \
+		text += DADDR(1); \
+		text += ", "; \
+		text += DADDR(2); \
+		text += " to "; \
+		text += itos(_code_ptr[ip + 3]); \
+		incr = 4; \
+	} break
+				DISASSEMBLE_JUMP_IF_NOT_CMP(OPCODE_JUMP_IF_NOT_INT_EQ, "int-eq");
+				DISASSEMBLE_JUMP_IF_NOT_CMP(OPCODE_JUMP_IF_NOT_INT_NE, "int-ne");
+				DISASSEMBLE_JUMP_IF_NOT_CMP(OPCODE_JUMP_IF_NOT_INT_LT, "int-lt");
+				DISASSEMBLE_JUMP_IF_NOT_CMP(OPCODE_JUMP_IF_NOT_INT_LE, "int-le");
+				DISASSEMBLE_JUMP_IF_NOT_CMP(OPCODE_JUMP_IF_NOT_INT_GT, "int-gt");
+				DISASSEMBLE_JUMP_IF_NOT_CMP(OPCODE_JUMP_IF_NOT_INT_GE, "int-ge");
+				DISASSEMBLE_JUMP_IF_NOT_CMP(OPCODE_JUMP_IF_NOT_FLOAT_LT, "float-lt");
+				DISASSEMBLE_JUMP_IF_NOT_CMP(OPCODE_JUMP_IF_NOT_FLOAT_LE, "float-le");
+				DISASSEMBLE_JUMP_IF_NOT_CMP(OPCODE_JUMP_IF_NOT_FLOAT_GT, "float-gt");
+				DISASSEMBLE_JUMP_IF_NOT_CMP(OPCODE_JUMP_IF_NOT_FLOAT_GE, "float-ge");
+#undef DISASSEMBLE_JUMP_IF_NOT_CMP
 			case OPCODE_JUMP_TO_DEF_ARGUMENT: {
 				text += "jump-to-default-argument ";
 

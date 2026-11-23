@@ -62,6 +62,29 @@ uint32_t GDScriptByteCodeGenerator::add_parameter(const StringName &p_name, bool
 uint32_t GDScriptByteCodeGenerator::add_local(const StringName &p_name, const GDScriptDataType &p_type) {
 	int stack_pos = locals.size() + GDScriptFunction::FIXED_ADDRESSES_MAX;
 	locals.push_back(StackSlot(p_type.builtin_type, p_type.can_contain_object()));
+	Variant::Type recorded_type = Variant::VARIANT_MAX;
+	if (p_type.kind == GDScriptDataType::BUILTIN) {
+		switch (p_type.builtin_type) {
+			case Variant::BOOL:
+			case Variant::INT:
+			case Variant::FLOAT:
+			case Variant::VECTOR2:
+				recorded_type = p_type.builtin_type;
+				break;
+			default:
+				break;
+		}
+	}
+	if (stack_pos >= local_slot_types.size()) {
+		int old_size = local_slot_types.size();
+		local_slot_types.resize(stack_pos + 1);
+		for (int index = old_size; index < stack_pos; index++) {
+			local_slot_types.write[index] = Variant::VARIANT_MAX;
+		}
+		local_slot_types.write[stack_pos] = recorded_type;
+	} else if (local_slot_types[stack_pos] != recorded_type) {
+		local_slot_types.write[stack_pos] = Variant::VARIANT_MAX;
+	}
 	add_stack_identifier(p_name, stack_pos);
 	return stack_pos;
 }
@@ -192,6 +215,447 @@ void GDScriptByteCodeGenerator::write_start(GDScript *p_script, const StringName
 	function->_argument_count = 0;
 }
 
+static Variant::Type _get_inline_binary_result_type(GDScriptFunction::Opcode p_opcode) {
+	switch (p_opcode) {
+		case GDScriptFunction::OPCODE_INT_ADD:
+		case GDScriptFunction::OPCODE_INT_SUB:
+		case GDScriptFunction::OPCODE_INT_MUL:
+		case GDScriptFunction::OPCODE_INT_BIT_AND:
+		case GDScriptFunction::OPCODE_INT_BIT_OR:
+		case GDScriptFunction::OPCODE_INT_BIT_XOR:
+			return Variant::INT;
+		case GDScriptFunction::OPCODE_INT_EQ:
+		case GDScriptFunction::OPCODE_INT_NE:
+		case GDScriptFunction::OPCODE_INT_LT:
+		case GDScriptFunction::OPCODE_INT_LE:
+		case GDScriptFunction::OPCODE_INT_GT:
+		case GDScriptFunction::OPCODE_INT_GE:
+		case GDScriptFunction::OPCODE_FLOAT_LT:
+		case GDScriptFunction::OPCODE_FLOAT_LE:
+		case GDScriptFunction::OPCODE_FLOAT_GT:
+		case GDScriptFunction::OPCODE_FLOAT_GE:
+			return Variant::BOOL;
+		case GDScriptFunction::OPCODE_FLOAT_ADD:
+		case GDScriptFunction::OPCODE_FLOAT_SUB:
+		case GDScriptFunction::OPCODE_FLOAT_MUL:
+		case GDScriptFunction::OPCODE_FLOAT_DIV:
+			return Variant::FLOAT;
+		case GDScriptFunction::OPCODE_VECTOR2_ADD:
+		case GDScriptFunction::OPCODE_VECTOR2_SUB:
+		case GDScriptFunction::OPCODE_VECTOR2_MUL_FLOAT:
+		case GDScriptFunction::OPCODE_VECTOR2_MUL:
+			return Variant::VECTOR2;
+		default:
+			return Variant::VARIANT_MAX;
+	}
+}
+
+static GDScriptFunction::Opcode _get_fused_jump_if_not_opcode(GDScriptFunction::Opcode p_opcode) {
+	switch (p_opcode) {
+		case GDScriptFunction::OPCODE_INT_EQ:
+			return GDScriptFunction::OPCODE_JUMP_IF_NOT_INT_EQ;
+		case GDScriptFunction::OPCODE_INT_NE:
+			return GDScriptFunction::OPCODE_JUMP_IF_NOT_INT_NE;
+		case GDScriptFunction::OPCODE_INT_LT:
+			return GDScriptFunction::OPCODE_JUMP_IF_NOT_INT_LT;
+		case GDScriptFunction::OPCODE_INT_LE:
+			return GDScriptFunction::OPCODE_JUMP_IF_NOT_INT_LE;
+		case GDScriptFunction::OPCODE_INT_GT:
+			return GDScriptFunction::OPCODE_JUMP_IF_NOT_INT_GT;
+		case GDScriptFunction::OPCODE_INT_GE:
+			return GDScriptFunction::OPCODE_JUMP_IF_NOT_INT_GE;
+		case GDScriptFunction::OPCODE_FLOAT_LT:
+			return GDScriptFunction::OPCODE_JUMP_IF_NOT_FLOAT_LT;
+		case GDScriptFunction::OPCODE_FLOAT_LE:
+			return GDScriptFunction::OPCODE_JUMP_IF_NOT_FLOAT_LE;
+		case GDScriptFunction::OPCODE_FLOAT_GT:
+			return GDScriptFunction::OPCODE_JUMP_IF_NOT_FLOAT_GT;
+		case GDScriptFunction::OPCODE_FLOAT_GE:
+			return GDScriptFunction::OPCODE_JUMP_IF_NOT_FLOAT_GE;
+		default:
+			return GDScriptFunction::OPCODE_END;
+	}
+}
+
+static bool _inline_binary_input_matches_result_type(GDScriptFunction::Opcode p_opcode, bool p_is_left) {
+	switch (p_opcode) {
+		case GDScriptFunction::OPCODE_INT_ADD:
+		case GDScriptFunction::OPCODE_INT_SUB:
+		case GDScriptFunction::OPCODE_INT_MUL:
+		case GDScriptFunction::OPCODE_INT_BIT_AND:
+		case GDScriptFunction::OPCODE_INT_BIT_OR:
+		case GDScriptFunction::OPCODE_INT_BIT_XOR:
+		case GDScriptFunction::OPCODE_FLOAT_ADD:
+		case GDScriptFunction::OPCODE_FLOAT_SUB:
+		case GDScriptFunction::OPCODE_FLOAT_MUL:
+		case GDScriptFunction::OPCODE_FLOAT_DIV:
+		case GDScriptFunction::OPCODE_VECTOR2_ADD:
+		case GDScriptFunction::OPCODE_VECTOR2_SUB:
+		case GDScriptFunction::OPCODE_VECTOR2_MUL:
+			return true;
+		case GDScriptFunction::OPCODE_VECTOR2_MUL_FLOAT:
+			return p_is_left;
+		default:
+			return false;
+	}
+}
+
+void GDScriptByteCodeGenerator::optimize_bytecode() {
+	using namespace GDScriptBytecodeFormat;
+
+	if (opcodes.is_empty()) {
+		return;
+	}
+
+	struct DecodedInstruction {
+		int old_ip = 0;
+		int word_count = 0;
+		GDScriptFunction::Opcode opcode = GDScriptFunction::OPCODE_END;
+	};
+
+	LocalVector<DecodedInstruction> instructions;
+	LocalVector<int> old_ip_to_instr_index;
+	old_ip_to_instr_index.resize(opcodes.size() + 1);
+	for (uint32_t i = 0; i < old_ip_to_instr_index.size(); i++) {
+		old_ip_to_instr_index[i] = -1;
+	}
+
+	HashSet<int> protected_ips;
+	for (int i = 0; i < function->default_arguments.size(); i++) {
+		protected_ips.insert(function->default_arguments[i]);
+	}
+
+	const int first_temp_index = GDScriptFunction::FIXED_ADDRESSES_MAX + max_locals;
+	const int min_temporary_slot = GDScriptFunction::FIXED_ADDRESSES_MAX + function->_argument_count + (function->is_vararg() ? 1 : 0);
+
+	LocalVector<Variant::Type> guaranteed_slot_type;
+	guaranteed_slot_type.resize(first_temp_index);
+	for (int slot = 0; slot < first_temp_index; slot++) {
+		if (slot >= GDScriptFunction::FIXED_ADDRESSES_MAX && slot < local_slot_types.size()) {
+			guaranteed_slot_type[slot] = local_slot_types[slot];
+		} else {
+			guaranteed_slot_type[slot] = Variant::VARIANT_MAX;
+		}
+	}
+
+	int cursor = 0;
+	while (cursor < opcodes.size()) {
+		const GDScriptFunction::Opcode opcode = static_cast<GDScriptFunction::Opcode>(opcodes[cursor]);
+		const OpcodeLayout &layout = GDScriptFunction::get_opcode_layout(opcode);
+		int word_count = 0;
+		if (!layout.is_vararg) {
+			word_count = layout.word_count;
+			for (int op_idx = 0; op_idx < layout.operand_count; op_idx++) {
+				if (layout.operands[op_idx] == OPERAND_JUMP_TARGET) {
+					protected_ips.insert(opcodes[cursor + 1 + op_idx]);
+				}
+			}
+		} else {
+			const int instr_arg_count = opcodes[cursor + 1];
+			word_count = 2 + instr_arg_count + layout.word_count;
+		}
+
+		if (opcode == GDScriptFunction::OPCODE_AWAIT && cursor + word_count < opcodes.size()) {
+			protected_ips.insert(cursor + word_count);
+		} else if (opcode == GDScriptFunction::OPCODE_ASSIGN_NULL) {
+			const int raw_address = opcodes[cursor + 1];
+			const int addr_type = (raw_address & GDScriptFunction::ADDR_TYPE_MASK) >> GDScriptFunction::ADDR_BITS;
+			const int addr_index = raw_address & GDScriptFunction::ADDR_MASK;
+			if (addr_type == GDScriptFunction::ADDR_TYPE_STACK && addr_index < first_temp_index) {
+				guaranteed_slot_type[addr_index] = Variant::VARIANT_MAX;
+			}
+		}
+
+		old_ip_to_instr_index[cursor] = static_cast<int>(instructions.size());
+		instructions.push_back(DecodedInstruction{ cursor, word_count, opcode });
+		cursor += word_count;
+	}
+
+	auto is_temp_address = [first_temp_index](int p_raw_address) -> bool {
+		const int addr_type = (p_raw_address & GDScriptFunction::ADDR_TYPE_MASK) >> GDScriptFunction::ADDR_BITS;
+		const int addr_index = p_raw_address & GDScriptFunction::ADDR_MASK;
+		return addr_type == GDScriptFunction::ADDR_TYPE_STACK && addr_index >= first_temp_index;
+	};
+
+	LocalVector<uint32_t> visit_stamp;
+	visit_stamp.resize(instructions.size());
+	for (uint32_t i = 0; i < visit_stamp.size(); i++) {
+		visit_stamp[i] = 0;
+	}
+	uint32_t current_stamp = 0;
+	LocalVector<int> worklist;
+
+	auto is_temp_dead_from = [&](const LocalVector<int> &p_roots, int p_temp_address) -> bool {
+		current_stamp++;
+		worklist.clear();
+		for (uint32_t r = 0; r < p_roots.size(); r++) {
+			const int root_idx = p_roots[r];
+			if (root_idx >= 0 && root_idx < static_cast<int>(instructions.size())) {
+				worklist.push_back(root_idx);
+			}
+		}
+
+		while (!worklist.is_empty()) {
+			const int instr_idx = worklist[worklist.size() - 1];
+			worklist.resize(worklist.size() - 1);
+			if (visit_stamp[instr_idx] == current_stamp) {
+				continue;
+			}
+			visit_stamp[instr_idx] = current_stamp;
+
+			const DecodedInstruction &inst = instructions[instr_idx];
+			const int ip = inst.old_ip;
+			const OpcodeLayout &layout = GDScriptFunction::get_opcode_layout(inst.opcode);
+			bool killed = false;
+
+			if (_get_inline_binary_result_type(inst.opcode) != Variant::VARIANT_MAX || inst.opcode == GDScriptFunction::OPCODE_OPERATOR_VALIDATED) {
+				if (opcodes[ip + 1] == p_temp_address || opcodes[ip + 2] == p_temp_address) {
+					return false;
+				}
+				if (opcodes[ip + 3] == p_temp_address) {
+					killed = true;
+				}
+			} else if (inst.opcode == GDScriptFunction::OPCODE_ASSIGN) {
+				if (opcodes[ip + 2] == p_temp_address) {
+					return false;
+				}
+				if (opcodes[ip + 1] == p_temp_address) {
+					killed = true;
+				}
+			} else if (inst.opcode == GDScriptFunction::OPCODE_ASSIGN_NULL || inst.opcode == GDScriptFunction::OPCODE_ASSIGN_TRUE || inst.opcode == GDScriptFunction::OPCODE_ASSIGN_FALSE) {
+				if (opcodes[ip + 1] == p_temp_address) {
+					killed = true;
+				}
+			} else if (!layout.is_vararg) {
+				for (int op_idx = 0; op_idx < layout.operand_count; op_idx++) {
+					if (layout.operands[op_idx] == OPERAND_ADDRESS && opcodes[ip + 1 + op_idx] == p_temp_address) {
+						return false;
+					}
+				}
+			} else {
+				const int instr_arg_count = opcodes[ip + 1];
+				for (int arg_idx = 0; arg_idx < instr_arg_count; arg_idx++) {
+					if (opcodes[ip + 2 + arg_idx] == p_temp_address) {
+						return false;
+					}
+				}
+			}
+
+			if (killed) {
+				continue;
+			}
+
+			if (inst.opcode == GDScriptFunction::OPCODE_JUMP) {
+				const int target_ip = opcodes[ip + 1];
+				if (target_ip >= 0 && target_ip < static_cast<int>(old_ip_to_instr_index.size()) && old_ip_to_instr_index[target_ip] >= 0) {
+					worklist.push_back(old_ip_to_instr_index[target_ip]);
+				}
+			} else if (inst.opcode == GDScriptFunction::OPCODE_RETURN ||
+					inst.opcode == GDScriptFunction::OPCODE_RETURN_TYPED_BUILTIN ||
+					inst.opcode == GDScriptFunction::OPCODE_RETURN_TYPED_ARRAY ||
+					inst.opcode == GDScriptFunction::OPCODE_RETURN_TYPED_DICTIONARY ||
+					inst.opcode == GDScriptFunction::OPCODE_RETURN_TYPED_NATIVE ||
+					inst.opcode == GDScriptFunction::OPCODE_RETURN_TYPED_SCRIPT ||
+					inst.opcode == GDScriptFunction::OPCODE_END) {
+				continue;
+			} else {
+				if (instr_idx + 1 < static_cast<int>(instructions.size())) {
+					worklist.push_back(instr_idx + 1);
+				}
+				if (inst.opcode == GDScriptFunction::OPCODE_JUMP_TO_DEF_ARGUMENT) {
+					for (int d = 0; d < function->default_arguments.size(); d++) {
+						const int target_ip = function->default_arguments[d];
+						if (target_ip >= 0 && target_ip < static_cast<int>(old_ip_to_instr_index.size()) && old_ip_to_instr_index[target_ip] >= 0) {
+							worklist.push_back(old_ip_to_instr_index[target_ip]);
+						}
+					}
+				} else if (!layout.is_vararg) {
+					for (int op_idx = 0; op_idx < layout.operand_count; op_idx++) {
+						if (layout.operands[op_idx] == OPERAND_JUMP_TARGET) {
+							const int target_ip = opcodes[ip + 1 + op_idx];
+							if (target_ip >= 0 && target_ip < static_cast<int>(old_ip_to_instr_index.size()) && old_ip_to_instr_index[target_ip] >= 0) {
+								worklist.push_back(old_ip_to_instr_index[target_ip]);
+							}
+						}
+					}
+				}
+			}
+		}
+
+		return true;
+	};
+
+	Vector<int> new_opcodes;
+	new_opcodes.resize(0);
+	LocalVector<int> old_ip_to_new_ip;
+	old_ip_to_new_ip.resize(opcodes.size() + 1);
+	for (uint32_t i = 0; i < old_ip_to_new_ip.size(); i++) {
+		old_ip_to_new_ip[i] = -1;
+	}
+
+	HashSet<int> fused_local_slots;
+	bool modified = false;
+	LocalVector<int> roots;
+
+	for (uint32_t i = 0; i < instructions.size(); i++) {
+		const DecodedInstruction &inst = instructions[i];
+		const int ip = inst.old_ip;
+		old_ip_to_new_ip[ip] = new_opcodes.size();
+
+		// Pattern A: Fuse inline compare + JUMP_IF_NOT on a dead temporary bool.
+		const GDScriptFunction::Opcode fused_jump = _get_fused_jump_if_not_opcode(inst.opcode);
+		if (fused_jump != GDScriptFunction::OPCODE_END && i + 1 < instructions.size()) {
+			const DecodedInstruction &next_inst = instructions[i + 1];
+			if (next_inst.opcode == GDScriptFunction::OPCODE_JUMP_IF_NOT && !protected_ips.has(next_inst.old_ip)) {
+				const int temp_bool = opcodes[ip + 3];
+				if (is_temp_address(temp_bool) && opcodes[next_inst.old_ip + 1] == temp_bool) {
+					const int target_ip = opcodes[next_inst.old_ip + 2];
+					const int target_idx = (target_ip >= 0 && target_ip < static_cast<int>(old_ip_to_instr_index.size())) ? old_ip_to_instr_index[target_ip] : -1;
+					roots.clear();
+					roots.push_back(static_cast<int>(i + 2));
+					if (target_idx >= 0) {
+						roots.push_back(target_idx);
+					}
+					if (is_temp_dead_from(roots, temp_bool)) {
+						new_opcodes.push_back(fused_jump);
+						new_opcodes.push_back(opcodes[ip + 1]);
+						new_opcodes.push_back(opcodes[ip + 2]);
+						new_opcodes.push_back(target_ip);
+						modified = true;
+						i++;
+						continue;
+					}
+				}
+			}
+		}
+
+		// Pattern B: Eliminate redundant temp->destination ASSIGN after an inline typed binary op.
+		const Variant::Type result_type = _get_inline_binary_result_type(inst.opcode);
+		if (result_type != Variant::VARIANT_MAX && i + 1 < instructions.size()) {
+			const DecodedInstruction &next_inst = instructions[i + 1];
+			if (next_inst.opcode == GDScriptFunction::OPCODE_ASSIGN && !protected_ips.has(next_inst.old_ip)) {
+				const int left_addr = opcodes[ip + 1];
+				const int right_addr = opcodes[ip + 2];
+				const int temp_dst = opcodes[ip + 3];
+				const int assign_dst = opcodes[next_inst.old_ip + 1];
+				const int assign_src = opcodes[next_inst.old_ip + 2];
+				if (is_temp_address(temp_dst) && assign_src == temp_dst) {
+					bool dst_type_guaranteed = false;
+					int dst_local_slot_to_preinit = -1;
+
+					if ((assign_dst == left_addr && _inline_binary_input_matches_result_type(inst.opcode, true)) ||
+							(assign_dst == right_addr && _inline_binary_input_matches_result_type(inst.opcode, false))) {
+						dst_type_guaranteed = true;
+					} else {
+						const int dst_addr_type = (assign_dst & GDScriptFunction::ADDR_TYPE_MASK) >> GDScriptFunction::ADDR_BITS;
+						const int dst_addr_index = assign_dst & GDScriptFunction::ADDR_MASK;
+						if (dst_addr_type == GDScriptFunction::ADDR_TYPE_STACK && dst_addr_index >= GDScriptFunction::FIXED_ADDRESSES_MAX && dst_addr_index < first_temp_index) {
+							const int required_param_end = GDScriptFunction::FIXED_ADDRESSES_MAX + function->_argument_count - function->_default_arg_count;
+							if (guaranteed_slot_type[dst_addr_index] == result_type && (dst_addr_index < required_param_end || dst_addr_index >= min_temporary_slot)) {
+								dst_type_guaranteed = true;
+								if (dst_addr_index >= min_temporary_slot) {
+									dst_local_slot_to_preinit = dst_addr_index;
+								}
+							}
+						}
+					}
+
+					if (dst_type_guaranteed) {
+						roots.clear();
+						roots.push_back(static_cast<int>(i + 2));
+						if (is_temp_dead_from(roots, temp_dst)) {
+							new_opcodes.push_back(inst.opcode);
+							new_opcodes.push_back(left_addr);
+							new_opcodes.push_back(right_addr);
+							new_opcodes.push_back(assign_dst);
+							if (dst_local_slot_to_preinit >= 0) {
+								fused_local_slots.insert(dst_local_slot_to_preinit);
+							}
+							modified = true;
+							i++;
+							continue;
+						}
+					}
+				}
+			}
+		}
+
+		for (int w = 0; w < inst.word_count; w++) {
+			new_opcodes.push_back(opcodes[ip + w]);
+		}
+	}
+
+	old_ip_to_new_ip[opcodes.size()] = new_opcodes.size();
+
+	if (!modified) {
+		return;
+	}
+
+	auto remap_and_thread_jump = [&](int p_old_target) -> int {
+		int mapped = old_ip_to_new_ip[p_old_target];
+		for (int hops = 0; hops < 16 && mapped >= 0 && mapped < new_opcodes.size(); hops++) {
+			if (new_opcodes[mapped] != GDScriptFunction::OPCODE_JUMP) {
+				break;
+			}
+			const int next_old = new_opcodes[mapped + 1];
+			if (next_old < 0 || next_old >= static_cast<int>(old_ip_to_new_ip.size()) || old_ip_to_new_ip[next_old] < 0) {
+				break;
+			}
+			const int next_mapped = old_ip_to_new_ip[next_old];
+			if (next_mapped == mapped) {
+				break;
+			}
+			mapped = next_mapped;
+		}
+		return mapped;
+	};
+
+	// First compute final jump targets from original old_ip targets before overwriting new_opcodes in place.
+	LocalVector<Pair<int, int>> jump_patches;
+	int scan_ip = 0;
+	while (scan_ip < new_opcodes.size()) {
+		const GDScriptFunction::Opcode opcode = static_cast<GDScriptFunction::Opcode>(new_opcodes[scan_ip]);
+		const OpcodeLayout &layout = GDScriptFunction::get_opcode_layout(opcode);
+		if (!layout.is_vararg) {
+			for (int op_idx = 0; op_idx < layout.operand_count; op_idx++) {
+				if (layout.operands[op_idx] == OPERAND_JUMP_TARGET) {
+					const int old_target = new_opcodes[scan_ip + 1 + op_idx];
+					jump_patches.push_back(Pair<int, int>(scan_ip + 1 + op_idx, remap_and_thread_jump(old_target)));
+				}
+			}
+			scan_ip += layout.word_count;
+		} else {
+			const int instr_arg_count = new_opcodes[scan_ip + 1];
+			scan_ip += 2 + instr_arg_count + layout.word_count;
+		}
+	}
+
+	for (uint32_t p = 0; p < jump_patches.size(); p++) {
+		new_opcodes.write[jump_patches[p].first] = jump_patches[p].second;
+	}
+
+	for (int d = 0; d < function->default_arguments.size(); d++) {
+		function->default_arguments.write[d] = old_ip_to_new_ip[function->default_arguments[d]];
+	}
+
+#ifdef GDSCRIPT_BYTECODE_EXPORT_ENABLED
+	for (int g = 0; g < export_fixups.global_stores.size(); g++) {
+		const int old_instr_ip = export_fixups.global_stores[g].code_offset - 2;
+		export_fixups.global_stores.write[g].code_offset = old_ip_to_new_ip[old_instr_ip] + 2;
+	}
+	for (int o = 0; o < export_fixups.operator_cache_offsets.size(); o++) {
+		const int old_instr_ip = export_fixups.operator_cache_offsets[o];
+		export_fixups.operator_cache_offsets.write[o] = old_ip_to_new_ip[old_instr_ip];
+	}
+#endif
+
+	for (const int slot : fused_local_slots) {
+		function->temporary_slots.push_back(Pair<int, Variant::Type>(slot, guaranteed_slot_type[slot]));
+	}
+
+	opcodes = new_opcodes;
+}
+
 GDScriptFunction *GDScriptByteCodeGenerator::write_end() {
 #ifdef DEBUG_ENABLED
 	if (!used_temporaries.is_empty()) {
@@ -209,6 +673,8 @@ GDScriptFunction *GDScriptByteCodeGenerator::write_end() {
 			function->temporary_slots.push_back(Pair(stack_index, temporaries[i].type));
 		}
 	}
+
+	optimize_bytecode();
 
 	if (constant_map.size()) {
 		function->_constant_count = constant_map.size();
@@ -660,16 +1126,116 @@ void GDScriptByteCodeGenerator::write_binary_operator(const Address &p_target, V
 	}
 
 	if (valid) {
+		const Variant::Type left_type = p_left_operand.type.builtin_type;
+		const Variant::Type right_type = p_right_operand.type.builtin_type;
+
 		if (p_target.mode == Address::TEMPORARY) {
-			Variant::Type result_type = Variant::get_operator_return_type(p_operator, p_left_operand.type.builtin_type, p_right_operand.type.builtin_type);
+			Variant::Type result_type = Variant::get_operator_return_type(p_operator, left_type, right_type);
 			Variant::Type temp_type = temporaries[p_target.address].type;
 			if (result_type != temp_type) {
 				write_type_adjust(p_target, result_type);
 			}
 		}
 
+		GDScriptFunction::Opcode specialized_opcode = GDScriptFunction::OPCODE_END;
+		if (left_type == Variant::INT && right_type == Variant::INT) {
+			switch (p_operator) {
+				case Variant::OP_ADD:
+					specialized_opcode = GDScriptFunction::OPCODE_INT_ADD;
+					break;
+				case Variant::OP_SUBTRACT:
+					specialized_opcode = GDScriptFunction::OPCODE_INT_SUB;
+					break;
+				case Variant::OP_MULTIPLY:
+					specialized_opcode = GDScriptFunction::OPCODE_INT_MUL;
+					break;
+				case Variant::OP_BIT_AND:
+					specialized_opcode = GDScriptFunction::OPCODE_INT_BIT_AND;
+					break;
+				case Variant::OP_BIT_OR:
+					specialized_opcode = GDScriptFunction::OPCODE_INT_BIT_OR;
+					break;
+				case Variant::OP_BIT_XOR:
+					specialized_opcode = GDScriptFunction::OPCODE_INT_BIT_XOR;
+					break;
+				case Variant::OP_EQUAL:
+					specialized_opcode = GDScriptFunction::OPCODE_INT_EQ;
+					break;
+				case Variant::OP_NOT_EQUAL:
+					specialized_opcode = GDScriptFunction::OPCODE_INT_NE;
+					break;
+				case Variant::OP_LESS:
+					specialized_opcode = GDScriptFunction::OPCODE_INT_LT;
+					break;
+				case Variant::OP_LESS_EQUAL:
+					specialized_opcode = GDScriptFunction::OPCODE_INT_LE;
+					break;
+				case Variant::OP_GREATER:
+					specialized_opcode = GDScriptFunction::OPCODE_INT_GT;
+					break;
+				case Variant::OP_GREATER_EQUAL:
+					specialized_opcode = GDScriptFunction::OPCODE_INT_GE;
+					break;
+				default:
+					break;
+			}
+		} else if (left_type == Variant::FLOAT && right_type == Variant::FLOAT) {
+			switch (p_operator) {
+				case Variant::OP_ADD:
+					specialized_opcode = GDScriptFunction::OPCODE_FLOAT_ADD;
+					break;
+				case Variant::OP_SUBTRACT:
+					specialized_opcode = GDScriptFunction::OPCODE_FLOAT_SUB;
+					break;
+				case Variant::OP_MULTIPLY:
+					specialized_opcode = GDScriptFunction::OPCODE_FLOAT_MUL;
+					break;
+				case Variant::OP_DIVIDE:
+					specialized_opcode = GDScriptFunction::OPCODE_FLOAT_DIV;
+					break;
+				case Variant::OP_LESS:
+					specialized_opcode = GDScriptFunction::OPCODE_FLOAT_LT;
+					break;
+				case Variant::OP_LESS_EQUAL:
+					specialized_opcode = GDScriptFunction::OPCODE_FLOAT_LE;
+					break;
+				case Variant::OP_GREATER:
+					specialized_opcode = GDScriptFunction::OPCODE_FLOAT_GT;
+					break;
+				case Variant::OP_GREATER_EQUAL:
+					specialized_opcode = GDScriptFunction::OPCODE_FLOAT_GE;
+					break;
+				default:
+					break;
+			}
+		} else if (left_type == Variant::VECTOR2 && right_type == Variant::VECTOR2) {
+			switch (p_operator) {
+				case Variant::OP_ADD:
+					specialized_opcode = GDScriptFunction::OPCODE_VECTOR2_ADD;
+					break;
+				case Variant::OP_SUBTRACT:
+					specialized_opcode = GDScriptFunction::OPCODE_VECTOR2_SUB;
+					break;
+				case Variant::OP_MULTIPLY:
+					specialized_opcode = GDScriptFunction::OPCODE_VECTOR2_MUL;
+					break;
+				default:
+					break;
+			}
+		} else if (left_type == Variant::VECTOR2 && right_type == Variant::FLOAT && p_operator == Variant::OP_MULTIPLY) {
+			specialized_opcode = GDScriptFunction::OPCODE_VECTOR2_MUL_FLOAT;
+		}
+
+		if (specialized_opcode != GDScriptFunction::OPCODE_END) {
+			append_opcode(specialized_opcode);
+			append(p_left_operand);
+			append(p_right_operand);
+			append(p_target);
+			return;
+		}
+
 		// Gather specific operator.
-		Variant::ValidatedOperatorEvaluator op_func = Variant::get_validated_operator_evaluator(p_operator, p_left_operand.type.builtin_type, p_right_operand.type.builtin_type);
+		Variant::ValidatedOperatorEvaluator op_func = Variant::get_validated_operator_evaluator(p_operator, left_type, right_type);
 
 		append_opcode(GDScriptFunction::OPCODE_OPERATOR_VALIDATED);
 		append(p_left_operand);
@@ -680,7 +1246,7 @@ void GDScriptByteCodeGenerator::write_binary_operator(const Address &p_target, V
 		record_export_fixup(
 				export_fixups.operators,
 				get_operation_pos(op_func),
-				GDScriptFunction::ExportFixups::OperatorFixup{ p_operator, p_left_operand.type.builtin_type, p_right_operand.type.builtin_type });
+				GDScriptFunction::ExportFixups::OperatorFixup{ p_operator, left_type, right_type });
 #endif
 #ifdef DEBUG_ENABLED
 		add_debug_name(operator_names, get_operation_pos(op_func), Variant::get_operator_name(p_operator));

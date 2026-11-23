@@ -209,10 +209,11 @@ TEST_SUITE("[Modules][GDScript][BytecodeABI]") {
 extends RefCounted
 
 func exercise_all_fixups(untyped_left, untyped_right, runtime_float: float) -> Dictionary:
-	# Validated unary & binary operators.
+	# Validated unary & binary operators (plus specialized inline binary op).
 	var typed_left: int = 10
 	var typed_right: int = 5
 	var validated_sum: int = typed_left + typed_right
+	var validated_shift: int = typed_left << 1
 	var validated_neg: int = -typed_left
 
 	# Unvalidated dynamic OPCODE_OPERATOR (binary + unary).
@@ -258,6 +259,7 @@ func exercise_all_fixups(untyped_left, untyped_right, runtime_float: float) -> D
 		source_code += R"(
 	return {
 		"validated_sum": validated_sum,
+		"validated_shift": validated_shift,
 		"validated_neg": validated_neg,
 		"dynamic_sum": dynamic_sum,
 		"dynamic_neg": dynamic_neg,

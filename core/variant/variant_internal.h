@@ -227,6 +227,34 @@ public:
 
 	_FORCE_INLINE_ static const ObjectID get_object_id(const Variant *v) { return v->_get_obj().id; }
 
+	_FORCE_INLINE_ static void assign_fast(Variant *p_dst, const Variant *p_src) {
+		if (likely(!Variant::needs_deinit[p_dst->type] && !Variant::needs_deinit[p_src->type])) {
+			p_dst->type = p_src->type;
+			p_dst->_data = p_src->_data;
+		} else {
+			*p_dst = *p_src;
+		}
+	}
+
+	_FORCE_INLINE_ static void assign_move_fast(Variant *p_dst, Variant &p_src) {
+		if (unlikely(Variant::needs_deinit[p_dst->type])) {
+			p_dst->_clear_internal();
+		}
+		p_dst->type = p_src.type;
+		p_dst->_data = p_src._data;
+		p_src.type = Variant::NIL;
+	}
+
+	_FORCE_INLINE_ static void construct_copy_fast(Variant *p_uninitialized_dst, const Variant *p_src) {
+		if (likely(!Variant::needs_deinit[p_src->type])) {
+			memnew_placement(p_uninitialized_dst, Variant);
+			p_uninitialized_dst->type = p_src->type;
+			p_uninitialized_dst->_data = p_src->_data;
+		} else {
+			memnew_placement(p_uninitialized_dst, Variant(*p_src));
+		}
+	}
+
 	template <typename T>
 	_FORCE_INLINE_ static void init_generic(Variant *v) {
 		v->type = GetTypeInfo<T>::VARIANT_TYPE;

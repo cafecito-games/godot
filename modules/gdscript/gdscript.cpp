@@ -1505,6 +1505,7 @@ void GDScript::clear() {
 		return;
 	}
 	clearing = true;
+	GDScriptFunction::invalidate_call_caches();
 
 	RBSet<GDScriptFunction *> functions_to_clear;
 

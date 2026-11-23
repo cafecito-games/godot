@@ -41,6 +41,8 @@
 #include "core/templates/self_list.h"
 #include "core/variant/variant.h"
 
+#include <atomic>
+
 class GDScriptInstance;
 class GDScript;
 
@@ -64,6 +66,16 @@ public:
 	Ref<Script> script_type_ref;
 
 	_FORCE_INLINE_ bool has_type() const { return kind != VARIANT; }
+
+	_FORCE_INLINE_ bool is_type_exact_fast(const Variant &p_variant) const {
+		if (kind == VARIANT) {
+			return true;
+		}
+		if (kind == BUILTIN && builtin_type != Variant::ARRAY && builtin_type != Variant::DICTIONARY) {
+			return p_variant.get_type() == builtin_type;
+		}
+		return is_type(p_variant, false);
+	}
 
 	bool is_type(const Variant &p_variant, bool p_allow_implicit_conversion = false) const;
 
@@ -336,6 +348,94 @@ private:
 	MethodBind **_methods_ptr = nullptr;
 	GDScriptFunction **_lambdas_ptr = nullptr;
 
+	struct CallCacheSlot {
+		const GDScript *script = nullptr;
+		GDScriptFunction *function = nullptr;
+	};
+
+	struct CallInlineCache {
+		static constexpr uint32_t MAX_SLOTS = 4;
+		static constexpr uint32_t LOCKED_STATE = 0xFF;
+		std::atomic<uint64_t> epoch_and_count{ 0 };
+		CallCacheSlot slots[MAX_SLOTS];
+	};
+
+	mutable std::atomic<CallInlineCache *> _call_cache{ nullptr };
+
+	struct MemberCacheSlot {
+		enum Kind : uint8_t {
+			NONE = 0,
+			GDSCRIPT_DIRECT,
+			GDSCRIPT_ACCESSOR,
+			NATIVE_PROPERTY,
+		};
+		Kind kind = NONE;
+		Variant::Type getter_return_type = Variant::NIL;
+		Variant::Type setter_arg_type = Variant::NIL;
+		int member_index = -1;
+		const void *key = nullptr;
+		const GDScriptDataType *member_data_type = nullptr;
+		GDScriptFunction *getter_func = nullptr;
+		GDScriptFunction *setter_func = nullptr;
+		MethodBind *native_getter = nullptr;
+		MethodBind *native_setter = nullptr;
+	};
+
+	struct MemberInlineCache {
+		static constexpr uint32_t MAX_SLOTS = 4;
+		static constexpr uint32_t LOCKED_STATE = 0xFF;
+		std::atomic<uint64_t> epoch_and_count{ 0 };
+		MemberCacheSlot slots[MAX_SLOTS];
+	};
+
+	mutable std::atomic<MemberInlineCache *> _member_cache{ nullptr };
+	static std::atomic<uint64_t> _script_clear_epoch;
+
+	static GDScriptFunction *_find_gdscript_function_in_chain(const GDScript *p_script, const StringName &p_name);
+	GDScriptFunction *_populate_call_cache(int p_methodname_idx, const GDScript *p_target_script) const;
+	const MemberCacheSlot *_populate_gdscript_member_cache(int p_name_idx, const GDScript *p_target_script) const;
+	const MemberCacheSlot *_populate_native_member_cache(int p_name_idx, const Object *p_object) const;
+
+	_FORCE_INLINE_ const MemberCacheSlot *_lookup_member_cache(int p_name_idx, const void *p_key) const {
+		MemberInlineCache *cache_array = _member_cache.load(std::memory_order_acquire);
+		if (likely(cache_array != nullptr)) {
+			const MemberInlineCache &entry = cache_array[p_name_idx];
+			const uint64_t current_epoch = _script_clear_epoch.load(std::memory_order_relaxed);
+			const uint64_t meta = entry.epoch_and_count.load(std::memory_order_acquire);
+			if (likely((meta >> 8) == current_epoch)) {
+				const uint32_t count = static_cast<uint32_t>(meta & 0xFF);
+				if (likely(count <= MemberInlineCache::MAX_SLOTS)) {
+					for (uint32_t slot_index = 0; slot_index < count; slot_index++) {
+						if (likely(entry.slots[slot_index].key == p_key)) {
+							return &entry.slots[slot_index];
+						}
+					}
+				}
+			}
+		}
+		return nullptr;
+	}
+
+	_FORCE_INLINE_ GDScriptFunction *_resolve_gdscript_call_cached(int p_methodname_idx, const GDScript *p_target_script) const {
+		CallInlineCache *cache_array = _call_cache.load(std::memory_order_acquire);
+		if (likely(cache_array != nullptr)) {
+			const CallInlineCache &entry = cache_array[p_methodname_idx];
+			const uint64_t current_epoch = _script_clear_epoch.load(std::memory_order_relaxed);
+			const uint64_t meta = entry.epoch_and_count.load(std::memory_order_acquire);
+			if (likely((meta >> 8) == current_epoch)) {
+				const uint32_t count = static_cast<uint32_t>(meta & 0xFF);
+				if (likely(count <= CallInlineCache::MAX_SLOTS)) {
+					for (uint32_t slot_index = 0; slot_index < count; slot_index++) {
+						if (likely(entry.slots[slot_index].script == p_target_script)) {
+							return entry.slots[slot_index].function;
+						}
+					}
+				}
+			}
+		}
+		return _populate_call_cache(p_methodname_idx, p_target_script);
+	}
+
 #ifdef DEBUG_ENABLED
 	CharString func_cname;
 	const char *_func_cname = nullptr;
@@ -419,6 +519,7 @@ public:
 	StringName get_global_name(int p_idx) const;
 
 	Variant call(GDScriptInstance *p_instance, const Variant **p_args, int p_argcount, Callable::CallError &r_err, CallState *p_state = nullptr);
+	static void invalidate_call_caches() { _script_clear_epoch.fetch_add(1, std::memory_order_acq_rel); }
 	void debug_get_stack_member_state(int p_line, List<Pair<StringName, int>> *r_stackvars) const;
 
 #ifdef DEBUG_ENABLED
