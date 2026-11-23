@@ -28,7 +28,7 @@ task bench:gdscript:compare -- \
 - `calls`: GDScript `self` calls, cross-instance typed/untyped calls, polymorphic dispatch, recursive Fibonacci, native `Node2D` `MethodBind` calls, builtin/utility functions, and lambdas.
 - `access`: direct `self` members, inherited native properties (`OPCODE_GET_MEMBER`/`SET_MEMBER`), cross-object fields, getters/setters, typed/untyped `Array`, `Packed*Array`, and `Dictionary`.
 - `objects`: `RefCounted` instantiation, `is`/`as` type checks and casts, string operations, and container literal construction.
-- `macro`: 2D spatial-hash entity simulation, 32x32 A* grid pathfinding with binary heap, and a 256-node `Node2D` transform tree update.
+- `macro`: 2D spatial-hash entity simulation, 32x32 A* grid pathfinding with binary heap, 256-node `Node2D` transform tree update, binary varint packet codec, 64x64 `Vector2i` tile grid visibility scan, and polymorphic `Control` UI state dispatch.
 
 ## Methodology notes
 
