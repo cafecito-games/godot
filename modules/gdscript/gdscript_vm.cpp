@@ -2660,12 +2660,16 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 
 				Variant temp_ret;
 				Callable::CallError err;
+#ifndef DEBUG_ENABLED
 				Object *native_target_obj = nullptr;
 				const GDScript *native_script_key = nullptr;
+#endif
 				GDScriptInstance *gds_target_instance = nullptr;
 				if (base == &stack[ADDR_STACK_SELF] && p_instance != nullptr) {
 					gds_target_instance = p_instance;
+#ifndef DEBUG_ENABLED
 					native_target_obj = p_instance->owner;
+#endif
 				} else if (base->get_type() == Variant::OBJECT) {
 #ifdef DEBUG_ENABLED
 					Object *target_obj = base_obj;
@@ -2677,10 +2681,14 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 						if (script_inst != nullptr) {
 							if (likely(script_inst->get_language() == GDScriptLanguage::get_singleton() && !script_inst->is_placeholder())) {
 								gds_target_instance = static_cast<GDScriptInstance *>(script_inst);
+#ifndef DEBUG_ENABLED
 								native_target_obj = target_obj;
+#endif
 							}
+#ifndef DEBUG_ENABLED
 						} else {
 							native_target_obj = target_obj;
+#endif
 						}
 					}
 				}
@@ -2690,9 +2698,11 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 					const GDScript *target_script = gds_target_instance->script.ptr();
 					if (likely(target_script != nullptr && target_script->valid)) {
 						cached_gdscript_func = _resolve_gdscript_call_cached(methodname_idx, target_script);
+#ifndef DEBUG_ENABLED
 						native_script_key = target_script;
 					} else {
 						native_target_obj = nullptr;
+#endif
 					}
 				}
 
@@ -2701,7 +2711,9 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 					if (likely(cached_gdscript_func != nullptr)) {
 						Variant call_result = cached_gdscript_func->call(gds_target_instance, (const Variant **)argptrs, argc, err);
 						VariantInternal::assign_move_fast(ret, call_result);
+#ifndef DEBUG_ENABLED
 					} else if (native_target_obj != nullptr && _try_call_native_cached(methodname_idx, native_target_obj, native_script_key, base, argptrs, argc, ret, temp_ret, err)) {
+#endif
 					} else {
 						base->callp(*methodname, (const Variant **)argptrs, argc, temp_ret, err);
 #ifdef DEBUG_ENABLED
@@ -2744,7 +2756,9 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 				} else {
 					if (likely(cached_gdscript_func != nullptr)) {
 						temp_ret = cached_gdscript_func->call(gds_target_instance, (const Variant **)argptrs, argc, err);
+#ifndef DEBUG_ENABLED
 					} else if (native_target_obj != nullptr && _try_call_native_cached(methodname_idx, native_target_obj, native_script_key, base, argptrs, argc, nullptr, temp_ret, err)) {
+#endif
 					} else {
 						base->callp(*methodname, (const Variant **)argptrs, argc, temp_ret, err);
 					}

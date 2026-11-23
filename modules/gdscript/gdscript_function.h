@@ -362,6 +362,7 @@ private:
 
 	mutable std::atomic<CallInlineCache *> _call_cache{ nullptr };
 
+#ifndef DEBUG_ENABLED
 	struct NativeCallCacheSlot {
 		static constexpr int MAX_VALIDATED_ARGS = 4;
 		const void *gdtype_key = nullptr;
@@ -382,6 +383,7 @@ private:
 	};
 
 	mutable std::atomic<NativeCallInlineCache *> _native_call_cache{ nullptr };
+#endif
 
 	struct TypeTestCacheSlot {
 		const void *gdtype_key = nullptr;
@@ -428,12 +430,15 @@ private:
 
 	static GDScriptFunction *_find_gdscript_function_in_chain(const GDScript *p_script, const StringName &p_name);
 	GDScriptFunction *_populate_call_cache(int p_methodname_idx, const GDScript *p_target_script) const;
+#ifndef DEBUG_ENABLED
 	const NativeCallCacheSlot *_populate_native_call_cache(int p_methodname_idx, const Object *p_object, const GDScript *p_script_key) const;
 	_NO_INLINE_ bool _try_call_native_cached(int p_methodname_idx, Object *p_target_obj, const GDScript *p_script_key, const Variant *p_base, Variant **p_args, int p_argc, Variant *p_ret_slot, Variant &r_temp_ret, Callable::CallError &r_err) const;
+#endif
 	bool _populate_type_test_cache(int p_native_type_idx, const Object *p_object, const StringName &p_native_type) const;
 	const MemberCacheSlot *_populate_gdscript_member_cache(int p_name_idx, const GDScript *p_target_script) const;
 	const MemberCacheSlot *_populate_native_member_cache(int p_name_idx, const Object *p_object) const;
 
+#ifndef DEBUG_ENABLED
 	_FORCE_INLINE_ const NativeCallCacheSlot *_lookup_native_call_cache(int p_methodname_idx, const void *p_gdtype_key, const GDScript *p_script_key) const {
 		NativeCallInlineCache *cache_array = _native_call_cache.load(std::memory_order_acquire);
 		if (likely(cache_array != nullptr)) {
@@ -453,6 +458,7 @@ private:
 		}
 		return nullptr;
 	}
+#endif
 
 	_FORCE_INLINE_ bool _test_native_type_cached(int p_native_type_idx, const Object *p_object, const StringName &p_native_type) const {
 		if (likely(p_object->get_class_name() == p_native_type)) {

@@ -109,6 +109,7 @@ GDScriptFunction *GDScriptFunction::_populate_call_cache(int p_methodname_idx, c
 	return found_function;
 }
 
+#ifndef DEBUG_ENABLED
 const GDScriptFunction::NativeCallCacheSlot *GDScriptFunction::_populate_native_call_cache(int p_methodname_idx, const Object *p_object, const GDScript *p_script_key) const {
 	const StringName &method_name = _global_names_ptr[p_methodname_idx];
 	if (unlikely(method_name == SceneStringName(_ready) || method_name == CoreStringName(free_))) {
@@ -215,11 +216,6 @@ bool GDScriptFunction::_try_call_native_cached(int p_methodname_idx, Object *p_t
 	}
 
 	if (likely(slot->can_validated_call && p_argc == slot->arg_count)) {
-#ifdef DEBUG_ENABLED
-		if (p_ret_slot != nullptr && !slot->has_return) {
-			return false;
-		}
-#endif
 		bool types_match = true;
 		for (int arg_index = 0; arg_index < p_argc; arg_index++) {
 			if (unlikely(p_args[arg_index]->get_type() != slot->arg_types[arg_index])) {
@@ -264,7 +260,6 @@ bool GDScriptFunction::_try_call_native_cached(int p_methodname_idx, Object *p_t
 		}
 	}
 
-#ifndef DEBUG_ENABLED
 	if (p_ret_slot != nullptr) {
 		Variant call_result = slot->method->call(p_target_obj, const_cast<const Variant **>(p_args), p_argc, r_err);
 		VariantInternal::assign_move_fast(p_ret_slot, call_result);
@@ -272,10 +267,8 @@ bool GDScriptFunction::_try_call_native_cached(int p_methodname_idx, Object *p_t
 		r_temp_ret = slot->method->call(p_target_obj, const_cast<const Variant **>(p_args), p_argc, r_err);
 	}
 	return true;
-#else
-	return false;
-#endif
 }
+#endif // !DEBUG_ENABLED
 
 bool GDScriptFunction::_populate_type_test_cache(int p_native_type_idx, const Object *p_object, const StringName &p_native_type) const {
 	const StringName &class_name = p_object->get_class_name();
@@ -759,10 +752,12 @@ GDScriptFunction::~GDScriptFunction() {
 	if (member_cache != nullptr) {
 		memdelete_arr(member_cache);
 	}
+#ifndef DEBUG_ENABLED
 	NativeCallInlineCache *native_call_cache = _native_call_cache.load(std::memory_order_relaxed);
 	if (native_call_cache != nullptr) {
 		memdelete_arr(native_call_cache);
 	}
+#endif
 	TypeTestInlineCache *type_test_cache = _type_test_cache.load(std::memory_order_relaxed);
 	if (type_test_cache != nullptr) {
 		memdelete_arr(type_test_cache);

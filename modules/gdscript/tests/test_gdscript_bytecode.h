@@ -2265,6 +2265,41 @@ func run_all(limit: int, bonus: int = 2 + 3) -> Dictionary:
 			CHECK(int(loaded_res["dyn_pos_sum"]) == 500);
 			CHECK(int(loaded_res["type_flags"]) == 15);
 		}
+
+#ifdef DEBUG_ENABLED
+		// Verify DEBUG_ENABLED native calls still acquire OBJ_DEBUG_LOCK so callbacks cannot free the receiver mid-call.
+		{
+			Ref<GDScript> lock_script = compile_source(R"(
+extends RefCounted
+
+class SelfFreeObject extends Object:
+	var notification_count: int = 0
+
+	func _notification(what: int) -> void:
+		if what == 12345:
+			notification_count += 1
+			free()
+
+func exercise_locked_native_call() -> Dictionary:
+	var target: Variant = SelfFreeObject.new()
+	target.notification(12345, false)
+	target.notification(12345, false)
+	var still_valid: bool = is_instance_valid(target)
+	var notification_count: int = target.notification_count if still_valid else 0
+	if still_valid:
+		target.free()
+	return { "still_valid": still_valid, "notification_count": notification_count }
+)",
+					"res://debug_lock_native_call.gd");
+			Ref<RefCounted> lock_inst = memnew(RefCounted);
+			lock_inst->set_script(lock_script);
+			ERR_PRINT_OFF;
+			Dictionary lock_res = lock_inst->call("exercise_locked_native_call");
+			ERR_PRINT_ON;
+			CHECK(bool(lock_res["still_valid"]) == true);
+			CHECK(int(lock_res["notification_count"]) == 2);
+		}
+#endif
 	}
 }
 
