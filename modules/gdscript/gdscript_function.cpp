@@ -109,6 +109,227 @@ GDScriptFunction *GDScriptFunction::_populate_call_cache(int p_methodname_idx, c
 	return found_function;
 }
 
+const GDScriptFunction::NativeCallCacheSlot *GDScriptFunction::_populate_native_call_cache(int p_methodname_idx, const Object *p_object, const GDScript *p_script_key) const {
+	const StringName &method_name = _global_names_ptr[p_methodname_idx];
+	if (unlikely(method_name == SceneStringName(_ready) || method_name == CoreStringName(free_))) {
+		return nullptr;
+	}
+
+	const StringName &class_name = p_object->get_class_name();
+	if (ClassDB::get_api_type(class_name) != ClassDB::API_CORE) {
+		return nullptr;
+	}
+
+	MethodBind *method = ClassDB::get_method(class_name, method_name);
+	if (method == nullptr || method->is_static() || method->is_vararg()) {
+		return nullptr;
+	}
+
+	const void *gdtype_key = &p_object->get_gdtype();
+	NativeCallCacheSlot populated;
+	populated.gdtype_key = gdtype_key;
+	populated.script_key = p_script_key;
+	populated.method = method;
+	populated.has_return = method->has_return();
+
+	const int argument_count = method->get_argument_count();
+	bool can_validate = argument_count >= 0 && argument_count <= NativeCallCacheSlot::MAX_VALIDATED_ARGS;
+	if (can_validate && populated.has_return) {
+		const PropertyInfo return_info = method->get_return_info();
+		if (return_info.type == Variant::NIL) {
+			can_validate = false;
+		} else {
+			populated.return_type = return_info.type;
+		}
+	}
+	if (can_validate) {
+		populated.arg_count = static_cast<uint8_t>(argument_count);
+		for (int arg_index = 0; arg_index < argument_count; arg_index++) {
+			const PropertyInfo arg_info = method->get_argument_info(arg_index);
+			if (arg_info.type == Variant::NIL ||
+					arg_info.type == Variant::OBJECT ||
+					arg_info.type == Variant::ARRAY ||
+					arg_info.type == Variant::DICTIONARY ||
+					arg_info.hint == PROPERTY_HINT_RESOURCE_TYPE) {
+				can_validate = false;
+				break;
+			}
+			populated.arg_types[arg_index] = arg_info.type;
+		}
+	}
+	populated.can_validated_call = can_validate;
+
+	NativeCallInlineCache *cache_array = _native_call_cache.load(std::memory_order_acquire);
+	if (unlikely(cache_array == nullptr)) {
+		if (_global_names_count <= 0) {
+			return nullptr;
+		}
+		NativeCallInlineCache *allocated = memnew_arr(NativeCallInlineCache, _global_names_count);
+		NativeCallInlineCache *expected = nullptr;
+		if (_native_call_cache.compare_exchange_strong(expected, allocated, std::memory_order_acq_rel, std::memory_order_acquire)) {
+			cache_array = allocated;
+		} else {
+			memdelete_arr(allocated);
+			cache_array = expected;
+		}
+	}
+
+	NativeCallInlineCache &cache_entry = cache_array[p_methodname_idx];
+	const uint64_t current_epoch = _script_clear_epoch.load(std::memory_order_acquire);
+	uint64_t expected_meta = cache_entry.epoch_and_count.load(std::memory_order_acquire);
+	if ((expected_meta & 0xFF) == NativeCallInlineCache::LOCKED_STATE) {
+		return nullptr;
+	}
+	const uint64_t locked_meta = (expected_meta & ~uint64_t(0xFF)) | NativeCallInlineCache::LOCKED_STATE;
+	if (!cache_entry.epoch_and_count.compare_exchange_strong(expected_meta, locked_meta, std::memory_order_acq_rel, std::memory_order_acquire)) {
+		return nullptr;
+	}
+
+	uint32_t count = ((expected_meta >> 8) == current_epoch) ? static_cast<uint32_t>(expected_meta & 0xFF) : 0;
+	const NativeCallCacheSlot *result_slot = nullptr;
+	for (uint32_t slot_index = 0; slot_index < count; slot_index++) {
+		if (cache_entry.slots[slot_index].gdtype_key == gdtype_key && cache_entry.slots[slot_index].script_key == p_script_key) {
+			cache_entry.slots[slot_index] = populated;
+			result_slot = &cache_entry.slots[slot_index];
+			break;
+		}
+	}
+	if (result_slot == nullptr && count < NativeCallInlineCache::MAX_SLOTS) {
+		cache_entry.slots[count] = populated;
+		result_slot = &cache_entry.slots[count];
+		count++;
+	}
+
+	cache_entry.epoch_and_count.store((current_epoch << 8) | count, std::memory_order_release);
+	return result_slot;
+}
+
+bool GDScriptFunction::_try_call_native_cached(int p_methodname_idx, Object *p_target_obj, const GDScript *p_script_key, const Variant *p_base, Variant **p_args, int p_argc, Variant *p_ret_slot, Variant &r_temp_ret, Callable::CallError &r_err) const {
+	const void *gdtype_key = &p_target_obj->get_gdtype();
+	const NativeCallCacheSlot *slot = _lookup_native_call_cache(p_methodname_idx, gdtype_key, p_script_key);
+	if (unlikely(slot == nullptr)) {
+		slot = _populate_native_call_cache(p_methodname_idx, p_target_obj, p_script_key);
+		if (slot == nullptr) {
+			return false;
+		}
+	}
+
+	if (likely(slot->can_validated_call && p_argc == slot->arg_count)) {
+#ifdef DEBUG_ENABLED
+		if (p_ret_slot != nullptr && !slot->has_return) {
+			return false;
+		}
+#endif
+		bool types_match = true;
+		for (int arg_index = 0; arg_index < p_argc; arg_index++) {
+			if (unlikely(p_args[arg_index]->get_type() != slot->arg_types[arg_index])) {
+				types_match = false;
+				break;
+			}
+		}
+		if (likely(types_match)) {
+			if (p_ret_slot != nullptr) {
+				if (slot->has_return) {
+					bool aliased = (p_ret_slot == p_base);
+					for (int arg_index = 0; !aliased && arg_index < p_argc; arg_index++) {
+						if (p_ret_slot == p_args[arg_index]) {
+							aliased = true;
+						}
+					}
+					if (likely(!aliased)) {
+						if (unlikely(p_ret_slot->get_type() != slot->return_type)) {
+							VariantInternal::initialize(p_ret_slot, slot->return_type);
+						}
+						slot->method->validated_call(p_target_obj, const_cast<const Variant **>(p_args), p_ret_slot);
+					} else {
+						Variant validated_result;
+						VariantInternal::initialize(&validated_result, slot->return_type);
+						slot->method->validated_call(p_target_obj, const_cast<const Variant **>(p_args), &validated_result);
+						VariantInternal::assign_move_fast(p_ret_slot, validated_result);
+					}
+				} else {
+					*p_ret_slot = Variant();
+					slot->method->validated_call(p_target_obj, const_cast<const Variant **>(p_args), nullptr);
+				}
+			} else {
+				if (slot->has_return) {
+					VariantInternal::initialize(&r_temp_ret, slot->return_type);
+					slot->method->validated_call(p_target_obj, const_cast<const Variant **>(p_args), &r_temp_ret);
+				} else {
+					slot->method->validated_call(p_target_obj, const_cast<const Variant **>(p_args), nullptr);
+				}
+			}
+			r_err.error = Callable::CallError::CALL_OK;
+			return true;
+		}
+	}
+
+#ifndef DEBUG_ENABLED
+	if (p_ret_slot != nullptr) {
+		Variant call_result = slot->method->call(p_target_obj, const_cast<const Variant **>(p_args), p_argc, r_err);
+		VariantInternal::assign_move_fast(p_ret_slot, call_result);
+	} else {
+		r_temp_ret = slot->method->call(p_target_obj, const_cast<const Variant **>(p_args), p_argc, r_err);
+	}
+	return true;
+#else
+	return false;
+#endif
+}
+
+bool GDScriptFunction::_populate_type_test_cache(int p_native_type_idx, const Object *p_object, const StringName &p_native_type) const {
+	const StringName &class_name = p_object->get_class_name();
+	const bool is_match = ClassDB::is_parent_class(class_name, p_native_type);
+	if (ClassDB::get_api_type(class_name) != ClassDB::API_CORE) {
+		return is_match;
+	}
+
+	TypeTestInlineCache *cache_array = _type_test_cache.load(std::memory_order_acquire);
+	if (unlikely(cache_array == nullptr)) {
+		if (_global_names_count <= 0) {
+			return is_match;
+		}
+		TypeTestInlineCache *allocated = memnew_arr(TypeTestInlineCache, _global_names_count);
+		TypeTestInlineCache *expected = nullptr;
+		if (_type_test_cache.compare_exchange_strong(expected, allocated, std::memory_order_acq_rel, std::memory_order_acquire)) {
+			cache_array = allocated;
+		} else {
+			memdelete_arr(allocated);
+			cache_array = expected;
+		}
+	}
+
+	TypeTestInlineCache &cache_entry = cache_array[p_native_type_idx];
+	const uint64_t current_epoch = _script_clear_epoch.load(std::memory_order_acquire);
+	uint64_t expected_meta = cache_entry.epoch_and_count.load(std::memory_order_acquire);
+	if ((expected_meta & 0xFF) == TypeTestInlineCache::LOCKED_STATE) {
+		return is_match;
+	}
+	const uint64_t locked_meta = (expected_meta & ~uint64_t(0xFF)) | TypeTestInlineCache::LOCKED_STATE;
+	if (!cache_entry.epoch_and_count.compare_exchange_strong(expected_meta, locked_meta, std::memory_order_acq_rel, std::memory_order_acquire)) {
+		return is_match;
+	}
+
+	const void *gdtype_key = &p_object->get_gdtype();
+	uint32_t count = ((expected_meta >> 8) == current_epoch) ? static_cast<uint32_t>(expected_meta & 0xFF) : 0;
+	bool already_cached = false;
+	for (uint32_t slot_index = 0; slot_index < count; slot_index++) {
+		if (cache_entry.slots[slot_index].gdtype_key == gdtype_key) {
+			cache_entry.slots[slot_index].is_match = is_match;
+			already_cached = true;
+			break;
+		}
+	}
+	if (!already_cached && count < TypeTestInlineCache::MAX_SLOTS) {
+		cache_entry.slots[count].gdtype_key = gdtype_key;
+		cache_entry.slots[count].is_match = is_match;
+		count++;
+	}
+
+	cache_entry.epoch_and_count.store((current_epoch << 8) | count, std::memory_order_release);
+	return is_match;
+}
+
 GDScriptFunction *GDScriptFunction::_find_gdscript_function_in_chain(const GDScript *p_script, const StringName &p_name) {
 	const GDScript *script_cursor = p_script;
 	while (script_cursor) {
@@ -537,6 +758,14 @@ GDScriptFunction::~GDScriptFunction() {
 	MemberInlineCache *member_cache = _member_cache.load(std::memory_order_relaxed);
 	if (member_cache != nullptr) {
 		memdelete_arr(member_cache);
+	}
+	NativeCallInlineCache *native_call_cache = _native_call_cache.load(std::memory_order_relaxed);
+	if (native_call_cache != nullptr) {
+		memdelete_arr(native_call_cache);
+	}
+	TypeTestInlineCache *type_test_cache = _type_test_cache.load(std::memory_order_relaxed);
+	if (type_test_cache != nullptr) {
+		memdelete_arr(type_test_cache);
 	}
 
 	get_script()->member_functions.erase(name);
