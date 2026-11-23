@@ -1965,6 +1965,7 @@ class GDScriptBytecodeLoader::LoadContext {
 			function->_lambdas_ptr = function->lambdas.ptrw();
 		}
 
+		function->prepare_vm_frame_metadata();
 		r_function = function_guard.release();
 		return OK;
 	}

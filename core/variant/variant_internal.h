@@ -264,6 +264,16 @@ public:
 		}
 	}
 
+	_FORCE_INLINE_ static constexpr bool type_needs_deinit(Variant::Type p_type) {
+		return Variant::needs_deinit[p_type];
+	}
+
+	// Fast-path type tag write for a Variant slot whose storage bytes are already zeroed
+	// and whose default value is all-zero bits with no destructor requirement.
+	_FORCE_INLINE_ static void set_type_zero_init_unsafe(Variant *p_zeroed_destination, Variant::Type p_type) {
+		p_zeroed_destination->type = p_type;
+	}
+
 	template <typename T>
 	_FORCE_INLINE_ static void init_generic(Variant *v) {
 		v->type = GetTypeInfo<T>::VARIANT_TYPE;

@@ -288,6 +288,18 @@ private:
 	SelfList<GDScriptFunction> function_list{ this };
 	mutable Variant nil;
 	TightLocalVector<Pair<int, Variant::Type>> temporary_slots;
+	struct ZeroInitTempSlot {
+		uint16_t slot = 0;
+		uint8_t type = Variant::NIL;
+	};
+	static constexpr int FAST_ARG_TYPE_SLOTS = 8;
+	TightLocalVector<ZeroInitTempSlot> _zero_init_temp_slots;
+	TightLocalVector<Pair<int, Variant::Type>> _complex_temp_slots;
+	uint64_t _deinit_slot_mask = UINT64_MAX;
+	uint32_t _frame_bytes = 0;
+	uint8_t _fast_arg_types[FAST_ARG_TYPE_SLOTS] = {};
+	bool _has_deinit_slot_mask = false;
+	bool _all_args_fast_check = false;
 	List<StackDebug> stack_debug;
 
 	Vector<int> code;
@@ -430,6 +442,7 @@ private:
 
 	static GDScriptFunction *_find_gdscript_function_in_chain(const GDScript *p_script, const StringName &p_name);
 	GDScriptFunction *_populate_call_cache(int p_methodname_idx, const GDScript *p_target_script) const;
+	void prepare_vm_frame_metadata();
 #ifndef DEBUG_ENABLED
 	const NativeCallCacheSlot *_populate_native_call_cache(int p_methodname_idx, const Object *p_object, const GDScript *p_script_key) const;
 	_NO_INLINE_ bool _try_call_native_cached(int p_methodname_idx, Object *p_target_obj, const GDScript *p_script_key, const Variant *p_base, Variant **p_args, int p_argc, Variant *p_ret_slot, Variant &r_temp_ret, Callable::CallError &r_err) const;
@@ -580,6 +593,14 @@ public:
 		Variant result;
 	};
 
+private:
+	struct VMInlineFrame;
+	struct VMThreadState;
+	struct VMFrameMemoryGuard;
+	static VMThreadState &_get_vm_thread_state();
+	static Variant _call_vm(GDScriptFunction *p_func, GDScriptInstance *p_instance, const Variant **p_args, int p_argcount, Callable::CallError &r_err, CallState *p_state);
+
+public:
 	_FORCE_INLINE_ StringName get_name() const { return name; }
 	_FORCE_INLINE_ StringName get_source() const { return source; }
 	_FORCE_INLINE_ GDScript *get_script() const { return _script; }
