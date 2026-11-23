@@ -58,6 +58,16 @@ tasks:
     cmds:
       - uv run --project cafecito cafecito-build package-relink-kit {{.CLI_ARGS}}
 
+  bench:gdscript:
+    desc: 'Run the GDScript performance benchmark suite (pass flags after --, e.g. -- --target release --runs 3)'
+    cmds:
+      - python3 cafecito/benchmarks/gdscript/benchmark.py run {{.CLI_ARGS}}
+
+  bench:gdscript:compare:
+    desc: 'Compare two GDScript benchmark JSON snapshots (usage: task bench:gdscript:compare -- base.json cand.json)'
+    cmds:
+      - python3 cafecito/benchmarks/gdscript/benchmark.py compare {{.CLI_ARGS}}
+
   clean:
     desc: Remove bin/ build artifacts
     cmds:
