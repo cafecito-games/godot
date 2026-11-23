@@ -69,6 +69,8 @@ public:
 	Variant get(const Variant &p_key, const Variant &p_default) const;
 	Variant get_or_add(const Variant &p_key, const Variant &p_default);
 	bool set(const Variant &p_key, const Variant &p_value);
+	void construct_from_pairs(const Variant *const *p_args, int p_pair_count);
+	void construct_typed_from_pairs(uint32_t p_key_type, const StringName &p_key_class_name, const Variant &p_key_script, uint32_t p_value_type, const StringName &p_value_class_name, const Variant &p_value_script, const Variant *const *p_args, int p_pair_count);
 
 	int size() const;
 	bool is_empty() const;

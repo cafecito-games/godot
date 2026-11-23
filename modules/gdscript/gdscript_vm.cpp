@@ -737,6 +737,61 @@ void (*type_init_function_table[])(Variant *) = {
 #define METHOD_CALL_ON_NULL_VALUE_ERROR(method_pointer) "Cannot call method '" + (method_pointer)->get_name() + "' on a null value."
 #define METHOD_CALL_ON_FREED_INSTANCE_ERROR(method_pointer) "Cannot call method '" + (method_pointer)->get_name() + "' on a previously freed instance."
 
+static _NO_INLINE_ void _assign_aliased_variant(Variant *p_destination, const Variant *p_source) {
+	Variant temporary = *p_source;
+	VariantInternal::assign_move_fast(p_destination, temporary);
+}
+
+static _NO_INLINE_ void _construct_array_into(Variant *p_destination, const Variant *const *p_arguments, int p_count) {
+	Variant result;
+	VariantInternal::init_array(&result);
+	VariantInternal::get_array(&result)->construct_from_variants(p_arguments, p_count);
+	VariantInternal::assign_move_fast(p_destination, result);
+}
+
+static _NO_INLINE_ void _construct_typed_array_into(Variant *p_destination, uint32_t p_type, const StringName &p_class_name, const Variant &p_script, const Variant *const *p_arguments, int p_count) {
+	Variant result;
+	VariantInternal::init_array(&result);
+	VariantInternal::get_array(&result)->construct_typed_from_variants(p_type, p_class_name, p_script, p_arguments, p_count);
+	VariantInternal::assign_move_fast(p_destination, result);
+}
+
+static _NO_INLINE_ void _construct_dictionary_into(Variant *p_destination, const Variant *const *p_arguments, int p_pair_count) {
+	Variant result;
+	VariantInternal::init_dictionary(&result);
+	VariantInternal::get_dictionary(&result)->construct_from_pairs(p_arguments, p_pair_count);
+	VariantInternal::assign_move_fast(p_destination, result);
+}
+
+static _NO_INLINE_ void _construct_typed_dictionary_into(Variant *p_destination, uint32_t p_key_type, const StringName &p_key_class_name, const Variant &p_key_script, uint32_t p_value_type, const StringName &p_value_class_name, const Variant &p_value_script, const Variant *const *p_arguments, int p_pair_count) {
+	Variant result;
+	VariantInternal::init_dictionary(&result);
+	VariantInternal::get_dictionary(&result)->construct_typed_from_pairs(p_key_type, p_key_class_name, p_key_script, p_value_type, p_value_class_name, p_value_script, p_arguments, p_pair_count);
+	VariantInternal::assign_move_fast(p_destination, result);
+}
+
+#ifdef DEBUG_ENABLED
+static _NO_INLINE_ void _get_keyed_fallback(const Variant *p_source, const Variant *p_index, Variant *p_destination, bool &r_valid, Variant::VariantGetError &r_error_code) {
+	Variant result = p_source->get(*p_index, &r_valid, &r_error_code);
+	if (likely(r_valid)) {
+		VariantInternal::assign_move_fast(p_destination, result);
+	}
+}
+
+static _NO_INLINE_ void _get_keyed_validated_fallback(Variant::ValidatedKeyedGetter p_getter, const Variant *p_source, const Variant *p_key, Variant *p_destination, bool &r_valid) {
+	Variant result;
+	p_getter(p_source, p_key, &result, &r_valid);
+	if (likely(r_valid)) {
+		VariantInternal::assign_move_fast(p_destination, result);
+	}
+}
+#else
+static _NO_INLINE_ void _get_keyed_fallback(const Variant *p_source, const Variant *p_index, Variant *p_destination, bool &r_valid) {
+	Variant result = p_source->get(*p_index, &r_valid);
+	VariantInternal::assign_move_fast(p_destination, result);
+}
+#endif
+
 Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_args, int p_argcount, Callable::CallError &r_err, CallState *p_state) {
 	return _call_vm(this, p_instance, p_args, p_argcount, r_err, p_state);
 }
@@ -1628,11 +1683,30 @@ Variant GDScriptFunction::_call_vm(GDScriptFunction *func, GDScriptInstance *p_i
 
 				bool valid;
 #ifdef DEBUG_ENABLED
-				Variant::VariantSetError err_code;
-				dst->set(*index, *value, &valid, &err_code);
-#else
-				dst->set(*index, *value, &valid);
+				Variant::VariantSetError err_code = Variant::VariantSetError::SET_OK;
 #endif
+				const Variant::Type dst_type = dst->get_type();
+				if (likely(dst_type == Variant::DICTIONARY)) {
+					valid = VariantInternal::get_dictionary(dst)->set(*index, *value);
+#ifdef DEBUG_ENABLED
+					if (unlikely(!valid)) {
+						err_code = Variant::VariantSetError::SET_KEYED_ERR;
+					}
+#endif
+				} else if (dst_type == Variant::ARRAY && index->get_type() == Variant::INT) {
+					valid = VariantInternal::get_array(dst)->set_indexed_checked(*VariantInternal::get_int(index), *value);
+#ifdef DEBUG_ENABLED
+					if (unlikely(!valid)) {
+						err_code = Variant::VariantSetError::SET_INDEXED_ERR;
+					}
+#endif
+				} else {
+#ifdef DEBUG_ENABLED
+					dst->set(*index, *value, &valid, &err_code);
+#else
+					dst->set(*index, *value, &valid);
+#endif
+				}
 #ifdef DEBUG_ENABLED
 				if (!valid) {
 					if (dst->is_read_only()) {
@@ -1674,10 +1748,14 @@ Variant GDScriptFunction::_call_vm(GDScriptFunction *func, GDScriptInstance *p_i
 
 				int index_setter = code_ptr[ip + 4];
 				GD_ERR_BREAK(index_setter < 0 || index_setter >= func->_keyed_setters_count);
-				const Variant::ValidatedKeyedSetter setter = func->_keyed_setters_ptr[index_setter];
 
 				bool valid;
-				setter(dst, index, value, &valid);
+				if (likely(dst->get_type() == Variant::DICTIONARY)) {
+					valid = VariantInternal::get_dictionary(dst)->set(*index, *value);
+				} else {
+					const Variant::ValidatedKeyedSetter setter = func->_keyed_setters_ptr[index_setter];
+					setter(dst, index, value, &valid);
+				}
 
 #ifdef DEBUG_ENABLED
 				if (!valid) {
@@ -1713,6 +1791,9 @@ Variant GDScriptFunction::_call_vm(GDScriptFunction *func, GDScriptInstance *p_i
 
 				bool oob = false;
 				switch (dst->get_type()) {
+					case Variant::ARRAY: {
+						oob = !VariantInternal::get_array(dst)->set_indexed_checked(int_index, *value);
+					} break;
 					case Variant::PACKED_BYTE_ARRAY: {
 						Vector<uint8_t> *arr = VariantInternal::get_byte_array(dst);
 						const int64_t size = arr->size();
@@ -1784,13 +1865,50 @@ Variant GDScriptFunction::_call_vm(GDScriptFunction *func, GDScriptInstance *p_i
 
 				bool valid;
 #ifdef DEBUG_ENABLED
-				// Allow better error message in cases where src and dst are the same stack position.
-				Variant::VariantGetError err_code;
-				Variant ret = src->get(*index, &valid, &err_code);
-#else
-				*dst = src->get(*index, &valid);
-
+				Variant::VariantGetError err_code = Variant::VariantGetError::GET_OK;
 #endif
+				const Variant::Type src_type = src->get_type();
+				if (likely(src_type == Variant::DICTIONARY)) {
+					const Variant *entry = VariantInternal::get_dictionary(src)->getptr(*index);
+					if (likely(entry != nullptr)) {
+						if (likely(src != dst)) {
+							VariantInternal::assign_fast(dst, entry);
+						} else {
+							_assign_aliased_variant(dst, entry);
+						}
+						valid = true;
+					} else {
+						valid = false;
+#ifdef DEBUG_ENABLED
+						err_code = Variant::VariantGetError::GET_KEYED_ERR;
+#else
+						VariantInternal::clear(dst);
+#endif
+					}
+				} else if (src_type == Variant::ARRAY && index->get_type() == Variant::INT) {
+					const Variant *element = VariantInternal::get_array(src)->get_indexed_ptr(*VariantInternal::get_int(index));
+					if (likely(element != nullptr)) {
+						if (likely(src != dst)) {
+							VariantInternal::assign_fast(dst, element);
+						} else {
+							_assign_aliased_variant(dst, element);
+						}
+						valid = true;
+					} else {
+						valid = false;
+#ifdef DEBUG_ENABLED
+						err_code = Variant::VariantGetError::GET_INDEXED_ERR;
+#else
+						VariantInternal::clear(dst);
+#endif
+					}
+				} else {
+#ifdef DEBUG_ENABLED
+					_get_keyed_fallback(src, index, dst, valid, err_code);
+#else
+					_get_keyed_fallback(src, index, dst, valid);
+#endif
+				}
 #ifdef DEBUG_ENABLED
 				if (!valid) {
 					String v = index->operator String();
@@ -1805,7 +1923,6 @@ Variant GDScriptFunction::_call_vm(GDScriptFunction *func, GDScriptInstance *p_i
 					}
 					OPCODE_BREAK;
 				}
-				*dst = ret;
 #endif
 				ip += 4;
 			}
@@ -1820,16 +1937,28 @@ Variant GDScriptFunction::_call_vm(GDScriptFunction *func, GDScriptInstance *p_i
 
 				int index_getter = code_ptr[ip + 4];
 				GD_ERR_BREAK(index_getter < 0 || index_getter >= func->_keyed_getters_count);
-				const Variant::ValidatedKeyedGetter getter = func->_keyed_getters_ptr[index_getter];
 
 				bool valid;
+				if (likely(src->get_type() == Variant::DICTIONARY)) {
+					const Variant *entry = VariantInternal::get_dictionary(src)->getptr(*key);
+					if (likely(entry != nullptr)) {
+						if (likely(src != dst)) {
+							VariantInternal::assign_fast(dst, entry);
+						} else {
+							_assign_aliased_variant(dst, entry);
+						}
+						valid = true;
+					} else {
+						valid = false;
+					}
+				} else {
+					const Variant::ValidatedKeyedGetter getter = func->_keyed_getters_ptr[index_getter];
 #ifdef DEBUG_ENABLED
-				// Allow better error message in cases where src and dst are the same stack position.
-				Variant ret;
-				getter(src, key, &ret, &valid);
+					_get_keyed_validated_fallback(getter, src, key, dst, valid);
 #else
-				getter(src, key, dst, &valid);
+					getter(src, key, dst, &valid);
 #endif
+				}
 #ifdef DEBUG_ENABLED
 				if (!valid) {
 					String v = key->operator String();
@@ -1841,7 +1970,6 @@ Variant GDScriptFunction::_call_vm(GDScriptFunction *func, GDScriptInstance *p_i
 					err_text = "Invalid access to property or key " + v + " on a base object of type '" + _get_var_type(src) + "'.";
 					OPCODE_BREAK;
 				}
-				*dst = ret;
 #endif
 				ip += 5;
 			}
@@ -1862,21 +1990,13 @@ Variant GDScriptFunction::_call_vm(GDScriptFunction *func, GDScriptInstance *p_i
 				bool oob = false;
 				switch (src->get_type()) {
 					case Variant::ARRAY: {
-						const Array *array = VariantInternal::get_array(src);
-						const int64_t size = array->size();
-						if (unlikely(int_index < 0)) {
-							int_index += size;
-						}
-						if (unlikely(static_cast<uint64_t>(int_index) >= static_cast<uint64_t>(size))) {
+						const Variant *element = VariantInternal::get_array(src)->get_indexed_ptr(int_index);
+						if (unlikely(element == nullptr)) {
 							oob = true;
+						} else if (likely(src != dst)) {
+							VariantInternal::assign_fast(dst, element);
 						} else {
-							const Variant &element = (*array)[int_index];
-							if (likely(src != dst)) {
-								VariantInternal::assign_fast(dst, &element);
-							} else {
-								Variant temp_element = element;
-								VariantInternal::assign_move_fast(dst, temp_element);
-							}
+							_assign_aliased_variant(dst, element);
 						}
 					} break;
 					case Variant::PACKED_BYTE_ARRAY: {
@@ -2723,17 +2843,8 @@ Variant GDScriptFunction::_call_vm(GDScriptFunction *func, GDScriptInstance *p_i
 				ip += instr_arg_count;
 
 				int argc = code_ptr[ip + 1];
-				Array array;
-				array.resize(argc);
-
-				for (int i = 0; i < argc; i++) {
-					array[i] = *(instruction_args[i]);
-				}
-
 				GET_INSTRUCTION_ARG(dst, argc);
-				*dst = Variant(); // Clear potential previous typed array.
-
-				*dst = array;
+				_construct_array_into(dst, const_cast<const Variant *const *>(instruction_args), argc);
 
 				ip += 2;
 			}
@@ -2750,20 +2861,10 @@ Variant GDScriptFunction::_call_vm(GDScriptFunction *func, GDScriptInstance *p_i
 				Variant::Type builtin_type = (Variant::Type)code_ptr[ip + 2];
 				int native_type_idx = code_ptr[ip + 3];
 				GD_ERR_BREAK(native_type_idx < 0 || native_type_idx >= func->_global_names_count);
-				const StringName native_type = func->_global_names_ptr[native_type_idx];
-
-				Array array;
-				array.set_typed(builtin_type, native_type, *script_type);
-				array.resize(argc);
-				for (int i = 0; i < argc; i++) {
-					// Use .set instead of operator[] to handle type conversion / validation.
-					array.set(i, *(instruction_args[i]));
-				}
+				const StringName &native_type = func->_global_names_ptr[native_type_idx];
 
 				GET_INSTRUCTION_ARG(dst, argc);
-				*dst = Variant(); // Clear potential previous typed array.
-
-				*dst = array;
+				_construct_typed_array_into(dst, builtin_type, native_type, *script_type, const_cast<const Variant *const *>(instruction_args), argc);
 
 				ip += 4;
 			}
@@ -2776,19 +2877,8 @@ Variant GDScriptFunction::_call_vm(GDScriptFunction *func, GDScriptInstance *p_i
 				ip += instr_arg_count;
 
 				int argc = code_ptr[ip + 1];
-				Dictionary dict;
-				dict.reserve(argc);
-				for (int i = 0; i < argc; i++) {
-					GET_INSTRUCTION_ARG(k, i * 2 + 0);
-					GET_INSTRUCTION_ARG(v, i * 2 + 1);
-					dict[*k] = *v;
-				}
-
 				GET_INSTRUCTION_ARG(dst, argc * 2);
-
-				*dst = Variant(); // Clear potential previous typed dictionary.
-
-				*dst = dict;
+				_construct_dictionary_into(dst, const_cast<const Variant *const *>(instruction_args), argc);
 
 				ip += 2;
 			}
@@ -2805,29 +2895,16 @@ Variant GDScriptFunction::_call_vm(GDScriptFunction *func, GDScriptInstance *p_i
 				Variant::Type key_builtin_type = (Variant::Type)code_ptr[ip + 2];
 				int key_native_type_idx = code_ptr[ip + 3];
 				GD_ERR_BREAK(key_native_type_idx < 0 || key_native_type_idx >= func->_global_names_count);
-				const StringName key_native_type = func->_global_names_ptr[key_native_type_idx];
+				const StringName &key_native_type = func->_global_names_ptr[key_native_type_idx];
 
 				GET_INSTRUCTION_ARG(value_script_type, argc * 2 + 2);
 				Variant::Type value_builtin_type = (Variant::Type)code_ptr[ip + 4];
 				int value_native_type_idx = code_ptr[ip + 5];
 				GD_ERR_BREAK(value_native_type_idx < 0 || value_native_type_idx >= func->_global_names_count);
-				const StringName value_native_type = func->_global_names_ptr[value_native_type_idx];
-
-				Dictionary dict;
-				dict.set_typed(key_builtin_type, key_native_type, *key_script_type, value_builtin_type, value_native_type, *value_script_type);
-				dict.reserve(argc);
-				for (int i = 0; i < argc; i++) {
-					GET_INSTRUCTION_ARG(k, i * 2 + 0);
-					GET_INSTRUCTION_ARG(v, i * 2 + 1);
-					// Use .set instead of operator[] to handle type conversion / validation.
-					dict.set(*k, *v);
-				}
+				const StringName &value_native_type = func->_global_names_ptr[value_native_type_idx];
 
 				GET_INSTRUCTION_ARG(dst, argc * 2);
-
-				*dst = Variant(); // Clear potential previous typed dictionary.
-
-				*dst = dict;
+				_construct_typed_dictionary_into(dst, key_builtin_type, key_native_type, *key_script_type, value_builtin_type, value_native_type, *value_script_type, const_cast<const Variant *const *>(instruction_args), argc);
 
 				ip += 6;
 			}
@@ -4438,14 +4515,19 @@ Variant GDScriptFunction::_call_vm(GDScriptFunction *func, GDScriptInstance *p_i
 				GET_VARIANT_PTR(counter, 0);
 				GET_VARIANT_PTR(container, 1);
 
-				Array *array = VariantInternal::get_array(container);
+				const Array *array = VariantInternal::get_array((const Variant *)container);
 
 				VariantInternal::initialize(counter, Variant::INT);
 				*VariantInternal::get_int(counter) = 0;
 
-				if (!array->is_empty()) {
+				const Variant *element = array->get_element_ptr_if_valid(0);
+				if (likely(element != nullptr)) {
 					GET_VARIANT_PTR(iterator, 2);
-					*iterator = array->get(0);
+					if (likely(iterator != container)) {
+						VariantInternal::assign_fast(iterator, element);
+					} else {
+						_assign_aliased_variant(iterator, element);
+					}
 
 					// Skip regular iterate.
 					ip += 5;
@@ -4463,14 +4545,14 @@ Variant GDScriptFunction::_call_vm(GDScriptFunction *func, GDScriptInstance *p_i
 		CHECK_SPACE(8); \
 		GET_VARIANT_PTR(counter, 0); \
 		GET_VARIANT_PTR(container, 1); \
-		Vector<m_elem_type> *array = VariantInternal::m_get_func(container); \
+		const Vector<m_elem_type> *array = VariantInternal::m_get_func((const Variant *)container); \
 		VariantInternal::initialize(counter, Variant::INT); \
 		*VariantInternal::get_int(counter) = 0; \
-		if (!array->is_empty()) { \
+		if (likely(!array->is_empty())) { \
 			GET_VARIANT_PTR(iterator, 2); \
 			VariantInternal::initialize(iterator, Variant::m_var_ret_type); \
 			m_ret_type *it = VariantInternal::m_ret_get_func(iterator); \
-			*it = array->get(0); \
+			*it = array->ptr()[0]; \
 			ip += 5; \
 		} else { \
 			int jumpto = code_ptr[ip + 4]; \
@@ -4812,15 +4894,20 @@ Variant GDScriptFunction::_call_vm(GDScriptFunction *func, GDScriptInstance *p_i
 
 				const Array *array = VariantInternal::get_array((const Variant *)container);
 				int64_t *idx = VariantInternal::get_int(counter);
-				(*idx)++;
+				const int64_t next_index = ++(*idx);
 
-				if (*idx >= array->size()) {
+				const Variant *element = array->get_element_ptr_if_valid(next_index);
+				if (unlikely(element == nullptr)) {
 					int jumpto = code_ptr[ip + 4];
 					GD_ERR_BREAK(jumpto < 0 || jumpto > func->_code_size);
 					ip = jumpto;
 				} else {
 					GET_VARIANT_PTR(iterator, 2);
-					VariantInternal::assign_fast(iterator, &array->get(*idx));
+					if (likely(iterator != container)) {
+						VariantInternal::assign_fast(iterator, element);
+					} else {
+						_assign_aliased_variant(iterator, element);
+					}
 
 					ip += 5; // Loop again.
 				}
@@ -4834,14 +4921,14 @@ Variant GDScriptFunction::_call_vm(GDScriptFunction *func, GDScriptInstance *p_i
 		GET_VARIANT_PTR(container, 1); \
 		const Vector<m_elem_type> *array = VariantInternal::m_get_func((const Variant *)container); \
 		int64_t *idx = VariantInternal::get_int(counter); \
-		(*idx)++; \
-		if (*idx >= array->size()) { \
+		const int64_t next_index = ++(*idx); \
+		if (unlikely(next_index >= array->size())) { \
 			int jumpto = code_ptr[ip + 4]; \
 			GD_ERR_BREAK(jumpto < 0 || jumpto > func->_code_size); \
 			ip = jumpto; \
 		} else { \
 			GET_VARIANT_PTR(iterator, 2); \
-			*VariantInternal::m_ret_get_func(iterator) = array->get(*idx); \
+			*VariantInternal::m_ret_get_func(iterator) = array->ptr()[next_index]; \
 			ip += 5; \
 		} \
 	} \

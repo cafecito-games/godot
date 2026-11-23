@@ -2445,6 +2445,153 @@ func run_frame_tests() -> Dictionary:
 #endif
 		}
 	}
+
+	TEST_CASE("Container fast paths: keyed/indexed ops, literal construction, aliasing, String/StringName equivalence, and iteration survive .gdb round-trip") {
+		Ref<GDScript> script = compile_source(R"(
+extends RefCounted
+
+func run_container_tests() -> Dictionary:
+	# Untyped dictionary: String vs StringName equivalence, runtime duplicate key overwrite, Vector2i, bool, and null keys.
+	var duplicate_key: String = "alpha"
+	var untyped_dict: Variant = { "alpha": 10, "beta": 20, duplicate_key: 30, Vector2i(2, -3): 44, true: 55, null: 66 }
+	var string_name_hit: int = untyped_dict[&"alpha"]
+	untyped_dict[&"alpha"] = 35
+	var string_after_update: int = untyped_dict["alpha"]
+	var has_string_name: bool = untyped_dict.has(&"beta")
+	var get_default_hit: int = untyped_dict.get(&"beta", -1)
+	var get_default_miss: int = untyped_dict.get("missing_key", -7)
+	var vec_key_value: int = untyped_dict[Vector2i(2, -3)]
+	var bool_key_value: int = untyped_dict[true]
+	var null_key_value: int = untyped_dict[null]
+	var erased_beta: bool = untyped_dict.erase(&"beta")
+	var dict_key_count: int = 0
+	for key in untyped_dict:
+		dict_key_count += 1
+
+	# Typed dictionary with > 3 entries and int -> float value conversion.
+	var typed_dict: Dictionary[int, float] = { 1: 10, 2: 20.5, 3: 30, 4: 40.5, 5: 50 }
+	typed_dict[3] = 33
+	var typed_dict_sum: float = 0.0
+	for key: int in typed_dict:
+		typed_dict_sum += typed_dict[key]
+
+	# Self-aliasing on GET_KEYED, GET_KEYED_VALIDATED, and literal construction.
+	var alias_untyped: Variant = { "next": 99 }
+	alias_untyped = alias_untyped["next"]
+	var alias_typed_dict: Dictionary = { "inner": { "leaf": 77 } }
+	alias_typed_dict = alias_typed_dict["inner"]
+	var alias_typed_leaf: int = alias_typed_dict["leaf"]
+	var wrapped_dict: Dictionary = { "seed": 5 }
+	wrapped_dict = { "prev": wrapped_dict, "tag": 8 }
+	var wrapped_dict_seed: int = wrapped_dict["prev"]["seed"]
+
+	# Typed and untyped arrays: positive/negative indexing, conversion, aliasing, and wrapping.
+	var typed_int_array: Array[int] = [10, 20, 30, 40]
+	typed_int_array[-1] = 45
+	typed_int_array[1] = 25
+	var typed_array_last: int = typed_int_array[-1]
+	var typed_float_array: Array[float] = [1, 2.5, 3]
+	typed_float_array.push_back(4)
+	var typed_float_sum: float = 0.0
+	for value: float in typed_float_array:
+		typed_float_sum += value
+
+	var untyped_array: Variant = [100, 200, 300]
+	untyped_array[-2] = 250
+	var untyped_array_mid: int = untyped_array[1]
+	var alias_array: Variant = [64, 128]
+	alias_array = alias_array[-1]
+	var wrapped_array: Array = [7]
+	wrapped_array = [wrapped_array, 9]
+	var wrapped_array_inner: int = wrapped_array[0][0]
+
+	# Empty and non-empty Array + Packed*Array iteration.
+	var empty_array: Array[int] = []
+	var empty_iter_count: int = 0
+	for item: int in empty_array:
+		empty_iter_count += 1
+	var int_iter_sum: int = 0
+	for item: int in typed_int_array:
+		int_iter_sum += item
+	var packed_ints := PackedInt32Array([3, 5, 7, 11])
+	var packed_int_sum: int = 0
+	for item: int in packed_ints:
+		packed_int_sum += item
+	var packed_vectors := PackedVector2Array([Vector2(1.0, 2.0), Vector2(3.0, 4.0)])
+	var packed_vector_sum: float = 0.0
+	for point: Vector2 in packed_vectors:
+		packed_vector_sum += point.x + point.y
+	var empty_packed := PackedFloat32Array()
+	var empty_packed_count: int = 0
+	for item: float in empty_packed:
+		empty_packed_count += 1
+
+	return {
+		"string_name_hit": string_name_hit,
+		"string_after_update": string_after_update,
+		"has_string_name": has_string_name,
+		"get_default_hit": get_default_hit,
+		"get_default_miss": get_default_miss,
+		"vec_key_value": vec_key_value,
+		"bool_key_value": bool_key_value,
+		"null_key_value": null_key_value,
+		"erased_beta": erased_beta,
+		"dict_key_count": dict_key_count,
+		"typed_dict_sum": int(typed_dict_sum),
+		"alias_untyped": alias_untyped,
+		"alias_typed_leaf": alias_typed_leaf,
+		"wrapped_dict_seed": wrapped_dict_seed,
+		"typed_array_last": typed_array_last,
+		"typed_float_sum": int(typed_float_sum * 2.0),
+		"untyped_array_mid": untyped_array_mid,
+		"alias_array": alias_array,
+		"wrapped_array_inner": wrapped_array_inner,
+		"empty_iter_count": empty_iter_count,
+		"int_iter_sum": int_iter_sum,
+		"packed_int_sum": packed_int_sum,
+		"packed_vector_sum": int(packed_vector_sum),
+		"empty_packed_count": empty_packed_count,
+	}
+)",
+				"res://container_fast_paths.gd");
+
+		const Vector<uint8_t> bytes = export_script_bytes(script);
+		Ref<GDScript> loaded = load_script_bytes(bytes, "res://container_fast_paths.gd");
+		REQUIRE(GDScriptBytecodeVerifier::verify_class(loaded.ptr()) == OK);
+
+		Ref<RefCounted> orig_inst = memnew(RefCounted);
+		orig_inst->set_script(script);
+		Ref<RefCounted> loaded_inst = memnew(RefCounted);
+		loaded_inst->set_script(loaded);
+
+		Dictionary orig_res = orig_inst->call("run_container_tests");
+		Dictionary loaded_res = loaded_inst->call("run_container_tests");
+		CHECK(orig_res == loaded_res);
+		CHECK(int(loaded_res["string_name_hit"]) == 30);
+		CHECK(int(loaded_res["string_after_update"]) == 35);
+		CHECK(bool(loaded_res["has_string_name"]) == true);
+		CHECK(int(loaded_res["get_default_hit"]) == 20);
+		CHECK(int(loaded_res["get_default_miss"]) == -7);
+		CHECK(int(loaded_res["vec_key_value"]) == 44);
+		CHECK(int(loaded_res["bool_key_value"]) == 55);
+		CHECK(int(loaded_res["null_key_value"]) == 66);
+		CHECK(bool(loaded_res["erased_beta"]) == true);
+		CHECK(int(loaded_res["dict_key_count"]) == 4);
+		CHECK(int(loaded_res["typed_dict_sum"]) == 154);
+		CHECK(int(loaded_res["alias_untyped"]) == 99);
+		CHECK(int(loaded_res["alias_typed_leaf"]) == 77);
+		CHECK(int(loaded_res["wrapped_dict_seed"]) == 5);
+		CHECK(int(loaded_res["typed_array_last"]) == 45);
+		CHECK(int(loaded_res["typed_float_sum"]) == 21);
+		CHECK(int(loaded_res["untyped_array_mid"]) == 250);
+		CHECK(int(loaded_res["alias_array"]) == 128);
+		CHECK(int(loaded_res["wrapped_array_inner"]) == 7);
+		CHECK(int(loaded_res["empty_iter_count"]) == 0);
+		CHECK(int(loaded_res["int_iter_sum"]) == 110);
+		CHECK(int(loaded_res["packed_int_sum"]) == 26);
+		CHECK(int(loaded_res["packed_vector_sum"]) == 10);
+		CHECK(int(loaded_res["empty_packed_count"]) == 0);
+	}
 }
 
 } // namespace TestGDScriptBytecode

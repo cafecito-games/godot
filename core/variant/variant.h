@@ -153,6 +153,7 @@ public:
 private:
 	friend struct _VariantCall;
 	friend class VariantInternal;
+	friend struct StringLikeVariantComparator;
 	template <typename>
 	friend struct _VariantInternalAccessorLocal;
 	template <typename>
@@ -822,7 +823,26 @@ public:
 	[[nodiscard]] _ALWAYS_INLINE_ bool operator>(const Variant &p_variant) const { return p_variant < *this; }
 	[[nodiscard]] _ALWAYS_INLINE_ bool operator>=(const Variant &p_variant) const { return !(*this < p_variant); }
 
-	uint32_t hash() const;
+	_FORCE_INLINE_ uint32_t hash() const {
+		switch (type) {
+			case INT:
+				return hash_one_uint64(static_cast<uint64_t>(_data._int));
+			case STRING_NAME:
+				return reinterpret_cast<const StringName *>(_data._mem)->hash();
+			case STRING:
+				return reinterpret_cast<const String *>(_data._mem)->hash();
+			case VECTOR2I:
+				return HashMapHasherDefault::hash(*reinterpret_cast<const Vector2i *>(_data._mem));
+			case OBJECT:
+				return hash_one_uint64(reinterpret_cast<uint64_t>(_get_obj().obj));
+			case BOOL:
+				return _data._bool ? 1 : 0;
+			case NIL:
+				return 0;
+			default:
+				return recursive_hash(0);
+		}
+	}
 	uint32_t recursive_hash(int recursion_count) const;
 
 	// Performs a semantic comparison (where NaN == NaN). Falls back to normal equality comparison (OP_EQUAL) when no special handling is needed.
@@ -863,7 +883,16 @@ public:
 	static void register_types();
 	static void unregister_types();
 
-	Variant(const Variant &p_variant);
+	_FORCE_INLINE_ Variant(const Variant &p_variant) {
+		if (likely(!needs_deinit[p_variant.type])) {
+			type = p_variant.type;
+			if (likely(type != NIL)) {
+				_data = p_variant._data;
+			}
+		} else {
+			reference(p_variant);
+		}
+	}
 	Variant(Variant &&p_variant) {
 		type = p_variant.type;
 		_data = p_variant._data;
@@ -888,7 +917,35 @@ struct HashMapComparatorDefault<Variant> {
 };
 
 struct StringLikeVariantComparator {
-	static bool compare(const Variant &p_lhs, const Variant &p_rhs);
+	static _FORCE_INLINE_ bool compare(const Variant &p_lhs, const Variant &p_rhs) {
+		const Variant::Type left_type = p_lhs.type;
+		const Variant::Type right_type = p_rhs.type;
+		if (likely(left_type == right_type)) {
+			switch (left_type) {
+				case Variant::INT:
+					return p_lhs._data._int == p_rhs._data._int;
+				case Variant::STRING_NAME:
+					return *reinterpret_cast<const StringName *>(p_lhs._data._mem) == *reinterpret_cast<const StringName *>(p_rhs._data._mem);
+				case Variant::STRING:
+					return *reinterpret_cast<const String *>(p_lhs._data._mem) == *reinterpret_cast<const String *>(p_rhs._data._mem);
+				case Variant::VECTOR2I:
+					return *reinterpret_cast<const Vector2i *>(p_lhs._data._mem) == *reinterpret_cast<const Vector2i *>(p_rhs._data._mem);
+				case Variant::BOOL:
+					return p_lhs._data._bool == p_rhs._data._bool;
+				case Variant::NIL:
+					return true;
+				default:
+					return p_lhs.hash_compare(p_rhs);
+			}
+		}
+		if (left_type == Variant::STRING && right_type == Variant::STRING_NAME) {
+			return *reinterpret_cast<const String *>(p_lhs._data._mem) == *reinterpret_cast<const StringName *>(p_rhs._data._mem);
+		}
+		if (left_type == Variant::STRING_NAME && right_type == Variant::STRING) {
+			return *reinterpret_cast<const StringName *>(p_lhs._data._mem) == *reinterpret_cast<const String *>(p_rhs._data._mem);
+		}
+		return false;
+	}
 };
 
 struct StringLikeVariantOrder {

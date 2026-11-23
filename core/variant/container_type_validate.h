@@ -144,6 +144,10 @@ private:
 	}
 
 public:
+	_FORCE_INLINE_ bool is_fast_valid(const Variant &p_variant) const {
+		return type == Variant::NIL || (type == p_variant.get_type() && type != Variant::OBJECT);
+	}
+
 	_FORCE_INLINE_ bool validate(Variant &inout_variant, const char *p_operation = "use") const {
 		return _internal_validate(inout_variant, p_operation, true);
 	}

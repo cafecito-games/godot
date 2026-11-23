@@ -750,4 +750,29 @@ TEST_CASE("[Dictionary] RefCounted value init") {
 	CHECK_EQ(tdict[5.0], Variant(b));
 }
 
+TEST_CASE("[Dictionary] Overwriting sole owner of nested dictionary preserves aliased source") {
+	Dictionary nested;
+	nested.set("leaf", String("nested_dictionary_payload_that_must_survive_overwrite"));
+
+	Dictionary outer;
+	outer.set("holder", nested);
+	const Variant *nested_string = nested.getptr("leaf");
+	REQUIRE(nested_string != nullptr);
+
+	// Release external reference so outer["holder"] is the sole owner of nested.
+	nested = Dictionary();
+	CHECK(outer.set("holder", *nested_string));
+	CHECK_EQ(String(outer["holder"]), String("nested_dictionary_payload_that_must_survive_overwrite"));
+
+	// Repeat with a trivial source Variant owned by a nested dictionary.
+	Dictionary nested_trivial;
+	nested_trivial.set("number", 424242);
+	CHECK(outer.set("holder", nested_trivial));
+	const Variant *trivial_source = nested_trivial.getptr("number");
+	REQUIRE(trivial_source != nullptr);
+	nested_trivial = Dictionary();
+	CHECK(outer.set("holder", *trivial_source));
+	CHECK_EQ(int(outer["holder"]), 424242);
+}
+
 } // namespace TestDictionary
