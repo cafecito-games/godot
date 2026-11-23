@@ -119,17 +119,14 @@ private:
 		uint32_t distance = 0;
 
 		while (true) {
-			if (_hashes[idx] == EMPTY_HASH) {
+			const uint32_t slot_hash = _hashes[idx];
+			if (likely(slot_hash == p_hash)) {
+				if (likely(Comparator::compare(_elements[idx]->data.key, p_key))) {
+					r_idx = idx;
+					return true;
+				}
+			} else if (slot_hash == EMPTY_HASH || (distance != 0 && distance > _get_probe_length(idx, slot_hash, capacity, capacity_inv))) {
 				return false;
-			}
-
-			if (distance > _get_probe_length(idx, _hashes[idx], capacity, capacity_inv)) {
-				return false;
-			}
-
-			if (_hashes[idx] == p_hash && Comparator::compare(_elements[idx]->data.key, p_key)) {
-				r_idx = idx;
-				return true;
 			}
 
 			_increment_mod(idx, capacity);
@@ -577,6 +574,18 @@ public:
 		} else {
 			_elements[idx]->data.value = p_value;
 			return Iterator(_elements[idx]);
+		}
+	}
+
+	template <typename AssignFunc>
+	_FORCE_INLINE_ void insert_or_assign_with(const TKey &p_key, const TValue &p_value, AssignFunc &&p_assign) {
+		const uint32_t hash = _hash(p_key);
+		uint32_t idx = 0;
+		bool exists = _elements && _size > 0 && _lookup_idx_unchecked(p_key, hash, idx);
+		if (likely(exists)) {
+			p_assign(_elements[idx]->data.value, p_value);
+		} else {
+			_insert(p_key, p_value, hash);
 		}
 	}
 

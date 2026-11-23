@@ -236,6 +236,41 @@ public:
 		}
 	}
 
+	// Alias-safe assignment for container mutation APIs where p_source may be
+	// transitively owned by p_destination (e.g. a nested Array/Dictionary element).
+	_FORCE_INLINE_ static void assign_safe_fast(Variant *p_destination, const Variant *p_source) {
+		if (likely(!Variant::needs_deinit[p_destination->type])) {
+			if (likely(!Variant::needs_deinit[p_source->type])) {
+				p_destination->type = p_source->type;
+				if (likely(p_source->type != Variant::NIL)) {
+					p_destination->_data = p_source->_data;
+				}
+			} else {
+				*p_destination = *p_source;
+			}
+			return;
+		}
+		if (unlikely(p_destination == p_source)) {
+			return;
+		}
+		if (likely(!Variant::needs_deinit[p_source->type])) {
+			const Variant::Type source_type = p_source->type;
+			Variant copy;
+			copy.type = source_type;
+			if (likely(source_type != Variant::NIL)) {
+				copy._data = p_source->_data;
+			}
+			p_destination->_clear_internal();
+			p_destination->type = source_type;
+			if (likely(source_type != Variant::NIL)) {
+				p_destination->_data = copy._data;
+			}
+			return;
+		}
+		Variant copy(*p_source);
+		assign_move_fast(p_destination, copy);
+	}
+
 	_FORCE_INLINE_ static void assign_bool_fast(Variant *p_dst, bool p_value) {
 		if (likely(!Variant::needs_deinit[p_dst->type])) {
 			p_dst->type = Variant::BOOL;

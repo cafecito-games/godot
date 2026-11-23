@@ -41,6 +41,7 @@ STATIC_ASSERT_INCOMPLETE_TYPE(class, String);
 #include "core/variant/callable.h"
 #include "core/variant/container_type_validate.h"
 #include "core/variant/dictionary.h"
+#include "core/variant/variant_internal.h"
 
 struct ArrayPrivate {
 	SafeRefCount refcount;
@@ -281,6 +282,10 @@ void Array::assign(const Array &p_array) {
 
 void Array::push_back(const Variant &p_value) {
 	ERR_FAIL_COND_MSG(_p->read_only, "Array is in read-only state.");
+	if (likely(_p->typed.is_fast_valid(p_value))) {
+		_p->array.push_back(p_value);
+		return;
+	}
 	Variant value = p_value;
 	ERR_FAIL_COND(!_p->typed.validate(value, "push_back"));
 	_p->array.push_back(std::move(value));
@@ -516,14 +521,99 @@ void Array::remove_at(int p_pos) {
 
 void Array::set(int p_idx, const Variant &p_value) {
 	ERR_FAIL_COND_MSG(_p->read_only, "Array is in read-only state.");
+	if (likely(_p->typed.is_fast_valid(p_value))) {
+		Variant *data = _p->array.ptrw();
+		CRASH_BAD_INDEX(p_idx, _p->array.size());
+		VariantInternal::assign_safe_fast(&data[p_idx], &p_value);
+		return;
+	}
 	Variant value = p_value;
 	ERR_FAIL_COND(!_p->typed.validate(value, "set"));
 
-	_p->array.write[p_idx] = std::move(value);
+	Variant *data = _p->array.ptrw();
+	CRASH_BAD_INDEX(p_idx, _p->array.size());
+	VariantInternal::assign_move_fast(&data[p_idx], value);
 }
 
 const Variant &Array::get(int p_idx) const {
 	return operator[](p_idx);
+}
+
+const Variant *Array::get_element_ptr_if_valid(int64_t p_index) const {
+	const int64_t array_size = _p->array.size();
+	if (unlikely(static_cast<uint64_t>(p_index) >= static_cast<uint64_t>(array_size))) {
+		return nullptr;
+	}
+	return _p->array.ptr() + p_index;
+}
+
+const Variant *Array::get_indexed_ptr(int64_t p_index) const {
+	const int64_t array_size = _p->array.size();
+	if (unlikely(p_index < 0)) {
+		p_index += array_size;
+	}
+	if (unlikely(static_cast<uint64_t>(p_index) >= static_cast<uint64_t>(array_size))) {
+		return nullptr;
+	}
+	return _p->array.ptr() + p_index;
+}
+
+bool Array::set_indexed_checked(int64_t p_index, const Variant &p_value) {
+	if (unlikely(_p->read_only != nullptr)) {
+		return false;
+	}
+	const int64_t array_size = _p->array.size();
+	if (unlikely(p_index < 0)) {
+		p_index += array_size;
+	}
+	if (unlikely(static_cast<uint64_t>(p_index) >= static_cast<uint64_t>(array_size))) {
+		return false;
+	}
+	if (likely(_p->typed.is_fast_valid(p_value))) {
+		VariantInternal::assign_safe_fast(&_p->array.ptrw()[p_index], &p_value);
+		return true;
+	}
+	set(static_cast<int>(p_index), p_value);
+	return true;
+}
+
+void Array::construct_from_variants(const Variant *const *p_variants, int p_count) {
+	ERR_FAIL_COND_MSG(_p->read_only, "Array is in read-only state.");
+	if (p_count <= 0) {
+		return;
+	}
+	_p->array.resize_initialized(p_count);
+	Variant *write = _p->array.ptrw();
+	for (int index = 0; index < p_count; index++) {
+		VariantInternal::assign_fast(&write[index], p_variants[index]);
+	}
+}
+
+void Array::construct_typed_from_variants(uint32_t p_type, const StringName &p_class_name, const Variant &p_script, const Variant *const *p_variants, int p_count) {
+	if (likely(_p->read_only == nullptr && _p->array.is_empty() && _p->refcount.get() <= 1 && _p->typed.type == Variant::NIL &&
+				p_class_name.is_empty() && p_script.get_type() == Variant::NIL)) {
+		_p->typed.type = Variant::Type(p_type);
+		_p->typed.where = "TypedArray";
+	} else {
+		set_typed(p_type, p_class_name, p_script);
+	}
+	if (p_count <= 0) {
+		return;
+	}
+	_p->array.resize_initialized(p_count);
+	Variant *write = _p->array.ptrw();
+	for (int index = 0; index < p_count; index++) {
+		const Variant *source = p_variants[index];
+		if (likely(_p->typed.is_fast_valid(*source))) {
+			VariantInternal::assign_fast(&write[index], source);
+		} else {
+			if (_p->typed.type != Variant::NIL && _p->typed.type != Variant::OBJECT) {
+				VariantInternal::initialize(&write[index], _p->typed.type);
+			}
+			set(index, *source);
+			write = _p->array.ptrw();
+		}
+	}
 }
 
 Array Array::duplicate(bool p_deep) const {

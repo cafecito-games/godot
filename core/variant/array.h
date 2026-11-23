@@ -104,6 +104,11 @@ public:
 
 	void set(int p_idx, const Variant &p_value);
 	const Variant &get(int p_idx) const;
+	const Variant *get_element_ptr_if_valid(int64_t p_index) const;
+	const Variant *get_indexed_ptr(int64_t p_index) const;
+	bool set_indexed_checked(int64_t p_index, const Variant &p_value);
+	void construct_from_variants(const Variant *const *p_variants, int p_count);
+	void construct_typed_from_variants(uint32_t p_type, const StringName &p_class_name, const Variant &p_script, const Variant *const *p_variants, int p_count);
 
 	int size() const;
 	bool is_empty() const;

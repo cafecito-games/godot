@@ -790,4 +790,27 @@ TEST_CASE("[Array] Test typed arrays") {
 	CHECK_EQ(arr3.get_typed_class_name(), "Node");
 }
 
+TEST_CASE("[Array] Overwriting sole owner of nested array preserves aliased source") {
+	Array nested;
+	nested.push_back(String("nested_payload_value_that_must_survive_overwrite"));
+
+	Array outer;
+	outer.push_back(nested);
+	const Variant &nested_string = nested[0];
+
+	// Release external reference so outer[0] is the sole owner of nested.
+	nested = Array();
+	outer.set(0, nested_string);
+	CHECK_EQ(String(outer[0]), String("nested_payload_value_that_must_survive_overwrite"));
+
+	// Repeat with a trivial source Variant owned by a nested array.
+	Array nested_trivial;
+	nested_trivial.push_back(987654);
+	outer.set(0, nested_trivial);
+	const Variant &trivial_source = nested_trivial[0];
+	nested_trivial = Array();
+	outer.set(0, trivial_source);
+	CHECK_EQ(int(outer[0]), 987654);
+}
+
 } // namespace TestArray

@@ -2798,14 +2798,6 @@ Variant::Variant(const IPAddress &p_address) :
 	memnew_placement(_data._mem, String(p_address));
 }
 
-Variant::Variant(const Variant &p_variant) {
-	reference(p_variant);
-}
-
-uint32_t Variant::hash() const {
-	return recursive_hash(0);
-}
-
 uint32_t Variant::recursive_hash(int recursion_count) const {
 	switch (type) {
 		case NIL: {
@@ -3395,19 +3387,6 @@ bool Variant::identity_compare(const Variant &p_variant) const {
 			return hash_compare(p_variant);
 		}
 	}
-}
-
-bool StringLikeVariantComparator::compare(const Variant &p_lhs, const Variant &p_rhs) {
-	if (p_lhs.hash_compare(p_rhs)) {
-		return true;
-	}
-	if (p_lhs.get_type() == Variant::STRING && p_rhs.get_type() == Variant::STRING_NAME) {
-		return *VariantInternal::get_string(&p_lhs) == *VariantInternal::get_string_name(&p_rhs);
-	}
-	if (p_lhs.get_type() == Variant::STRING_NAME && p_rhs.get_type() == Variant::STRING) {
-		return *VariantInternal::get_string_name(&p_lhs) == *VariantInternal::get_string(&p_rhs);
-	}
-	return false;
 }
 
 bool StringLikeVariantOrder::compare(const Variant &p_lhs, const Variant &p_rhs) {
