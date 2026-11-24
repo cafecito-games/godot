@@ -206,18 +206,16 @@ void GDScript::_prepare_instantiation_cache() {
 	_cached_native_is_refcounted = _cached_root_script->native.is_valid() && _cached_root_script->native->get_name() == RefCounted::get_class_static();
 	_cached_initializer = _super_constructor(this);
 
-	LocalVector<CachedNotification> notification_entries;
+	bool has_notifications = false;
 	const StringName &notification_name = GDScriptLanguage::get_singleton()->strings._notification;
 	for (uint32_t class_index = 0; class_index < hierarchy.size(); class_index++) {
 		GDScript *current_script = hierarchy[class_index];
-		if (likely(current_script->valid)) {
-			HashMap<StringName, GDScriptFunction *>::ConstIterator entry = current_script->member_functions.find(notification_name);
-			if (entry) {
-				notification_entries.push_back({ current_script, entry->value });
-			}
+		if (likely(current_script->valid) && current_script->member_functions.has(notification_name)) {
+			has_notifications = true;
+			break;
 		}
 	}
-	_cached_notification_functions = std::move(notification_entries);
+	_has_notification_functions = has_notifications;
 
 	const int member_count = member_indices.size();
 	Vector<Variant> template_members;
@@ -2416,38 +2414,50 @@ void GDScriptInstance::notification(int p_notification, bool p_reversed) {
 	}
 
 	target_script->ensure_instantiation_cache();
-	const LocalVector<GDScript::CachedNotification> &cached_notifications = target_script->_cached_notification_functions;
-	const uint32_t notification_count = cached_notifications.size();
-	if (likely(notification_count == 0)) {
+	if (likely(!target_script->_has_notification_functions)) {
 		return;
 	}
 
 	// Notification is not virtual; it gets called at all levels just like in C++.
 	Variant value = p_notification;
 	const Variant *args[1] = { &value };
+	const StringName &notification_str = GDScriptLanguage::get_singleton()->strings._notification;
 
-	GDScript::CachedNotification stack_entries[16];
-	LocalVector<GDScript::CachedNotification> heap_entries;
-	const GDScript::CachedNotification *entries = stack_entries;
-	if (likely(notification_count <= 16)) {
-		for (uint32_t index = 0; index < notification_count; index++) {
-			stack_entries[index] = cached_notifications[index];
+	constexpr uint32_t INLINE_DEPTH = 16;
+	Ref<GDScript> stack_scripts[INLINE_DEPTH];
+	LocalVector<Ref<GDScript>> heap_scripts;
+	uint32_t script_count = 0;
+	for (GDScript *sptr = target_script; sptr != nullptr; sptr = sptr->base.ptr()) {
+		if (likely(script_count < INLINE_DEPTH && heap_scripts.is_empty())) {
+			stack_scripts[script_count++] = Ref<GDScript>(sptr);
+		} else {
+			if (heap_scripts.is_empty()) {
+				heap_scripts.reserve(INLINE_DEPTH * 2);
+				for (uint32_t index = 0; index < script_count; index++) {
+					heap_scripts.push_back(stack_scripts[index]);
+					stack_scripts[index].unref();
+				}
+			}
+			heap_scripts.push_back(Ref<GDScript>(sptr));
+			script_count++;
 		}
-	} else {
-		heap_entries = cached_notifications;
-		entries = heap_entries.ptr();
 	}
 
-	const int start = p_reversed ? static_cast<int>(notification_count) - 1 : 0;
-	const int end = p_reversed ? -1 : static_cast<int>(notification_count);
-	const int step = p_reversed ? -1 : 1;
+	const Ref<GDScript> *scripts = heap_scripts.is_empty() ? stack_scripts : heap_scripts.ptr();
+	const int start = p_reversed ? 0 : static_cast<int>(script_count) - 1;
+	const int end = p_reversed ? static_cast<int>(script_count) : -1;
+	const int step = p_reversed ? 1 : -1;
 
-	for (int index = start; index != end; index += step) {
-		if (likely(entries[index].script->valid)) {
-			Callable::CallError err;
-			entries[index].function->call(this, args, 1, err);
-			if (err.error != Callable::CallError::CALL_OK) {
-				//print error about notification call
+	for (int idx = start; idx != end; idx += step) {
+		GDScript *sc = scripts[idx].ptr();
+		if (likely(sc->valid)) {
+			HashMap<StringName, GDScriptFunction *>::Iterator E = sc->member_functions.find(notification_str);
+			if (E) {
+				Callable::CallError err;
+				E->value->call(this, args, 1, err);
+				if (err.error != Callable::CallError::CALL_OK) {
+					//print error about notification call
+				}
 			}
 		}
 	}

@@ -181,18 +181,13 @@ private:
 	GDScriptFunction *implicit_ready = nullptr; // `@implicit_ready()` special function.
 	GDScriptFunction *static_initializer = nullptr; // `@static_initializer()` special function.
 
-	struct CachedNotification {
-		GDScript *script = nullptr;
-		GDScriptFunction *function = nullptr;
-	};
-
 	static inline MethodBind *_new_method_bind = nullptr;
 	std::atomic<uint64_t> _instantiation_cache_epoch{ 0 };
 	GDScript *_cached_root_script = nullptr;
 	GDScriptFunction *_cached_initializer = nullptr;
-	LocalVector<CachedNotification> _cached_notification_functions;
 	Vector<Variant> _member_init_template;
 	bool _cached_native_is_refcounted = false;
+	bool _has_notification_functions = false;
 	bool _has_member_init_template = false;
 	bool _member_init_all_trivial = false;
 
@@ -325,9 +320,9 @@ public:
 		_instantiation_cache_epoch.store(0, std::memory_order_release);
 		_cached_root_script = nullptr;
 		_cached_initializer = nullptr;
-		_cached_notification_functions.clear();
 		_member_init_template.clear();
 		_cached_native_is_refcounted = false;
+		_has_notification_functions = false;
 		_has_member_init_template = false;
 		_member_init_all_trivial = false;
 	}

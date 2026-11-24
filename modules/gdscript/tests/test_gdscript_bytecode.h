@@ -2949,6 +2949,59 @@ func _notification(what: int) -> void:
 			second_ref->notification(555);
 			CHECK(int(second_ref->get("notified")) == 200);
 		}
+
+		// Live reload(true) of a derived script during base _notification dispatch must resolve the replacement function safely.
+		{
+			const String base_path = TestUtils::get_temp_path("test_notify_reload_base.gd");
+			const String derived_path = TestUtils::get_temp_path("test_notify_reload_derived.gd");
+			const String reloaded_derived_source = "extends \"" + base_path + "\"\nfunc _notification(what: int) -> void:\n\tif what == 888:\n\t\ttrace.append(\"derived_reloaded\")\n";
+			{
+				Ref<FileAccess> base_file = FileAccess::open(base_path, FileAccess::WRITE);
+				REQUIRE(base_file.is_valid());
+				base_file->store_string(
+						"extends RefCounted\n"
+						"var trace: Array = []\n"
+						"var reloaded_source: String = \"\"\n"
+						"func _notification(what: int) -> void:\n"
+						"\tif what == 888:\n"
+						"\t\ttrace.append(\"base\")\n"
+						"\t\tvar derived_script: GDScript = get_script()\n"
+						"\t\tderived_script.set_source_code(reloaded_source)\n"
+						"\t\tderived_script.reload(true)\n");
+				base_file->close();
+
+				Ref<FileAccess> derived_file = FileAccess::open(derived_path, FileAccess::WRITE);
+				REQUIRE(derived_file.is_valid());
+				derived_file->store_string("extends \"" + base_path + "\"\nfunc _notification(what: int) -> void:\n\tif what == 888:\n\t\ttrace.append(\"derived_old\")\n");
+				derived_file->close();
+			}
+
+			Ref<GDScript> derived_script = ResourceLoader::load(derived_path);
+			REQUIRE(derived_script.is_valid());
+
+			Callable::CallError err;
+			Variant obj = derived_script->_new(nullptr, 0, err);
+			REQUIRE(err.error == Callable::CallError::CALL_OK);
+			Ref<RefCounted> obj_ref = obj;
+			REQUIRE(obj_ref.is_valid());
+			obj_ref->set("reloaded_source", reloaded_derived_source);
+
+			obj_ref->notification(888, false);
+			Array trace = obj_ref->get("trace");
+			REQUIRE(trace.size() == 2);
+			CHECK(String(trace[0]) == "base");
+			CHECK(String(trace[1]) == "derived_reloaded");
+
+			obj_ref.unref();
+			obj = Variant();
+			Ref<GDScript> base_script = derived_script->get_base();
+			derived_script->clear();
+			if (base_script.is_valid()) {
+				base_script->clear();
+			}
+			DirAccess::remove_absolute(derived_path);
+			DirAccess::remove_absolute(base_path);
+		}
 	}
 }
 
