@@ -35,6 +35,7 @@
 #include "core/object/class_db.h"
 #include "core/os/os.h"
 #include "core/profiling/profiling.h"
+#include "scene/scene_string_names.h"
 
 #include <atomic>
 #include <cstring>
@@ -195,6 +196,9 @@ struct GDScriptFunction::VMThreadState {
 			}
 			GDScriptInstance *gds_instance = static_cast<GDScriptInstance *>(script_instance);
 			const StringName &method_name = callable->get_method_standard_unchecked();
+			if (unlikely(method_name == SceneStringName(_ready) || method_name == CoreStringName(free_))) {
+				return nullptr;
+			}
 			const GDScript *cursor = gds_instance->get_script_ptr();
 			while (cursor != nullptr) {
 				if (likely(cursor->is_valid())) {

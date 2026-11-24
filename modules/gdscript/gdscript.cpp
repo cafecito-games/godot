@@ -460,7 +460,11 @@ GDScriptInstance *GDScript::_create_instance(const Variant **p_args, int p_argco
 		instances.add(&instance->script_instance_list);
 	}
 
-	if (likely(_has_member_init_template)) {
+	if (likely(_has_member_init_template
+#ifdef DEBUG_ENABLED
+				&& !EngineDebugger::is_active() && !GDScriptLanguage::get_singleton()->profiling
+#endif
+				)) {
 		if (likely(_member_init_all_trivial)) {
 			instance->members.init_from_trivial_template(_member_init_template.ptr(), _member_init_template.size());
 		} else {
@@ -539,7 +543,11 @@ GDScriptInstance *GDScript::_create_instance_without_init(Callable::CallError &r
 		instances.add(&instance->script_instance_list);
 	}
 
-	if (likely(_has_member_init_template)) {
+	if (likely(_has_member_init_template
+#ifdef DEBUG_ENABLED
+				&& !EngineDebugger::is_active() && !GDScriptLanguage::get_singleton()->profiling
+#endif
+				)) {
 		if (likely(_member_init_all_trivial)) {
 			instance->members.init_from_trivial_template(_member_init_template.ptr(), _member_init_template.size());
 		} else {

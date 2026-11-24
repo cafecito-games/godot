@@ -2700,9 +2700,14 @@ class DerivedInit extends InitArgs:
 
 class NodeHelper extends Node:
 	var tag: int = 0
+	@onready var ready_value: int = 7
+	var seen_in_ready: int = 0
 
 	func _init(p_tag: int) -> void:
 		tag = p_tag
+
+	func _ready() -> void:
+		seen_in_ready = ready_value
 
 	func make_self_lambda() -> Callable:
 		return func(delta: int) -> int:
@@ -2775,8 +2780,11 @@ func run_object_and_callable_tests() -> Dictionary:
 	var member_init_a: int = held_instance.a
 	held_instance = null
 
-	# Non-RefCounted Node subclass instantiation + self-capturing lambda.
+	# Non-RefCounted Node subclass instantiation, Callable("_ready") @onready dispatch, and self-capturing lambda.
 	var node_obj := NodeHelper.new(50)
+	var ready_callable := Callable(node_obj, "_ready")
+	ready_callable.call()
+	var node_ready_seen: int = node_obj.seen_in_ready
 	var node_lambda: Callable = node_obj.make_self_lambda()
 	var node_lambda_alive: int = node_lambda.call(7)
 	node_obj.free()
@@ -2832,6 +2840,7 @@ func run_object_and_callable_tests() -> Dictionary:
 		"aliased_arg_a": aliased_arg.a,
 		"cls_alias_a": cls_alias.a,
 		"member_init_a": member_init_a,
+		"node_ready_seen": node_ready_seen,
 		"node_lambda_alive": node_lambda_alive,
 		"notify_log": notify_log,
 		"non_cap": non_cap.call(7),
@@ -2880,6 +2889,7 @@ func run_object_and_callable_tests() -> Dictionary:
 		CHECK(int(loaded_res["aliased_arg_a"]) == 27);
 		CHECK(int(loaded_res["cls_alias_a"]) == 31);
 		CHECK(int(loaded_res["member_init_a"]) == 9);
+		CHECK(int(loaded_res["node_ready_seen"]) == 7);
 		CHECK(int(loaded_res["node_lambda_alive"]) == 57);
 		CHECK(String(loaded_res["notify_log"]) == "base:777,derived:777,derived:777,base:777,derived:1,base:1");
 		CHECK(int(loaded_res["non_cap"]) == 22);
