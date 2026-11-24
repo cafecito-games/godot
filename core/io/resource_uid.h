@@ -63,6 +63,10 @@ private:
 	bool changed = false;
 	bool cache_initialized = false;
 
+#ifdef TOOLS_ENABLED
+	const Cache *_get_cache_entry_with_startup_scan(ID p_id) const;
+#endif
+
 protected:
 	static void _bind_methods();
 
@@ -88,6 +92,9 @@ public:
 	Error load_from_cache(bool p_reset);
 	Error save_to_cache();
 	Error update_cache();
+#ifdef TOOLS_ENABLED
+	static void scan_project_uids_from_disk();
+#endif
 	static String get_path_from_cache(Ref<FileAccess> &p_cache_file, const String &p_uid_string);
 	static Vector<uint8_t> encode_binary_cache(const Vector<Pair<ID, String>> &p_entries);
 

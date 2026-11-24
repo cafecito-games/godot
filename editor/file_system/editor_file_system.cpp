@@ -266,6 +266,9 @@ void EditorFileSystem::_load_first_scan_root_dir() {
 }
 
 void EditorFileSystem::scan_for_uid() {
+	// Reset the callback first to prevent recursive re-entry during UID lookups.
+	ResourceUID::scan_for_uid_on_startup = nullptr;
+
 	// Load file structure into memory.
 	_load_first_scan_root_dir();
 
@@ -279,9 +282,6 @@ void EditorFileSystem::scan_for_uid() {
 
 	// Scan the file system to load uid.
 	_scan_for_uid_directory(first_scan_root_dir, import_extensions);
-
-	// It's done, resetting the callback method to prevent a second scan.
-	ResourceUID::scan_for_uid_on_startup = nullptr;
 }
 
 void EditorFileSystem::_scan_for_uid_directory(const ScannedDirectory *p_scan_dir, const HashSet<String> &p_import_extensions) {
@@ -309,6 +309,11 @@ void EditorFileSystem::_scan_for_uid_directory(const ScannedDirectory *p_scan_di
 		if (uid != ResourceUID::INVALID_ID) {
 			if (!ResourceUID::get_singleton()->has_id(uid)) {
 				ResourceUID::get_singleton()->add_id(uid, path);
+			} else {
+				const String existing_path = ResourceUID::get_singleton()->get_id_path(uid);
+				if (existing_path != path && !FileAccess::exists(existing_path)) {
+					ResourceUID::get_singleton()->set_id(uid, path);
+				}
 			}
 		}
 	}

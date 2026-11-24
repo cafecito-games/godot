@@ -31,6 +31,9 @@
 #include "gdextension_manager.h"
 
 #include "core/config/engine.h"
+#ifdef TOOLS_ENABLED
+#include "core/config/project_settings.h"
+#endif
 #include "core/extension/gdextension_function_loader.h"
 #include "core/extension/gdextension_library_loader.h"
 #include "core/extension/gdextension_special_compat_hashes.h"
@@ -329,6 +332,12 @@ void GDExtensionManager::load_extensions() {
 	while (f.is_valid() && !f->eof_reached()) {
 		String s = f->get_line().strip_edges();
 		if (!s.is_empty()) {
+#ifdef TOOLS_ENABLED
+			const ProjectSettings *project_settings = ProjectSettings::get_singleton();
+			if (project_settings && !project_settings->is_using_datapack() && s.begins_with("res://") && !FileAccess::exists(s)) {
+				continue;
+			}
+#endif
 			LoadStatus err = load_extension(s);
 			ERR_CONTINUE_MSG(err == LOAD_STATUS_FAILED, vformat("Error loading extension: '%s'.", s));
 		}

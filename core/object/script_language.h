@@ -99,6 +99,9 @@ public:
 	static void get_inheriters_list(const StringName &p_base_type, List<StringName> *r_classes);
 	static void get_indirect_inheriters_list(const StringName &p_base_type, List<StringName> *r_classes);
 	static void save_global_classes();
+#ifdef TOOLS_ENABLED
+	static bool refresh_global_classes_from_disk(bool p_persist_cache = true);
+#endif
 
 	static Vector<Ref<ScriptBacktrace>> capture_script_backtraces(bool p_include_variables = false);
 
@@ -467,6 +470,11 @@ public:
 
 	virtual bool handles_global_class_type(const String &p_type) const { return false; }
 	virtual String get_global_class_name(const String &p_path, String *r_base_type = nullptr, String *r_icon_path = nullptr, bool *r_is_abstract = nullptr, bool *r_is_tool = nullptr) const { return String(); }
+	// Fast lookup for callers that only need metadata when the script declares a global class_name.
+	// Unlike get_global_class_name(), out-parameters may be left unmodified when no global class is declared.
+	virtual String find_global_class_name(const String &p_path, String *r_base_type = nullptr, String *r_icon_path = nullptr, bool *r_is_abstract = nullptr, bool *r_is_tool = nullptr) const {
+		return get_global_class_name(p_path, r_base_type, r_icon_path, r_is_abstract, r_is_tool);
+	}
 
 	virtual ~ScriptLanguage() {}
 };

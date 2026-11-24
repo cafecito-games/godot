@@ -45,6 +45,7 @@
 #include "core/object/script_language.h"
 #include "core/os/os.h"
 #include "core/templates/rb_set.h"
+#include "core/templates/safe_refcount.h"
 #include "core/variant/typed_array.h"
 #include "core/variant/variant_parser.h"
 #include "core/version.h"
@@ -1455,12 +1456,48 @@ String ProjectSettings::get_global_class_list_path() const {
 }
 
 void ProjectSettings::store_global_class_list(const Array &p_classes) {
-	Ref<ConfigFile> cf;
-	cf.instantiate();
-	cf->set_value("", "list", p_classes);
-	cf->save(get_global_class_list_path());
-
 	global_class_list = p_classes;
+	is_global_class_list_loaded = true;
+
+	const String target_path = get_global_class_list_path();
+	const String target_directory = target_path.get_base_dir();
+	Ref<DirAccess> directory_access = DirAccess::create(DirAccess::ACCESS_RESOURCES);
+	if (directory_access.is_null()) {
+		return;
+	}
+	if (!directory_access->dir_exists(target_directory)) {
+		if (directory_access->make_dir_recursive(target_directory) != OK) {
+			return;
+		}
+	}
+
+	static SafeNumeric<uint64_t> temporary_file_counter{ 0 };
+	const uint64_t unique_counter = temporary_file_counter.increment();
+	const int64_t process_id = OS::get_singleton() ? OS::get_singleton()->get_process_id() : 0;
+	const String temporary_path = target_path + "." + String::num_int64(process_id) + "." + String::num_uint64(unique_counter) + ".tmp";
+
+	Ref<ConfigFile> config_file;
+	config_file.instantiate();
+	config_file->set_value("", "list", p_classes);
+	const String encoded = config_file->encode_to_text();
+
+	Error open_error = OK;
+	Ref<FileAccess> file_access = FileAccess::open(temporary_path, FileAccess::WRITE, &open_error);
+	if (file_access.is_null() || open_error != OK) {
+		return;
+	}
+	const bool stored = file_access->store_string(encoded);
+	const Error write_error = file_access->get_error();
+	file_access.unref();
+
+	if (!stored || write_error != OK) {
+		directory_access->remove(temporary_path);
+		return;
+	}
+
+	if (directory_access->rename(temporary_path, target_path) != OK) {
+		directory_access->remove(temporary_path);
+	}
 }
 
 bool ProjectSettings::has_custom_feature(const String &p_feature) const {

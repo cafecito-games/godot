@@ -35,6 +35,10 @@
 #include "core/core_bind.h"
 #include "core/debugger/engine_debugger.h"
 #include "core/debugger/script_debugger.h"
+#ifdef TOOLS_ENABLED
+#include "core/io/dir_access.h"
+#include "core/io/file_access.h"
+#endif
 #include "core/object/callable_mp.h"
 #include "core/object/class_db.h"
 #include "core/templates/sort_array.h"
@@ -410,7 +414,7 @@ void ScriptServer::add_global_class(const StringName &p_class, const StringName 
 	GlobalScriptClass *existing = global_classes.getptr(p_class);
 	if (existing) {
 		// Update an existing class (only set dirty if something changed).
-		if (existing->base != p_base || existing->path != p_path || existing->language != p_language) {
+		if (existing->base != p_base || existing->path != p_path || existing->language != p_language || existing->is_abstract != p_is_abstract || existing->is_tool != p_is_tool) {
 			existing->base = p_base;
 			existing->path = p_path;
 			existing->language = p_language;
@@ -538,10 +542,10 @@ void ScriptServer::save_global_classes() {
 	Array script_classes = ProjectSettings::get_singleton()->get_global_class_list();
 	for (const Variant &script_class : script_classes) {
 		Dictionary d = script_class;
-		if (!d.has("name") || !d.has("icon")) {
+		if (!d.has("class") || !d.has("icon")) {
 			continue;
 		}
-		class_icons[d["name"]] = d["icon"];
+		class_icons[d["class"]] = d["icon"];
 	}
 
 	LocalVector<StringName> gc;
@@ -561,6 +565,229 @@ void ScriptServer::save_global_classes() {
 	}
 	ProjectSettings::get_singleton()->store_global_class_list(gcarr);
 }
+
+#ifdef TOOLS_ENABLED
+namespace {
+
+struct ScannedGlobalScriptClass {
+	StringName language;
+	String path;
+	StringName base;
+	String icon;
+	bool is_abstract = false;
+	bool is_tool = false;
+};
+
+static bool should_skip_project_directory(const String &p_directory_path, const String &p_project_data_path) {
+	if (p_directory_path == p_project_data_path || p_directory_path.begins_with(p_project_data_path + "/")) {
+		return true;
+	}
+	if (FileAccess::exists(p_directory_path.path_join("project.godot"))) {
+		return true;
+	}
+	if (FileAccess::exists(p_directory_path.path_join(".gdignore"))) {
+		return true;
+	}
+	return false;
+}
+
+static void scan_directory_for_global_classes(Ref<DirAccess> &p_directory_access, const String &p_project_data_path, const HashMap<String, Vector<ScriptLanguage *>> &p_extension_to_languages, HashMap<StringName, ScannedGlobalScriptClass> &r_scanned_classes) {
+	List<String> subdirectories;
+	List<String> files;
+
+	const String current_directory = p_directory_access->get_current_dir();
+
+	p_directory_access->list_dir_begin();
+	while (true) {
+		const String entry_name = p_directory_access->get_next();
+		if (entry_name.is_empty()) {
+			break;
+		}
+		if (p_directory_access->current_is_hidden()) {
+			continue;
+		}
+
+		if (p_directory_access->current_is_dir()) {
+			if (entry_name.begins_with(".")) {
+				continue;
+			}
+			if (should_skip_project_directory(current_directory.path_join(entry_name), p_project_data_path)) {
+				continue;
+			}
+			subdirectories.push_back(entry_name);
+		} else {
+			files.push_back(entry_name);
+		}
+	}
+	p_directory_access->list_dir_end();
+
+	subdirectories.sort_custom<FileNoCaseComparator>();
+	files.sort_custom<FileNoCaseComparator>();
+
+	for (const String &subdirectory : subdirectories) {
+		if (p_directory_access->change_dir(subdirectory) == OK) {
+			const String next_directory = p_directory_access->get_current_dir();
+			const bool is_descendant = next_directory != current_directory && (current_directory == "res://" ? next_directory.begins_with("res://") : next_directory.begins_with(current_directory + "/"));
+			if (is_descendant) {
+				scan_directory_for_global_classes(p_directory_access, p_project_data_path, p_extension_to_languages, r_scanned_classes);
+			}
+			p_directory_access->change_dir(current_directory);
+		}
+	}
+
+	for (const String &file_name : files) {
+		const String extension = file_name.get_extension().to_lower();
+		const Vector<ScriptLanguage *> *languages = p_extension_to_languages.getptr(extension);
+		if (!languages) {
+			continue;
+		}
+
+		const String full_path = current_directory.path_join(file_name);
+		for (ScriptLanguage *language : *languages) {
+			String base_type;
+			String icon_path;
+			bool is_abstract = false;
+			bool is_tool = false;
+			const String global_class_name = language->find_global_class_name(full_path, &base_type, &icon_path, &is_abstract, &is_tool);
+			if (global_class_name.is_empty()) {
+				continue;
+			}
+
+			ScannedGlobalScriptClass entry;
+			entry.language = language->get_name();
+			entry.path = full_path;
+			entry.base = base_type;
+			entry.icon = icon_path;
+			entry.is_abstract = is_abstract;
+			entry.is_tool = is_tool;
+			r_scanned_classes[StringName(global_class_name)] = entry;
+			break;
+		}
+	}
+}
+
+} // namespace
+
+bool ScriptServer::refresh_global_classes_from_disk(bool p_persist_cache) {
+	ProjectSettings *project_settings = ProjectSettings::get_singleton();
+	if (!project_settings || project_settings->is_using_datapack() || project_settings->get_resource_path().is_empty()) {
+		return false;
+	}
+
+	HashMap<String, Vector<ScriptLanguage *>> extension_to_languages;
+	{
+		MutexLock lock(languages_mutex);
+		for (int i = 0; i < _language_count; i++) {
+			ScriptLanguage *language = _languages[i];
+			if (!language || !language->handles_global_class_type(language->get_type())) {
+				continue;
+			}
+
+			List<String> recognized_extensions;
+			language->get_recognized_extensions(&recognized_extensions);
+			const String primary_extension = language->get_extension();
+			if (!primary_extension.is_empty()) {
+				recognized_extensions.push_back(primary_extension);
+			}
+
+			for (const String &raw_extension : recognized_extensions) {
+				const String extension = raw_extension.to_lower();
+				if (extension.is_empty()) {
+					continue;
+				}
+				Vector<ScriptLanguage *> &languages = extension_to_languages[extension];
+				if (!languages.has(language)) {
+					languages.push_back(language);
+				}
+			}
+		}
+	}
+	if (extension_to_languages.is_empty()) {
+		return false;
+	}
+
+	Ref<DirAccess> directory_access = DirAccess::open("res://");
+	if (directory_access.is_null()) {
+		return false;
+	}
+
+	const String project_data_path = project_settings->get_project_data_path();
+	HashMap<StringName, ScannedGlobalScriptClass> scanned_classes;
+	scan_directory_for_global_classes(directory_access, project_data_path, extension_to_languages, scanned_classes);
+
+	bool changed_in_memory = scanned_classes.size() != global_classes.size();
+	if (!changed_in_memory) {
+		for (const KeyValue<StringName, ScannedGlobalScriptClass> &entry : scanned_classes) {
+			const GlobalScriptClass *existing = global_classes.getptr(entry.key);
+			if (!existing || existing->base != entry.value.base || existing->language != entry.value.language || existing->path != entry.value.path || existing->is_abstract != entry.value.is_abstract || existing->is_tool != entry.value.is_tool) {
+				changed_in_memory = true;
+				break;
+			}
+		}
+	}
+
+	if (changed_in_memory) {
+		global_classes_clear();
+		LocalVector<StringName> sorted_names;
+		sorted_names.reserve(scanned_classes.size());
+		for (const KeyValue<StringName, ScannedGlobalScriptClass> &entry : scanned_classes) {
+			sorted_names.push_back(entry.key);
+		}
+		SortArray<StringName, StringName::AlphCompare> sorter;
+		sorter.sort(sorted_names.ptr(), sorted_names.size());
+
+		for (const StringName &class_name : sorted_names) {
+			const ScannedGlobalScriptClass &scanned = scanned_classes[class_name];
+			add_global_class(class_name, scanned.base, scanned.language, scanned.path, scanned.is_abstract, scanned.is_tool);
+		}
+	}
+
+	const bool cache_exists = FileAccess::exists(project_settings->get_global_class_list_path());
+	bool cache_needs_update = changed_in_memory || (!global_classes.is_empty() && !cache_exists);
+	if (!cache_needs_update) {
+		const TypedArray<Dictionary> cached_classes = project_settings->get_global_class_list();
+		if (cached_classes.size() != (int)global_classes.size()) {
+			cache_needs_update = true;
+		} else {
+			for (int i = 0; i < cached_classes.size(); i++) {
+				const Dictionary entry = cached_classes[i];
+				if (!entry.has("class") || !entry.has("base") || !entry.has("language") || !entry.has("path") || !entry.has("icon") || !entry.has("is_abstract") || !entry.has("is_tool")) {
+					cache_needs_update = true;
+					break;
+				}
+				const StringName class_name = entry["class"];
+				const ScannedGlobalScriptClass *scanned = scanned_classes.getptr(class_name);
+				if (!scanned || StringName(entry["base"]) != scanned->base || StringName(entry["language"]) != scanned->language || String(entry["path"]) != scanned->path || String(entry["icon"]) != scanned->icon || bool(entry["is_abstract"]) != scanned->is_abstract || bool(entry["is_tool"]) != scanned->is_tool) {
+					cache_needs_update = true;
+					break;
+				}
+			}
+		}
+	}
+
+	if (p_persist_cache && cache_needs_update) {
+		LocalVector<StringName> sorted_names;
+		get_global_class_list(sorted_names);
+		Array class_array;
+		for (const StringName &class_name : sorted_names) {
+			const GlobalScriptClass &global_class = global_classes[class_name];
+			const ScannedGlobalScriptClass *scanned = scanned_classes.getptr(class_name);
+			Dictionary entry;
+			entry["base"] = global_class.base;
+			entry["class"] = class_name;
+			entry["icon"] = scanned ? scanned->icon : String();
+			entry["is_abstract"] = global_class.is_abstract;
+			entry["is_tool"] = global_class.is_tool;
+			entry["language"] = global_class.language;
+			entry["path"] = global_class.path;
+			class_array.push_back(entry);
+		}
+		project_settings->store_global_class_list(class_array);
+	}
+
+	return changed_in_memory || cache_needs_update;
+}
+#endif // TOOLS_ENABLED
 
 Vector<Ref<ScriptBacktrace>> ScriptServer::capture_script_backtraces(bool p_include_variables) {
 	if (is_program_exiting) {

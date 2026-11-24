@@ -66,6 +66,8 @@
 #include "editor/file_system/editor_paths.h"
 #endif
 
+#include <algorithm>
+
 ///////////////////////////
 
 GDScriptNativeClass::GDScriptNativeClass(const StringName &p_name) {
@@ -3238,10 +3240,16 @@ bool GDScriptLanguage::handles_global_class_type(const String &p_type) const {
 
 String GDScriptLanguage::get_global_class_name(const String &p_path, String *r_base_type, String *r_icon_path, bool *r_is_abstract, bool *r_is_tool) const {
 	LocalVector<String> r_vec;
-	return _get_global_class_name(p_path, r_base_type, r_icon_path, r_is_abstract, r_is_tool, r_vec);
+	const bool require_class_name = !r_base_type && !r_icon_path && !r_is_abstract && !r_is_tool;
+	return _get_global_class_name(p_path, r_base_type, r_icon_path, r_is_abstract, r_is_tool, r_vec, require_class_name);
 }
 
-String GDScriptLanguage::_get_global_class_name(const String &p_path, String *r_base_type, String *r_icon_path, bool *r_is_abstract, bool *r_is_tool, LocalVector<String> &r_visited) const {
+String GDScriptLanguage::find_global_class_name(const String &p_path, String *r_base_type, String *r_icon_path, bool *r_is_abstract, bool *r_is_tool) const {
+	LocalVector<String> r_vec;
+	return _get_global_class_name(p_path, r_base_type, r_icon_path, r_is_abstract, r_is_tool, r_vec, true);
+}
+
+String GDScriptLanguage::_get_global_class_name(const String &p_path, String *r_base_type, String *r_icon_path, bool *r_is_abstract, bool *r_is_tool, LocalVector<String> &r_visited, bool p_require_class_name) const {
 #ifdef GDSCRIPT_NO_FRONTEND
 	return String();
 #else
@@ -3257,7 +3265,30 @@ String GDScriptLanguage::_get_global_class_name(const String &p_path, String *r_
 		return String();
 	}
 
-	String source = f->get_as_utf8_string();
+	String source;
+	if (p_require_class_name && r_visited.size() == 1) {
+		const uint64_t length = f->get_length();
+		constexpr uint64_t needle_length = 10;
+		if (length < needle_length) {
+			return String();
+		}
+		Vector<uint8_t> raw_bytes;
+		raw_bytes.resize(length);
+		uint8_t *buffer = raw_bytes.ptrw();
+		const uint64_t bytes_read = f->get_buffer(buffer, length);
+		if (bytes_read != length) {
+			return String();
+		}
+		const char *data = reinterpret_cast<const char *>(buffer);
+		const char *end = data + length;
+		constexpr char needle[] = "class_name";
+		if (std::search(data, end, needle, needle + needle_length) == end) {
+			return String();
+		}
+		source.append_utf8(data, length);
+	} else {
+		source = f->get_as_utf8_string();
+	}
 
 	GDScriptParser parser;
 	err = parser.parse(source, p_path, false, false);

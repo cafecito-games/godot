@@ -337,6 +337,11 @@ Error DirAccessWindows::rename(String p_path, String p_new_path) {
 		return MoveFileW((LPCWSTR)tmpfile_utf16.get_data(), (LPCWSTR)(new_path.utf16().get_data())) != 0 ? OK : FAILED;
 
 	} else {
+		if (!dir_exists(path) && !dir_exists(new_path)) {
+			// Replace regular files atomically without unlinking the destination first.
+			return MoveFileExW((LPCWSTR)(path.utf16().get_data()), (LPCWSTR)(new_path.utf16().get_data()), MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED) != 0 ? OK : FAILED;
+		}
+
 		if (file_exists(new_path)) {
 			if (remove(new_path) != OK) {
 				return FAILED;
