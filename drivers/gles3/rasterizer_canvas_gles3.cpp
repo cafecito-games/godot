@@ -115,31 +115,7 @@ void RasterizerCanvasGLES3::canvas_render_items(RID p_to_render_target, Item *p_
 	// Clear out any state that may have been left from the 3D pass.
 	reset_canvas();
 
-	if (state.canvas_instance_data_buffers[state.current_data_buffer_index].fence != GLsync()) {
-		GLint syncStatus;
-		glGetSynciv(state.canvas_instance_data_buffers[state.current_data_buffer_index].fence, GL_SYNC_STATUS, 1, nullptr, &syncStatus);
-		if (syncStatus == GL_UNSIGNALED) {
-			// If older than 2 frames, wait for sync OpenGL can have up to 3 frames in flight, any more and we need to sync anyway.
-			if (state.canvas_instance_data_buffers[state.current_data_buffer_index].last_frame_used < RSG::rasterizer->get_frame_number() - 2) {
-#ifndef WEB_ENABLED
-				// On web, we do nothing as the glSubBufferData will force a sync anyway and WebGL does not like waiting.
-				glClientWaitSync(state.canvas_instance_data_buffers[state.current_data_buffer_index].fence, 0, 100000000); // wait for up to 100ms
-#endif
-				state.canvas_instance_data_buffers[state.current_data_buffer_index].last_frame_used = RSG::rasterizer->get_frame_number();
-				glDeleteSync(state.canvas_instance_data_buffers[state.current_data_buffer_index].fence);
-				state.canvas_instance_data_buffers[state.current_data_buffer_index].fence = GLsync();
-			} else {
-				// Used in last frame or frame before that. OpenGL can get up to two frames behind, so these buffers may still be in use
-				// Allocate a new buffer and use that.
-				_allocate_instance_data_buffer();
-			}
-		} else {
-			// Already finished all rendering commands, we can use it.
-			state.canvas_instance_data_buffers[state.current_data_buffer_index].last_frame_used = RSG::rasterizer->get_frame_number();
-			glDeleteSync(state.canvas_instance_data_buffers[state.current_data_buffer_index].fence);
-			state.canvas_instance_data_buffers[state.current_data_buffer_index].fence = GLsync();
-		}
-	}
+	_acquire_instance_data_buffer();
 
 	//setup directional lights if exist
 
@@ -566,8 +542,6 @@ void RasterizerCanvasGLES3::canvas_render_items(RID p_to_render_target, Item *p_
 	if (time_used) {
 		RenderingServerDefault::redraw_request();
 	}
-
-	state.canvas_instance_data_buffers[state.current_data_buffer_index].fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
 
 	// Clear out state used in 2D pass
 	reset_canvas();
@@ -1639,42 +1613,184 @@ void RasterizerCanvasGLES3::light_set_use_shadow(RID p_rid, bool p_enable) {
 	cl->shadow.enabled = p_enable;
 }
 
-void RasterizerCanvasGLES3::light_update_shadow(RID p_rid, int p_shadow_index, const Transform2D &p_light_xform, int p_light_mask, float p_near, float p_far, LightOccluderInstance *p_occluders, const Rect2 &p_light_rect) {
-	GLES3::Config *config = GLES3::Config::get_singleton();
+uint8_t RasterizerCanvasGLES3::compute_shadow_occluder_quadrant_mask(const Rect2 &p_light_local_aabb, float p_far) {
+	const Rect2 bounds = p_light_local_aabb.abs();
+	const float min_x = bounds.position.x;
+	const float max_x = min_x + bounds.size.x;
+	const float min_y = bounds.position.y;
+	const float max_y = min_y + bounds.size.y;
 
-	CanvasLight *cl = canvas_light_owner.get_or_null(p_rid);
-	ERR_FAIL_COND(!cl->shadow.enabled);
-	ERR_FAIL_INDEX(p_shadow_index, (int)data.max_lights_per_render);
+	uint8_t mask = 0;
+	// Quadrant 0 (+X): 0 <= x <= p_far and -x <= y <= x.
+	if (max_x >= 0.0f && min_x <= p_far && max_x >= min_y && max_x >= -max_y) {
+		mask |= 1u << 0;
+	}
+	// Quadrant 1 (+Y): 0 <= y <= p_far and -y <= x <= y.
+	if (max_y >= 0.0f && min_y <= p_far && max_y >= min_x && max_y >= -max_x) {
+		mask |= 1u << 1;
+	}
+	// Quadrant 2 (-X): -p_far <= x <= 0 and x <= y <= -x.
+	if (min_x <= 0.0f && max_x >= -p_far && -min_x >= min_y && -min_x >= -max_y) {
+		mask |= 1u << 2;
+	}
+	// Quadrant 3 (-Y): -p_far <= y <= 0 and y <= x <= -y.
+	if (min_y <= 0.0f && max_y >= -p_far && -min_y >= min_x && -min_y >= -max_x) {
+		mask |= 1u << 3;
+	}
+	return mask;
+}
 
+void RasterizerCanvasGLES3::_invalidate_shadow_framebuffer(bool p_invalidate_color, bool p_invalidate_depth) {
+	GLenum attachments[2];
+	GLsizei attachment_count = 0;
+	if (p_invalidate_color) {
+		attachments[attachment_count++] = GL_COLOR_ATTACHMENT0;
+	}
+	if (p_invalidate_depth) {
+		attachments[attachment_count++] = GL_DEPTH_ATTACHMENT;
+	}
+	if (attachment_count == 0) {
+		return;
+	}
+#ifdef GLAD_ENABLED
+	if (glInvalidateFramebuffer != nullptr) {
+		glInvalidateFramebuffer(GL_FRAMEBUFFER, attachment_count, attachments);
+	}
+#else
+	glInvalidateFramebuffer(GL_FRAMEBUFFER, attachment_count, attachments);
+#endif
+}
+
+void RasterizerCanvasGLES3::_apply_shadow_cull_mode(RSE::CanvasOccluderPolygonCullMode p_cull_mode) {
+	if (p_cull_mode == state.shadow_cull_mode) {
+		return;
+	}
+	if (p_cull_mode == RSE::CANVAS_OCCLUDER_POLYGON_CULL_DISABLED) {
+		glDisable(GL_CULL_FACE);
+	} else {
+		if (state.shadow_cull_mode == RSE::CANVAS_OCCLUDER_POLYGON_CULL_DISABLED) {
+			glEnable(GL_CULL_FACE);
+		}
+		glCullFace(p_cull_mode == RSE::CANVAS_OCCLUDER_POLYGON_CULL_CLOCKWISE ? GL_FRONT : GL_BACK);
+	}
+	state.shadow_cull_mode = p_cull_mode;
+}
+
+void RasterizerCanvasGLES3::shadow_pass_begin() {
+	if (state.in_shadow_pass) {
+		return;
+	}
 	_update_shadow_atlas();
+	if (state.shadow_fb == 0) {
+		return;
+	}
 
-	cl->shadow.z_far = p_far;
-	cl->shadow.y_offset = float(p_shadow_index * 2 + 1) / float(data.max_lights_per_render * 2);
+	state.in_shadow_pass = true;
+	state.shadow_cull_mode = RSE::CANVAS_OCCLUDER_POLYGON_CULL_DISABLED;
 
 	glBindFramebuffer(GL_FRAMEBUFFER, state.shadow_fb);
-	glViewport(0, p_shadow_index * 2, state.shadow_texture_size, 2);
+	// Every active shadow band is rewritten for the current viewport; invalidating
+	// color and depth avoids full-atlas tile loads on TBDR GPUs.
+	_invalidate_shadow_framebuffer(true, true);
 
 	glDepthMask(GL_TRUE);
 	glEnable(GL_DEPTH_TEST);
 	glDepthFunc(GL_LESS);
 	glDisable(GL_BLEND);
-
 	glEnable(GL_SCISSOR_TEST);
+	glCullFace(GL_BACK);
+	glDisable(GL_CULL_FACE);
+
+	GLES3::Config *config = GLES3::Config::get_singleton();
+	CanvasOcclusionShaderGLES3::ShaderVariant variant = config->float_texture_supported ? CanvasOcclusionShaderGLES3::MODE_SHADOW : CanvasOcclusionShaderGLES3::MODE_SHADOW_RGBA;
+	state.shadow_shader_bound = shadow_render.shader.version_bind_shader(shadow_render.shader_version, variant);
+}
+
+void RasterizerCanvasGLES3::shadow_pass_end() {
+	if (!state.in_shadow_pass) {
+		return;
+	}
+	state.in_shadow_pass = false;
+	state.shadow_shader_bound = false;
+
+	glBindVertexArray(0);
+	// Discard the depth renderbuffer so TBDR GPUs do not write it back to memory.
+	_invalidate_shadow_framebuffer(false, true);
+	glBindFramebuffer(GL_FRAMEBUFFER, GLES3::TextureStorage::system_fbo);
+	glDepthMask(GL_FALSE);
+	glDisable(GL_DEPTH_TEST);
+	glDisable(GL_SCISSOR_TEST);
+	glDisable(GL_CULL_FACE);
+	state.shadow_cull_mode = RSE::CANVAS_OCCLUDER_POLYGON_CULL_DISABLED;
+}
+
+void RasterizerCanvasGLES3::light_update_shadow(RID p_rid, int p_shadow_index, const Transform2D &p_light_xform, int p_light_mask, float p_near, float p_far, LightOccluderInstance *p_occluders, const Rect2 &p_light_rect) {
+	GLES3::Config *config = GLES3::Config::get_singleton();
+
+	CanvasLight *cl = canvas_light_owner.get_or_null(p_rid);
+	ERR_FAIL_NULL(cl);
+	ERR_FAIL_COND(!cl->shadow.enabled);
+	ERR_FAIL_INDEX(p_shadow_index, (int)data.max_lights_per_render);
+
+	const bool owns_shadow_pass = !state.in_shadow_pass;
+	if (owns_shadow_pass) {
+		shadow_pass_begin();
+	}
+
+	cl->shadow.z_far = p_far;
+	cl->shadow.y_offset = float(p_shadow_index * 2 + 1) / float(data.max_lights_per_render * 2);
+
+	if (state.shadow_fb == 0) {
+		if (owns_shadow_pass) {
+			shadow_pass_end();
+		}
+		return;
+	}
+
+	glViewport(0, p_shadow_index * 2, state.shadow_texture_size, 2);
 	glScissor(0, p_shadow_index * 2, state.shadow_texture_size, 2);
 	glClearColor(p_far, p_far, p_far, 1.0);
 	RasterizerUtilGLES3::clear_depth(1.0);
-
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-	glCullFace(GL_BACK);
-	glDisable(GL_CULL_FACE);
-	RSE::CanvasOccluderPolygonCullMode cull_mode = RSE::CANVAS_OCCLUDER_POLYGON_CULL_DISABLED;
-
-	CanvasOcclusionShaderGLES3::ShaderVariant variant = config->float_texture_supported ? CanvasOcclusionShaderGLES3::MODE_SHADOW : CanvasOcclusionShaderGLES3::MODE_SHADOW_RGBA;
-	bool success = shadow_render.shader.version_bind_shader(shadow_render.shader_version, variant);
-	if (!success) {
+	if (!state.shadow_shader_bound) {
+		if (owns_shadow_pass) {
+			shadow_pass_end();
+		}
 		return;
 	}
+
+	state.shadow_occluder_entries.clear();
+	uint8_t combined_quadrant_mask = 0;
+
+	for (LightOccluderInstance *instance = p_occluders; instance != nullptr; instance = instance->next) {
+		OccluderPolygon *co = occluder_polygon_owner.get_or_null(instance->occluder);
+
+		if (!co || co->vertex_array == 0 || !(p_light_mask & instance->light_mask)) {
+			continue;
+		}
+		if (!p_light_rect.intersects_transformed(instance->xform_cache, instance->aabb_cache)) {
+			continue;
+		}
+
+		const Transform2D modelview = p_light_xform * instance->xform_cache;
+		const uint8_t quadrant_mask = compute_shadow_occluder_quadrant_mask(modelview.xform(instance->aabb_cache), p_far);
+		if (quadrant_mask == 0) {
+			continue;
+		}
+
+		state.shadow_occluder_entries.push_back({ co, modelview, quadrant_mask });
+		combined_quadrant_mask |= quadrant_mask;
+	}
+
+	if (state.shadow_occluder_entries.is_empty()) {
+		if (owns_shadow_pass) {
+			shadow_pass_end();
+		}
+		return;
+	}
+
+	CanvasOcclusionShaderGLES3::ShaderVariant variant = config->float_texture_supported ? CanvasOcclusionShaderGLES3::MODE_SHADOW : CanvasOcclusionShaderGLES3::MODE_SHADOW_RGBA;
 
 	Projection projection;
 	{
@@ -1702,67 +1818,54 @@ void RasterizerCanvasGLES3::light_update_shadow(RID p_rid, int p_shadow_index, c
 		projection * Projection(Vector4(0, 0, 1, 0), Vector4(-1, 0, 0, 0), Vector4(0, -1, 0, 0), Vector4(0, 0, 0, 1)),
 
 		projection * Projection(Vector4(1, 0, 0, 0), Vector4(0, 0, 1, 0), Vector4(0, -1, 0, 0), Vector4(0, 0, 0, 1))
-
 	};
 
-	for (int i = 0; i < 4; i++) {
-		glViewport((state.shadow_texture_size / 4) * i, p_shadow_index * 2, (state.shadow_texture_size / 4), 2);
+	static const Vector2 directions[4] = { Vector2(1, 0), Vector2(0, 1), Vector2(-1, 0), Vector2(0, -1) };
+	shadow_render.shader.version_set_uniform(CanvasOcclusionShaderGLES3::Z_FAR, p_far, shadow_render.shader_version, variant);
 
-		shadow_render.shader.version_set_uniform(CanvasOcclusionShaderGLES3::PROJECTION, projections[i], shadow_render.shader_version, variant);
+	for (int quadrant = 0; quadrant < 4; quadrant++) {
+		const uint8_t quadrant_bit = uint8_t(1u << quadrant);
+		if ((combined_quadrant_mask & quadrant_bit) == 0) {
+			continue;
+		}
 
-		static const Vector2 directions[4] = { Vector2(1, 0), Vector2(0, 1), Vector2(-1, 0), Vector2(0, -1) };
-		shadow_render.shader.version_set_uniform(CanvasOcclusionShaderGLES3::DIRECTION, directions[i].x, directions[i].y, shadow_render.shader_version, variant);
-		shadow_render.shader.version_set_uniform(CanvasOcclusionShaderGLES3::Z_FAR, p_far, shadow_render.shader_version, variant);
+		glViewport((state.shadow_texture_size / 4) * quadrant, p_shadow_index * 2, (state.shadow_texture_size / 4), 2);
+		shadow_render.shader.version_set_uniform(CanvasOcclusionShaderGLES3::PROJECTION, projections[quadrant], shadow_render.shader_version, variant);
+		shadow_render.shader.version_set_uniform(CanvasOcclusionShaderGLES3::DIRECTION, directions[quadrant].x, directions[quadrant].y, shadow_render.shader_version, variant);
 
-		LightOccluderInstance *instance = p_occluders;
-
-		while (instance) {
-			OccluderPolygon *co = occluder_polygon_owner.get_or_null(instance->occluder);
-
-			if (!co || co->vertex_array == 0 || !(p_light_mask & instance->light_mask)) {
-				instance = instance->next;
+		for (const ShadowOccluderEntry &entry : state.shadow_occluder_entries) {
+			if ((entry.quadrant_mask & quadrant_bit) == 0) {
 				continue;
 			}
 
-			Transform2D modelview = p_light_xform * instance->xform_cache;
+			const Transform2D &modelview = entry.modelview;
 			shadow_render.shader.version_set_uniform(CanvasOcclusionShaderGLES3::MODELVIEW1, modelview.columns[0][0], modelview.columns[1][0], 0, modelview.columns[2][0], shadow_render.shader_version, variant);
 			shadow_render.shader.version_set_uniform(CanvasOcclusionShaderGLES3::MODELVIEW2, modelview.columns[0][1], modelview.columns[1][1], 0, modelview.columns[2][1], shadow_render.shader_version, variant);
 
-			if (co->cull_mode != cull_mode) {
-				if (co->cull_mode == RSE::CANVAS_OCCLUDER_POLYGON_CULL_DISABLED) {
-					glDisable(GL_CULL_FACE);
-				} else {
-					if (cull_mode == RSE::CANVAS_OCCLUDER_POLYGON_CULL_DISABLED) {
-						// Last time was disabled, so enable and set proper face.
-						glEnable(GL_CULL_FACE);
-					}
-					glCullFace(co->cull_mode == RSE::CANVAS_OCCLUDER_POLYGON_CULL_CLOCKWISE ? GL_FRONT : GL_BACK);
-				}
-				cull_mode = co->cull_mode;
-			}
+			_apply_shadow_cull_mode(entry.polygon->cull_mode);
 
-			glBindVertexArray(co->vertex_array);
-			glDrawElements(GL_TRIANGLES, 3 * co->line_point_count, GL_UNSIGNED_SHORT, nullptr);
-
-			instance = instance->next;
+			glBindVertexArray(entry.polygon->vertex_array);
+			glDrawElements(GL_TRIANGLES, 3 * entry.polygon->line_point_count, GL_UNSIGNED_SHORT, nullptr);
 		}
 	}
 
-	glBindVertexArray(0);
-	glBindFramebuffer(GL_FRAMEBUFFER, GLES3::TextureStorage::system_fbo);
-	glDepthMask(GL_FALSE);
-	glDisable(GL_DEPTH_TEST);
-	glDisable(GL_SCISSOR_TEST);
+	if (owns_shadow_pass) {
+		shadow_pass_end();
+	}
 }
 
 void RasterizerCanvasGLES3::light_update_directional_shadow(RID p_rid, int p_shadow_index, const Transform2D &p_light_xform, int p_light_mask, float p_cull_distance, const Rect2 &p_clip_rect, LightOccluderInstance *p_occluders) {
 	GLES3::Config *config = GLES3::Config::get_singleton();
 
 	CanvasLight *cl = canvas_light_owner.get_or_null(p_rid);
+	ERR_FAIL_NULL(cl);
 	ERR_FAIL_COND(!cl->shadow.enabled);
 	ERR_FAIL_INDEX(p_shadow_index, (int)data.max_lights_per_render);
 
-	_update_shadow_atlas();
+	const bool owns_shadow_pass = !state.in_shadow_pass;
+	if (owns_shadow_pass) {
+		shadow_pass_begin();
+	}
 
 	Vector2 light_dir = p_light_xform.columns[1].normalized();
 
@@ -1785,30 +1888,33 @@ void RasterizerCanvasGLES3::light_update_directional_shadow(RID p_rid, int p_sha
 
 	to_light_xform.invert();
 
-	glBindFramebuffer(GL_FRAMEBUFFER, state.shadow_fb);
+	Transform2D to_shadow;
+	to_shadow.columns[0].x = 1.0 / -(half_size * 2.0);
+	to_shadow.columns[2].x = 0.5;
+
+	cl->shadow.directional_xform = to_shadow * to_light_xform;
+
+	if (state.shadow_fb == 0) {
+		if (owns_shadow_pass) {
+			shadow_pass_end();
+		}
+		return;
+	}
+
 	glViewport(0, p_shadow_index * 2, state.shadow_texture_size, 2);
-
-	glDepthMask(GL_TRUE);
-	glEnable(GL_DEPTH_TEST);
-	glDepthFunc(GL_LESS);
-	glDisable(GL_BLEND);
-
-	glEnable(GL_SCISSOR_TEST);
 	glScissor(0, p_shadow_index * 2, state.shadow_texture_size, 2);
 	glClearColor(1.0, 1.0, 1.0, 1.0);
 	RasterizerUtilGLES3::clear_depth(1.0);
-
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-	glCullFace(GL_BACK);
-	glDisable(GL_CULL_FACE);
-	RSE::CanvasOccluderPolygonCullMode cull_mode = RSE::CANVAS_OCCLUDER_POLYGON_CULL_DISABLED;
-
-	CanvasOcclusionShaderGLES3::ShaderVariant variant = config->float_texture_supported ? CanvasOcclusionShaderGLES3::MODE_SHADOW : CanvasOcclusionShaderGLES3::MODE_SHADOW_RGBA;
-	bool success = shadow_render.shader.version_bind_shader(shadow_render.shader_version, variant);
-	if (!success) {
+	if (!state.shadow_shader_bound || p_occluders == nullptr) {
+		if (owns_shadow_pass) {
+			shadow_pass_end();
+		}
 		return;
 	}
+
+	CanvasOcclusionShaderGLES3::ShaderVariant variant = config->float_texture_supported ? CanvasOcclusionShaderGLES3::MODE_SHADOW : CanvasOcclusionShaderGLES3::MODE_SHADOW_RGBA;
 
 	Projection projection;
 	projection.set_orthogonal(-half_size, half_size, -0.5, 0.5, 0.0, distance);
@@ -1832,18 +1938,7 @@ void RasterizerCanvasGLES3::light_update_directional_shadow(RID p_rid, int p_sha
 		shadow_render.shader.version_set_uniform(CanvasOcclusionShaderGLES3::MODELVIEW1, modelview.columns[0][0], modelview.columns[1][0], 0, modelview.columns[2][0], shadow_render.shader_version, variant);
 		shadow_render.shader.version_set_uniform(CanvasOcclusionShaderGLES3::MODELVIEW2, modelview.columns[0][1], modelview.columns[1][1], 0, modelview.columns[2][1], shadow_render.shader_version, variant);
 
-		if (co->cull_mode != cull_mode) {
-			if (co->cull_mode == RSE::CANVAS_OCCLUDER_POLYGON_CULL_DISABLED) {
-				glDisable(GL_CULL_FACE);
-			} else {
-				if (cull_mode == RSE::CANVAS_OCCLUDER_POLYGON_CULL_DISABLED) {
-					// Last time was disabled, so enable and set proper face.
-					glEnable(GL_CULL_FACE);
-				}
-				glCullFace(co->cull_mode == RSE::CANVAS_OCCLUDER_POLYGON_CULL_CLOCKWISE ? GL_FRONT : GL_BACK);
-			}
-			cull_mode = co->cull_mode;
-		}
+		_apply_shadow_cull_mode(co->cull_mode);
 
 		glBindVertexArray(co->vertex_array);
 		glDrawElements(GL_TRIANGLES, 3 * co->line_point_count, GL_UNSIGNED_SHORT, nullptr);
@@ -1851,18 +1946,9 @@ void RasterizerCanvasGLES3::light_update_directional_shadow(RID p_rid, int p_sha
 		instance = instance->next;
 	}
 
-	Transform2D to_shadow;
-	to_shadow.columns[0].x = 1.0 / -(half_size * 2.0);
-	to_shadow.columns[2].x = 0.5;
-
-	cl->shadow.directional_xform = to_shadow * to_light_xform;
-
-	glBindVertexArray(0);
-	glBindFramebuffer(GL_FRAMEBUFFER, GLES3::TextureStorage::system_fbo);
-	glDepthMask(GL_FALSE);
-	glDisable(GL_DEPTH_TEST);
-	glDisable(GL_SCISSOR_TEST);
-	glDisable(GL_CULL_FACE);
+	if (owns_shadow_pass) {
+		shadow_pass_end();
+	}
 }
 
 void RasterizerCanvasGLES3::_update_shadow_atlas() {
@@ -2649,6 +2735,110 @@ void RasterizerCanvasGLES3::_allocate_instance_buffer() {
 	glBindBuffer(GL_ARRAY_BUFFER, 0);
 }
 
+void RasterizerCanvasGLES3::_poll_frame_fences() {
+	uint32_t remove_count = 0;
+	while (remove_count < state.frame_fences.size()) {
+		const FrameFence &frame_fence = state.frame_fences[remove_count];
+		GLint sync_status = GL_UNSIGNALED;
+		glGetSynciv(frame_fence.fence, GL_SYNC_STATUS, 1, nullptr, &sync_status);
+		if (sync_status != GL_SIGNALED) {
+			break;
+		}
+		if (frame_fence.epoch > state.completed_fence_epoch) {
+			state.completed_fence_epoch = frame_fence.epoch;
+		}
+		glDeleteSync(frame_fence.fence);
+		remove_count++;
+	}
+	if (remove_count > 0) {
+		const uint32_t remaining = state.frame_fences.size() - remove_count;
+		for (uint32_t index = 0; index < remaining; index++) {
+			state.frame_fences[index] = state.frame_fences[index + remove_count];
+		}
+		state.frame_fences.resize(remaining);
+	}
+}
+
+void RasterizerCanvasGLES3::_wait_for_fence_epoch(uint64_t p_target_epoch) {
+	uint32_t remove_count = 0;
+	while (remove_count < state.frame_fences.size()) {
+		const FrameFence &frame_fence = state.frame_fences[remove_count];
+		if (frame_fence.epoch > p_target_epoch) {
+			break;
+		}
+#ifndef WEB_ENABLED
+		// On web, glBufferSubData synchronizes implicitly and WebGL dislikes blocking waits.
+		// Wait on every fence up to p_target_epoch (signaled fences return immediately) so
+		// multi-context frames cannot advance completed_fence_epoch past an unsignaled fence.
+		glClientWaitSync(frame_fence.fence, GL_SYNC_FLUSH_COMMANDS_BIT, 100000000); // Wait for up to 100ms.
+#endif
+		if (frame_fence.epoch > state.completed_fence_epoch) {
+			state.completed_fence_epoch = frame_fence.epoch;
+		}
+		glDeleteSync(frame_fence.fence);
+		remove_count++;
+	}
+	if (remove_count > 0) {
+		const uint32_t remaining = state.frame_fences.size() - remove_count;
+		for (uint32_t index = 0; index < remaining; index++) {
+			state.frame_fences[index] = state.frame_fences[index + remove_count];
+		}
+		state.frame_fences.resize(remaining);
+	}
+	if (p_target_epoch > state.completed_fence_epoch) {
+		state.completed_fence_epoch = p_target_epoch;
+	}
+}
+
+void RasterizerCanvasGLES3::flush_frame_fence() {
+	if (!state.canvas_used_in_frame) {
+		return;
+	}
+	state.canvas_used_in_frame = false;
+
+	if (state.frame_fences.size() >= 8) {
+		_poll_frame_fences();
+	}
+
+	const uint64_t epoch = state.next_fence_epoch++;
+	GLsync sync = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+	if (sync != GLsync()) {
+		state.frame_fences.push_back({ epoch, sync });
+	} else if (epoch > state.completed_fence_epoch) {
+		state.completed_fence_epoch = epoch;
+	}
+}
+
+void RasterizerCanvasGLES3::_acquire_instance_data_buffer() {
+	const uint64_t current_frame = RSG::rasterizer->get_frame_number();
+	if (state.last_polled_frame != current_frame) {
+		state.last_polled_frame = current_frame;
+		_poll_frame_fences();
+	}
+
+	DataBuffer &current_buffer = state.canvas_instance_data_buffers[state.current_data_buffer_index];
+	if (current_buffer.last_fence_epoch > state.completed_fence_epoch) {
+		if (current_buffer.last_fence_epoch == state.next_fence_epoch) {
+			// Already used in the current un-fenced epoch; allocate a fresh DataBuffer.
+			_allocate_instance_data_buffer();
+		} else {
+			_poll_frame_fences();
+			if (current_buffer.last_fence_epoch > state.completed_fence_epoch) {
+				if (current_frame >= 2 && current_buffer.last_frame_used < current_frame - 2) {
+					_wait_for_fence_epoch(current_buffer.last_fence_epoch);
+				} else {
+					_allocate_instance_data_buffer();
+				}
+			}
+		}
+	}
+
+	DataBuffer &acquired_buffer = state.canvas_instance_data_buffers[state.current_data_buffer_index];
+	acquired_buffer.last_frame_used = current_frame;
+	acquired_buffer.last_fence_epoch = state.next_fence_epoch;
+	state.canvas_used_in_frame = true;
+}
+
 void RasterizerCanvasGLES3::set_time(double p_time) {
 	state.time = p_time;
 }
@@ -2818,7 +3008,7 @@ RasterizerCanvasGLES3::RasterizerCanvasGLES3() {
 		db.light_ubo = new_buffers[1];
 		db.state_ubo = new_buffers[2];
 		db.last_frame_used = 0;
-		db.fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+		db.last_fence_epoch = 0;
 		state.canvas_instance_data_buffers[i] = db;
 	}
 	glBindBuffer(GL_ARRAY_BUFFER, 0);
@@ -2936,6 +3126,13 @@ RasterizerCanvasGLES3::~RasterizerCanvasGLES3() {
 		state.shadow_texture = 0;
 		state.shadow_depth_buffer = 0;
 	}
+
+	for (const FrameFence &frame_fence : state.frame_fences) {
+		if (frame_fence.fence != GLsync()) {
+			glDeleteSync(frame_fence.fence);
+		}
+	}
+	state.frame_fences.clear();
 
 	for (uint32_t i = 0; i < state.canvas_instance_data_buffers.size(); i++) {
 		for (int j = 0; j < state.canvas_instance_data_buffers[i].instance_buffers.size(); j++) {

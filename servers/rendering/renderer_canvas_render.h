@@ -541,6 +541,9 @@ public:
 	virtual RID light_create() = 0;
 	virtual void light_set_texture(RID p_rid, RID p_texture) = 0;
 	virtual void light_set_use_shadow(RID p_rid, bool p_enable) = 0;
+	virtual void shadow_pass_begin() {}
+	virtual void shadow_pass_end() {}
+	virtual void flush_frame_fence() {}
 	virtual void light_update_shadow(RID p_rid, int p_shadow_index, const Transform2D &p_light_xform, int p_light_mask, float p_near, float p_far, LightOccluderInstance *p_occluders, const Rect2 &p_light_rect) = 0;
 	virtual void light_update_directional_shadow(RID p_rid, int p_shadow_index, const Transform2D &p_light_xform, int p_light_mask, float p_cull_distance, const Rect2 &p_clip_rect, LightOccluderInstance *p_occluders) = 0;
 	// Number of shadow bands this renderer's 2D shadow atlas can hold. Shadow indices
