@@ -88,6 +88,7 @@ class GDScript : public Script {
 	friend class GDScriptFunction;
 	friend class GDScriptAnalyzer;
 	friend class GDScriptCompiler;
+	friend class GDScriptByteCodeGenerator;
 	friend class GDScriptCache;
 	friend class GDScriptDocGen;
 	friend class GDScriptLambdaCallable;
@@ -186,6 +187,7 @@ private:
 	GDScript *_cached_root_script = nullptr;
 	GDScriptFunction *_cached_initializer = nullptr;
 	Vector<Variant> _member_init_template;
+	Vector<Pair<int, Variant::Type>> _typed_builtin_members;
 	bool _cached_native_is_refcounted = false;
 	bool _has_notification_functions = false;
 	bool _has_member_init_template = false;
