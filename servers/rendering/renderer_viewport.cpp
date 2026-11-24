@@ -343,6 +343,11 @@ void RendererViewport::_draw_viewport(Viewport *p_viewport) {
 	}
 
 	if (OS::get_singleton()->get_current_rendering_method() == "gl_compatibility") {
+		// Flush any pending canvas fence in the active GL context before switching
+		// windows so the fence orders commands in the same context that used the buffers.
+		if (p_viewport->viewport_to_screen != DisplayServerEnums::INVALID_WINDOW_ID) {
+			RSG::canvas_render->flush_frame_fence();
+		}
 		// This is currently needed for GLES to keep the current window being rendered to up to date
 		DisplayServer::get_singleton()->gl_window_make_current(p_viewport->viewport_to_screen);
 	}
@@ -554,6 +559,11 @@ void RendererViewport::_draw_viewport(Viewport *p_viewport) {
 			canvas_map[Viewport::CanvasKey(E.key, E.value.layer, E.value.sublayer)] = &E.value;
 		}
 
+		const bool has_shadow_lights = (lights_with_shadow != nullptr) || (directional_lights_with_shadow != nullptr);
+		if (has_shadow_lights) {
+			RSG::canvas_render->shadow_pass_begin();
+		}
+
 		if (lights_with_shadow) {
 			//update shadows if any
 
@@ -684,6 +694,10 @@ void RendererViewport::_draw_viewport(Viewport *p_viewport) {
 			}
 
 			RENDER_TIMESTAMP("< Render DirectionalLight2D Shadows");
+		}
+
+		if (has_shadow_lights) {
+			RSG::canvas_render->shadow_pass_end();
 		}
 
 		if (scenario_draw_canvas_bg && canvas_map.begin() && canvas_map.begin()->key.get_layer() > scenario_canvas_max_layer) {

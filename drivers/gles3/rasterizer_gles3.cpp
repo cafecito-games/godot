@@ -117,11 +117,13 @@ void RasterizerGLES3::begin_frame(double frame_step) {
 }
 
 void RasterizerGLES3::end_frame(bool p_swap_buffers) {
+	canvas->flush_frame_fence();
 	GLES3::Utilities *utils = GLES3::Utilities::get_singleton();
 	utils->capture_timestamps_end();
 }
 
 void RasterizerGLES3::gl_end_frame(bool p_swap_buffers) {
+	canvas->flush_frame_fence();
 	if (p_swap_buffers) {
 		DisplayServer::get_singleton()->swap_buffers();
 	} else {

@@ -278,24 +278,42 @@ public:
 		bool lights_disabled = false;
 	};
 
-	// DataBuffer contains our per-frame data. I.e. the resources that are updated each frame.
-	// We track them and ensure that they don't get reused until at least 2 frames have passed
-	// to avoid the GPU stalling to wait for a resource to become available.
+	// DataBuffer contains per-pass canvas UBOs that are updated during a frame.
+	// Reuse is gated by shared per-frame GLsync fences (tracked via monotonically
+	// increasing fence epochs) so multiple canvas passes per frame share a single
+	// fence instead of issuing glFenceSync on every CanvasLayer/SubViewport.
 	struct DataBuffer {
 		Vector<GLuint> instance_buffers;
 		GLuint light_ubo = 0;
 		GLuint state_ubo = 0;
-		uint64_t last_frame_used = -3;
+		uint64_t last_frame_used = 0;
+		uint64_t last_fence_epoch = 0;
+	};
+
+	struct FrameFence {
+		uint64_t epoch = 0;
 		GLsync fence = GLsync();
+	};
+
+	struct ShadowOccluderEntry {
+		const OccluderPolygon *polygon = nullptr;
+		Transform2D modelview;
+		uint8_t quadrant_mask = 0;
 	};
 
 	struct State {
 		LocalVector<DataBuffer> canvas_instance_data_buffers;
+		LocalVector<FrameFence> frame_fences;
 		LocalVector<Batch> canvas_instance_batches;
+		LocalVector<ShadowOccluderEntry> shadow_occluder_entries;
 		uint32_t current_data_buffer_index = 0;
 		uint32_t current_instance_buffer_index = 0;
 		uint32_t current_batch_index = 0;
 		uint32_t last_item_index = 0;
+		uint64_t next_fence_epoch = 1;
+		uint64_t completed_fence_epoch = 0;
+		uint64_t last_polled_frame = UINT64_MAX;
+		bool canvas_used_in_frame = false;
 
 		InstanceData *instance_data_array = nullptr;
 
@@ -305,6 +323,9 @@ public:
 		GLuint shadow_depth_buffer = 0;
 		GLuint shadow_fb = 0;
 		int shadow_texture_size = 2048;
+		bool in_shadow_pass = false;
+		bool shadow_shader_bound = false;
+		RSE::CanvasOccluderPolygonCullMode shadow_cull_mode = RSE::CANVAS_OCCLUDER_POLYGON_CULL_DISABLED;
 
 		bool using_directional_lights = false;
 
@@ -341,8 +362,11 @@ public:
 	void light_set_texture(RID p_rid, RID p_texture) override;
 	void light_set_use_shadow(RID p_rid, bool p_enable) override;
 	uint32_t get_max_shadow_lights() const override { return data.max_lights_per_render; }
+	void shadow_pass_begin() override;
+	void shadow_pass_end() override;
 	void light_update_shadow(RID p_rid, int p_shadow_index, const Transform2D &p_light_xform, int p_light_mask, float p_near, float p_far, LightOccluderInstance *p_occluders, const Rect2 &p_light_rect) override;
 	void light_update_directional_shadow(RID p_rid, int p_shadow_index, const Transform2D &p_light_xform, int p_light_mask, float p_cull_distance, const Rect2 &p_clip_rect, LightOccluderInstance *p_occluders) override;
+	static uint8_t compute_shadow_occluder_quadrant_mask(const Rect2 &p_light_local_aabb, float p_far);
 
 	void render_sdf(RID p_render_target, LightOccluderInstance *p_occluders) override;
 	RID occluder_polygon_create() override;
@@ -365,8 +389,14 @@ public:
 	void _add_to_batch(uint32_t &r_index, bool &r_batch_broken);
 	void _allocate_instance_data_buffer();
 	void _allocate_instance_buffer();
+	void _poll_frame_fences();
+	void _wait_for_fence_epoch(uint64_t p_target_epoch);
+	void _acquire_instance_data_buffer();
+	void _invalidate_shadow_framebuffer(bool p_invalidate_color, bool p_invalidate_depth);
+	void _apply_shadow_cull_mode(RSE::CanvasOccluderPolygonCullMode p_cull_mode);
 	void _enable_attributes(uint32_t p_start, bool p_primitive, uint32_t p_rate = 1);
 
+	void flush_frame_fence() override;
 	void set_time(double p_time);
 
 	virtual void set_debug_redraw(bool p_enabled, double p_time, const Color &p_color) override {
