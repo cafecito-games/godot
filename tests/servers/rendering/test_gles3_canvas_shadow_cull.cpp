@@ -131,6 +131,75 @@ TEST_CASE("[Rendering][GLES3] 2D shadow occluder quadrant mask is conservative a
 	CHECK(culled_quadrants > 4000);
 }
 
+TEST_CASE("[Rendering][GLES3] 2D shadow band cache occluder matching and LRU band selection") {
+	using CachedShadowOccluder = RasterizerCanvasGLES3::CachedShadowOccluder;
+	using ShadowBandCache = RasterizerCanvasGLES3::ShadowBandCache;
+
+	LocalVector<CachedShadowOccluder> first;
+	LocalVector<CachedShadowOccluder> second;
+
+	CHECK(RasterizerCanvasGLES3::shadow_occluder_lists_match(first, second));
+
+	Transform2D base_transform(0.25f, Vector2(120.0f, -45.0f));
+	first.push_back({ 10u, 3u, 100u, base_transform });
+	second.push_back({ 10u, 3u, 100u, base_transform });
+	CHECK(RasterizerCanvasGLES3::shadow_occluder_lists_match(first, second));
+
+	// Sub-millipixel camera-pan floating-point jitter stays a cache hit.
+	second[0].modelview.columns[2] += Vector2(2e-4f, -3e-4f);
+	CHECK(RasterizerCanvasGLES3::shadow_occluder_lists_match(first, second));
+
+	// Meaningful occluder movement invalidates the cache.
+	second[0].modelview.columns[2] += Vector2(0.05f, 0.0f);
+	CHECK_FALSE(RasterizerCanvasGLES3::shadow_occluder_lists_match(first, second));
+	second[0].modelview = base_transform;
+
+	// Polygon shape/cull revision change invalidates the cache.
+	second[0].polygon_revision = 4u;
+	CHECK_FALSE(RasterizerCanvasGLES3::shadow_occluder_lists_match(first, second));
+	second[0].polygon_revision = 3u;
+
+	// Adding or removing an occluder invalidates the cache.
+	second.push_back({ 11u, 1u, 101u, Transform2D() });
+	CHECK_FALSE(RasterizerCanvasGLES3::shadow_occluder_lists_match(first, second));
+
+	// LRU band selection: prefers free bands, keeps sticky bands, and evicts oldest pass without colliding in the current pass.
+	LocalVector<ShadowBandCache> bands;
+	bands.resize(3);
+	const RID light_a = RID::from_uint64(101);
+	const RID light_b = RID::from_uint64(102);
+	const RID light_c = RID::from_uint64(103);
+	const RID light_d = RID::from_uint64(104);
+
+	int32_t band_a = RasterizerCanvasGLES3::select_shadow_band(bands, light_a, -1, 1);
+	CHECK(band_a == 0);
+	bands[band_a].light_rid = light_a;
+	bands[band_a].valid = true;
+	bands[band_a].last_used_pass = 1;
+
+	int32_t band_b = RasterizerCanvasGLES3::select_shadow_band(bands, light_b, -1, 1);
+	CHECK(band_b == 1);
+	bands[band_b].light_rid = light_b;
+	bands[band_b].valid = true;
+	bands[band_b].last_used_pass = 1;
+
+	int32_t band_c = RasterizerCanvasGLES3::select_shadow_band(bands, light_c, -1, 1);
+	CHECK(band_c == 2);
+	bands[band_c].light_rid = light_c;
+	bands[band_c].valid = true;
+	bands[band_c].last_used_pass = 1;
+
+	// Pass 2 touches B and C, leaving A as the oldest unused band.
+	CHECK(RasterizerCanvasGLES3::select_shadow_band(bands, light_b, band_b, 2) == band_b);
+	bands[band_b].last_used_pass = 2;
+	CHECK(RasterizerCanvasGLES3::select_shadow_band(bands, light_c, band_c, 2) == band_c);
+	bands[band_c].last_used_pass = 2;
+
+	// New light D in pass 2 must evict A (band 0), never B or C used in pass 2.
+	int32_t band_d = RasterizerCanvasGLES3::select_shadow_band(bands, light_d, -1, 2);
+	CHECK(band_d == 0);
+}
+
 } // namespace TestGLES3CanvasShadowCull
 
 #endif // GLES3_ENABLED

@@ -1729,7 +1729,95 @@ void RasterizerCanvasGLES3::light_set_use_shadow(RID p_rid, bool p_enable) {
 	CanvasLight *cl = canvas_light_owner.get_or_null(p_rid);
 	ERR_FAIL_NULL(cl);
 
+	if (cl->shadow.enabled && !p_enable) {
+		_release_shadow_band(p_rid, cl);
+	}
 	cl->shadow.enabled = p_enable;
+}
+
+bool RasterizerCanvasGLES3::shadow_occluder_lists_match(const LocalVector<CachedShadowOccluder> &p_first, const LocalVector<CachedShadowOccluder> &p_second) {
+	if (p_first.size() != p_second.size()) {
+		return false;
+	}
+	constexpr real_t basis_epsilon = real_t(1e-5);
+	constexpr real_t origin_epsilon = real_t(1e-3);
+	for (uint32_t i = 0; i < p_first.size(); i++) {
+		const CachedShadowOccluder &first = p_first[i];
+		const CachedShadowOccluder &second = p_second[i];
+		if (first.polygon_id != second.polygon_id || first.polygon_revision != second.polygon_revision) {
+			return false;
+		}
+		if (Math::abs(first.modelview.columns[0].x - second.modelview.columns[0].x) > basis_epsilon ||
+				Math::abs(first.modelview.columns[0].y - second.modelview.columns[0].y) > basis_epsilon ||
+				Math::abs(first.modelview.columns[1].x - second.modelview.columns[1].x) > basis_epsilon ||
+				Math::abs(first.modelview.columns[1].y - second.modelview.columns[1].y) > basis_epsilon ||
+				Math::abs(first.modelview.columns[2].x - second.modelview.columns[2].x) > origin_epsilon ||
+				Math::abs(first.modelview.columns[2].y - second.modelview.columns[2].y) > origin_epsilon) {
+			return false;
+		}
+	}
+	return true;
+}
+
+int32_t RasterizerCanvasGLES3::select_shadow_band(const LocalVector<ShadowBandCache> &p_bands, RID p_light_rid, int32_t p_preferred_band, uint64_t p_current_pass) {
+	const uint32_t band_count = p_bands.size();
+	if (band_count == 0) {
+		return -1;
+	}
+	if (p_preferred_band >= 0 && uint32_t(p_preferred_band) < band_count && p_bands[p_preferred_band].light_rid == p_light_rid) {
+		return p_preferred_band;
+	}
+
+	int32_t best_band = -1;
+	uint64_t oldest_pass = UINT64_MAX;
+	for (uint32_t i = 0; i < band_count; i++) {
+		const ShadowBandCache &band = p_bands[i];
+		if (band.last_used_pass == p_current_pass) {
+			continue;
+		}
+		if (!band.valid && band.light_rid.is_null()) {
+			return int32_t(i);
+		}
+		if (best_band < 0 || band.last_used_pass < oldest_pass) {
+			oldest_pass = band.last_used_pass;
+			best_band = int32_t(i);
+		}
+	}
+	return best_band;
+}
+
+int32_t RasterizerCanvasGLES3::_acquire_shadow_band(RID p_light_rid, CanvasLight *p_light) {
+	const int32_t band_index = select_shadow_band(state.shadow_band_cache, p_light_rid, p_light->cached_shadow_band, state.shadow_pass_counter);
+	ERR_FAIL_COND_V(band_index < 0, -1);
+
+	ShadowBandCache &band = state.shadow_band_cache[band_index];
+	if (band.light_rid != p_light_rid) {
+		if (band.light_rid.is_valid()) {
+			CanvasLight *previous_owner = canvas_light_owner.get_or_null(band.light_rid);
+			if (previous_owner != nullptr && previous_owner->cached_shadow_band == band_index) {
+				previous_owner->cached_shadow_band = -1;
+			}
+		}
+		band.light_rid = p_light_rid;
+		band.valid = false;
+		band.occluders.clear();
+	}
+	band.last_used_pass = state.shadow_pass_counter;
+	p_light->cached_shadow_band = band_index;
+	return band_index;
+}
+
+void RasterizerCanvasGLES3::_release_shadow_band(RID p_light_rid, CanvasLight *p_light) {
+	const int32_t band_index = p_light->cached_shadow_band;
+	if (band_index >= 0 && uint32_t(band_index) < state.shadow_band_cache.size()) {
+		ShadowBandCache &band = state.shadow_band_cache[band_index];
+		if (band.light_rid == p_light_rid) {
+			band.light_rid = RID();
+			band.valid = false;
+			band.occluders.clear();
+		}
+	}
+	p_light->cached_shadow_band = -1;
 }
 
 uint8_t RasterizerCanvasGLES3::compute_shadow_occluder_quadrant_mask(const Rect2 &p_light_local_aabb, float p_far) {
@@ -1796,21 +1884,25 @@ void RasterizerCanvasGLES3::_apply_shadow_cull_mode(RSE::CanvasOccluderPolygonCu
 }
 
 void RasterizerCanvasGLES3::shadow_pass_begin() {
-	if (state.in_shadow_pass) {
+	if (state.shadow_pass_active) {
 		return;
 	}
+	state.shadow_pass_active = true;
+	state.shadow_pass_counter++;
 	_update_shadow_atlas();
-	if (state.shadow_fb == 0) {
+}
+
+void RasterizerCanvasGLES3::_ensure_shadow_pass_bound() {
+	if (state.shadow_fb_bound || state.shadow_fb == 0) {
 		return;
 	}
-
-	state.in_shadow_pass = true;
+	state.shadow_fb_bound = true;
 	state.shadow_cull_mode = RSE::CANVAS_OCCLUDER_POLYGON_CULL_DISABLED;
 
 	glBindFramebuffer(GL_FRAMEBUFFER, state.shadow_fb);
-	// Every active shadow band is rewritten for the current viewport; invalidating
-	// color and depth avoids full-atlas tile loads on TBDR GPUs.
-	_invalidate_shadow_framebuffer(true, true);
+	// Cached shadow bands live in the color attachment across frames, so only invalidate
+	// the transient depth renderbuffer to avoid discarding cached bands on TBDR GPUs.
+	_invalidate_shadow_framebuffer(false, true);
 
 	glDepthMask(GL_TRUE);
 	glEnable(GL_DEPTH_TEST);
@@ -1826,10 +1918,14 @@ void RasterizerCanvasGLES3::shadow_pass_begin() {
 }
 
 void RasterizerCanvasGLES3::shadow_pass_end() {
-	if (!state.in_shadow_pass) {
+	if (!state.shadow_pass_active) {
 		return;
 	}
-	state.in_shadow_pass = false;
+	state.shadow_pass_active = false;
+	if (!state.shadow_fb_bound) {
+		return;
+	}
+	state.shadow_fb_bound = false;
 	state.shadow_shader_bound = false;
 
 	glBindVertexArray(0);
@@ -1851,13 +1947,21 @@ void RasterizerCanvasGLES3::light_update_shadow(RID p_rid, int p_shadow_index, c
 	ERR_FAIL_COND(!cl->shadow.enabled);
 	ERR_FAIL_INDEX(p_shadow_index, (int)data.max_lights_per_render);
 
-	const bool owns_shadow_pass = !state.in_shadow_pass;
+	const bool owns_shadow_pass = !state.shadow_pass_active;
 	if (owns_shadow_pass) {
 		shadow_pass_begin();
 	}
 
+	const int32_t shadow_band = _acquire_shadow_band(p_rid, cl);
+	if (shadow_band < 0) {
+		if (owns_shadow_pass) {
+			shadow_pass_end();
+		}
+		return;
+	}
+
 	cl->shadow.z_far = p_far;
-	cl->shadow.y_offset = float(p_shadow_index * 2 + 1) / float(data.max_lights_per_render * 2);
+	cl->shadow.y_offset = float(shadow_band * 2 + 1) / float(data.max_lights_per_render * 2);
 
 	if (state.shadow_fb == 0) {
 		if (owns_shadow_pass) {
@@ -1866,20 +1970,8 @@ void RasterizerCanvasGLES3::light_update_shadow(RID p_rid, int p_shadow_index, c
 		return;
 	}
 
-	glViewport(0, p_shadow_index * 2, state.shadow_texture_size, 2);
-	glScissor(0, p_shadow_index * 2, state.shadow_texture_size, 2);
-	glClearColor(p_far, p_far, p_far, 1.0);
-	RasterizerUtilGLES3::clear_depth(1.0);
-	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
-	if (!state.shadow_shader_bound) {
-		if (owns_shadow_pass) {
-			shadow_pass_end();
-		}
-		return;
-	}
-
 	state.shadow_occluder_entries.clear();
+	state.shadow_occluder_cache_scratch.clear();
 	uint8_t combined_quadrant_mask = 0;
 
 	for (LightOccluderInstance *instance = p_occluders; instance != nullptr; instance = instance->next) {
@@ -1899,10 +1991,51 @@ void RasterizerCanvasGLES3::light_update_shadow(RID p_rid, int p_shadow_index, c
 		}
 
 		state.shadow_occluder_entries.push_back({ co, modelview, quadrant_mask });
+		state.shadow_occluder_cache_scratch.push_back({ instance->occluder.get_id(), co->revision, reinterpret_cast<uintptr_t>(instance), modelview });
 		combined_quadrant_mask |= quadrant_mask;
 	}
 
+	if (state.shadow_occluder_cache_scratch.size() > 1) {
+		state.shadow_occluder_cache_scratch.sort();
+	}
+
+	ShadowBandCache &band = state.shadow_band_cache[shadow_band];
+	if (band.valid &&
+			!band.is_directional &&
+			band.atlas_generation == state.shadow_atlas_generation &&
+			Math::abs(band.near_plane - p_near) <= 1e-5f &&
+			Math::abs(band.far_plane - p_far) <= 1e-4f &&
+			shadow_occluder_lists_match(band.occluders, state.shadow_occluder_cache_scratch)) {
+		cl->shadow.z_far = band.far_plane;
+		if (owns_shadow_pass) {
+			shadow_pass_end();
+		}
+		return;
+	}
+
+	_ensure_shadow_pass_bound();
+
+	glViewport(0, shadow_band * 2, state.shadow_texture_size, 2);
+	glScissor(0, shadow_band * 2, state.shadow_texture_size, 2);
+	glClearColor(p_far, p_far, p_far, 1.0);
+	RasterizerUtilGLES3::clear_depth(1.0);
+	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+	if (!state.shadow_shader_bound) {
+		band.valid = false;
+		if (owns_shadow_pass) {
+			shadow_pass_end();
+		}
+		return;
+	}
+
 	if (state.shadow_occluder_entries.is_empty()) {
+		band.atlas_generation = state.shadow_atlas_generation;
+		band.valid = true;
+		band.is_directional = false;
+		band.near_plane = p_near;
+		band.far_plane = p_far;
+		band.occluders.clear();
 		if (owns_shadow_pass) {
 			shadow_pass_end();
 		}
@@ -1948,7 +2081,7 @@ void RasterizerCanvasGLES3::light_update_shadow(RID p_rid, int p_shadow_index, c
 			continue;
 		}
 
-		glViewport((state.shadow_texture_size / 4) * quadrant, p_shadow_index * 2, (state.shadow_texture_size / 4), 2);
+		glViewport((state.shadow_texture_size / 4) * quadrant, shadow_band * 2, (state.shadow_texture_size / 4), 2);
 		shadow_render.shader.version_set_uniform(CanvasOcclusionShaderGLES3::PROJECTION, projections[quadrant], shadow_render.shader_version, variant);
 		shadow_render.shader.version_set_uniform(CanvasOcclusionShaderGLES3::DIRECTION, directions[quadrant].x, directions[quadrant].y, shadow_render.shader_version, variant);
 
@@ -1968,6 +2101,13 @@ void RasterizerCanvasGLES3::light_update_shadow(RID p_rid, int p_shadow_index, c
 		}
 	}
 
+	band.atlas_generation = state.shadow_atlas_generation;
+	band.valid = true;
+	band.is_directional = false;
+	band.near_plane = p_near;
+	band.far_plane = p_far;
+	band.occluders = state.shadow_occluder_cache_scratch;
+
 	if (owns_shadow_pass) {
 		shadow_pass_end();
 	}
@@ -1981,9 +2121,17 @@ void RasterizerCanvasGLES3::light_update_directional_shadow(RID p_rid, int p_sha
 	ERR_FAIL_COND(!cl->shadow.enabled);
 	ERR_FAIL_INDEX(p_shadow_index, (int)data.max_lights_per_render);
 
-	const bool owns_shadow_pass = !state.in_shadow_pass;
+	const bool owns_shadow_pass = !state.shadow_pass_active;
 	if (owns_shadow_pass) {
 		shadow_pass_begin();
+	}
+
+	const int32_t shadow_band = _acquire_shadow_band(p_rid, cl);
+	if (shadow_band < 0) {
+		if (owns_shadow_pass) {
+			shadow_pass_end();
+		}
+		return;
 	}
 
 	Vector2 light_dir = p_light_xform.columns[1].normalized();
@@ -1997,7 +2145,7 @@ void RasterizerCanvasGLES3::light_update_directional_shadow(RID p_rid, int p_sha
 	float half_size = p_clip_rect.size.length() * 0.5; //shadow length, must keep this no matter the angle
 
 	cl->shadow.z_far = distance;
-	cl->shadow.y_offset = float(p_shadow_index * 2 + 1) / float(data.max_lights_per_render * 2);
+	cl->shadow.y_offset = float(shadow_band * 2 + 1) / float(data.max_lights_per_render * 2);
 
 	Transform2D to_light_xform;
 
@@ -2020,13 +2168,61 @@ void RasterizerCanvasGLES3::light_update_directional_shadow(RID p_rid, int p_sha
 		return;
 	}
 
-	glViewport(0, p_shadow_index * 2, state.shadow_texture_size, 2);
-	glScissor(0, p_shadow_index * 2, state.shadow_texture_size, 2);
+	state.shadow_occluder_entries.clear();
+	state.shadow_occluder_cache_scratch.clear();
+	for (LightOccluderInstance *instance = p_occluders; instance != nullptr; instance = instance->next) {
+		OccluderPolygon *co = occluder_polygon_owner.get_or_null(instance->occluder);
+
+		if (!co || co->vertex_array == 0 || !(p_light_mask & instance->light_mask)) {
+			continue;
+		}
+
+		const Transform2D modelview = to_light_xform * instance->xform_cache;
+		state.shadow_occluder_entries.push_back({ co, modelview, 1u });
+		state.shadow_occluder_cache_scratch.push_back({ instance->occluder.get_id(), co->revision, reinterpret_cast<uintptr_t>(instance), modelview });
+	}
+
+	if (state.shadow_occluder_cache_scratch.size() > 1) {
+		state.shadow_occluder_cache_scratch.sort();
+	}
+
+	ShadowBandCache &band = state.shadow_band_cache[shadow_band];
+	if (band.valid &&
+			band.is_directional &&
+			band.atlas_generation == state.shadow_atlas_generation &&
+			Math::abs(band.near_plane - half_size) <= 1e-3f &&
+			Math::abs(band.far_plane - distance) <= 1e-3f &&
+			shadow_occluder_lists_match(band.occluders, state.shadow_occluder_cache_scratch)) {
+		cl->shadow.z_far = band.far_plane;
+		if (owns_shadow_pass) {
+			shadow_pass_end();
+		}
+		return;
+	}
+
+	_ensure_shadow_pass_bound();
+
+	glViewport(0, shadow_band * 2, state.shadow_texture_size, 2);
+	glScissor(0, shadow_band * 2, state.shadow_texture_size, 2);
 	glClearColor(1.0, 1.0, 1.0, 1.0);
 	RasterizerUtilGLES3::clear_depth(1.0);
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-	if (!state.shadow_shader_bound || p_occluders == nullptr) {
+	if (!state.shadow_shader_bound) {
+		band.valid = false;
+		if (owns_shadow_pass) {
+			shadow_pass_end();
+		}
+		return;
+	}
+
+	if (state.shadow_occluder_entries.is_empty()) {
+		band.atlas_generation = state.shadow_atlas_generation;
+		band.valid = true;
+		band.is_directional = true;
+		band.near_plane = half_size;
+		band.far_plane = distance;
+		band.occluders.clear();
 		if (owns_shadow_pass) {
 			shadow_pass_end();
 		}
@@ -2043,27 +2239,23 @@ void RasterizerCanvasGLES3::light_update_directional_shadow(RID p_rid, int p_sha
 	shadow_render.shader.version_set_uniform(CanvasOcclusionShaderGLES3::DIRECTION, 0.0, 1.0, shadow_render.shader_version, variant);
 	shadow_render.shader.version_set_uniform(CanvasOcclusionShaderGLES3::Z_FAR, distance, shadow_render.shader_version, variant);
 
-	LightOccluderInstance *instance = p_occluders;
-
-	while (instance) {
-		OccluderPolygon *co = occluder_polygon_owner.get_or_null(instance->occluder);
-
-		if (!co || co->vertex_array == 0 || !(p_light_mask & instance->light_mask)) {
-			instance = instance->next;
-			continue;
-		}
-
-		Transform2D modelview = to_light_xform * instance->xform_cache;
+	for (const ShadowOccluderEntry &entry : state.shadow_occluder_entries) {
+		const Transform2D &modelview = entry.modelview;
 		shadow_render.shader.version_set_uniform(CanvasOcclusionShaderGLES3::MODELVIEW1, modelview.columns[0][0], modelview.columns[1][0], 0, modelview.columns[2][0], shadow_render.shader_version, variant);
 		shadow_render.shader.version_set_uniform(CanvasOcclusionShaderGLES3::MODELVIEW2, modelview.columns[0][1], modelview.columns[1][1], 0, modelview.columns[2][1], shadow_render.shader_version, variant);
 
-		_apply_shadow_cull_mode(co->cull_mode);
+		_apply_shadow_cull_mode(entry.polygon->cull_mode);
 
-		glBindVertexArray(co->vertex_array);
-		glDrawElements(GL_TRIANGLES, 3 * co->line_point_count, GL_UNSIGNED_SHORT, nullptr);
-
-		instance = instance->next;
+		glBindVertexArray(entry.polygon->vertex_array);
+		glDrawElements(GL_TRIANGLES, 3 * entry.polygon->line_point_count, GL_UNSIGNED_SHORT, nullptr);
 	}
+
+	band.atlas_generation = state.shadow_atlas_generation;
+	band.valid = true;
+	band.is_directional = true;
+	band.near_plane = half_size;
+	band.far_plane = distance;
+	band.occluders = state.shadow_occluder_cache_scratch;
 
 	if (owns_shadow_pass) {
 		shadow_pass_end();
@@ -2120,8 +2312,10 @@ void RasterizerCanvasGLES3::_update_shadow_atlas() {
 			state.shadow_texture = 0;
 			state.shadow_depth_buffer = 0;
 			WARN_PRINT("Could not create CanvasItem shadow atlas, status: " + GLES3::TextureStorage::get_singleton()->get_framebuffer_error(status));
+		} else {
+			state.shadow_atlas_generation++;
+			GLES3::Utilities::get_singleton()->texture_allocated_data(state.shadow_texture, state.shadow_texture_size * data.max_lights_per_render * 2 * 4, "2D shadow atlas texture");
 		}
-		GLES3::Utilities::get_singleton()->texture_allocated_data(state.shadow_texture, state.shadow_texture_size * data.max_lights_per_render * 2 * 4, "2D shadow atlas texture");
 		glBindFramebuffer(GL_FRAMEBUFFER, GLES3::TextureStorage::system_fbo);
 	}
 }
@@ -2200,6 +2394,7 @@ RID RasterizerCanvasGLES3::occluder_polygon_create() {
 void RasterizerCanvasGLES3::occluder_polygon_set_shape(RID p_occluder, const Vector<Vector2> &p_points, bool p_closed) {
 	OccluderPolygon *oc = occluder_polygon_owner.get_or_null(p_occluder);
 	ERR_FAIL_NULL(oc);
+	oc->revision++;
 
 	Vector<Vector2> lines;
 
@@ -2373,7 +2568,10 @@ void RasterizerCanvasGLES3::occluder_polygon_set_shape(RID p_occluder, const Vec
 void RasterizerCanvasGLES3::occluder_polygon_set_cull_mode(RID p_occluder, RSE::CanvasOccluderPolygonCullMode p_mode) {
 	OccluderPolygon *oc = occluder_polygon_owner.get_or_null(p_occluder);
 	ERR_FAIL_NULL(oc);
-	oc->cull_mode = p_mode;
+	if (oc->cull_mode != p_mode) {
+		oc->cull_mode = p_mode;
+		oc->revision++;
+	}
 }
 
 void RasterizerCanvasGLES3::set_shadow_texture_size(int p_size) {
@@ -2397,6 +2595,9 @@ void RasterizerCanvasGLES3::set_shadow_texture_size(int p_size) {
 		state.shadow_fb = 0;
 		state.shadow_texture = 0;
 		state.shadow_depth_buffer = 0;
+		state.shadow_fb_bound = false;
+		state.shadow_shader_bound = false;
+		state.shadow_atlas_generation++;
 	}
 	_update_shadow_atlas();
 }
@@ -2405,6 +2606,7 @@ bool RasterizerCanvasGLES3::free(RID p_rid) {
 	if (canvas_light_owner.owns(p_rid)) {
 		CanvasLight *cl = canvas_light_owner.get_or_null(p_rid);
 		ERR_FAIL_NULL_V(cl, false);
+		_release_shadow_band(p_rid, cl);
 		canvas_light_owner.free(p_rid);
 	} else if (occluder_polygon_owner.owns(p_rid)) {
 		occluder_polygon_set_shape(p_rid, Vector<Vector2>(), false);
@@ -3147,6 +3349,7 @@ RasterizerCanvasGLES3::RasterizerCanvasGLES3() {
 
 	state.instance_data_array = memnew_arr(InstanceData, data.max_instances_per_buffer);
 	state.light_uniforms = memnew_arr(LightUniform, data.max_lights_per_render);
+	state.shadow_band_cache.resize(data.max_lights_per_render);
 
 	{
 		const uint32_t indices[6] = { 0, 2, 1, 3, 2, 0 };
