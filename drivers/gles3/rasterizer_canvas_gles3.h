@@ -97,10 +97,11 @@ class RasterizerCanvasGLES3 : public RendererCanvasRender {
 
 	struct CanvasLight {
 		RID texture;
+		int32_t cached_shadow_band = -1;
 		struct {
 			bool enabled = false;
-			float z_far;
-			float y_offset;
+			float z_far = 1.0f;
+			float y_offset = 0.0f;
 			Transform2D directional_xform;
 		} shadow;
 	};
@@ -109,6 +110,7 @@ class RasterizerCanvasGLES3 : public RendererCanvasRender {
 
 	struct OccluderPolygon {
 		RSE::CanvasOccluderPolygonCullMode cull_mode = RSE::CANVAS_OCCLUDER_POLYGON_CULL_DISABLED;
+		uint64_t revision = 1;
 		int line_point_count = 0;
 		GLuint vertex_buffer = 0;
 		GLuint vertex_array = 0;
@@ -301,6 +303,31 @@ public:
 		uint8_t quadrant_mask = 0;
 	};
 
+	struct CachedShadowOccluder {
+		uint64_t polygon_id = 0;
+		uint64_t polygon_revision = 0;
+		uintptr_t instance_key = 0;
+		Transform2D modelview;
+
+		bool operator<(const CachedShadowOccluder &p_other) const {
+			if (polygon_id != p_other.polygon_id) {
+				return polygon_id < p_other.polygon_id;
+			}
+			return instance_key < p_other.instance_key;
+		}
+	};
+
+	struct ShadowBandCache {
+		RID light_rid;
+		uint64_t atlas_generation = 0;
+		uint64_t last_used_pass = 0;
+		bool valid = false;
+		bool is_directional = false;
+		float near_plane = 0.0f;
+		float far_plane = 0.0f;
+		LocalVector<CachedShadowOccluder> occluders;
+	};
+
 	struct ActivePointLight {
 		Rect2 rect_cache;
 		uint32_t item_mask = 0;
@@ -315,6 +342,8 @@ public:
 		LocalVector<FrameFence> frame_fences;
 		LocalVector<Batch> canvas_instance_batches;
 		LocalVector<ShadowOccluderEntry> shadow_occluder_entries;
+		LocalVector<CachedShadowOccluder> shadow_occluder_cache_scratch;
+		LocalVector<ShadowBandCache> shadow_band_cache;
 		LocalVector<ActivePointLight> active_point_lights;
 		uint32_t current_data_buffer_index = 0;
 		uint32_t current_instance_buffer_index = 0;
@@ -333,7 +362,10 @@ public:
 		GLuint shadow_depth_buffer = 0;
 		GLuint shadow_fb = 0;
 		int shadow_texture_size = 2048;
-		bool in_shadow_pass = false;
+		uint64_t shadow_atlas_generation = 0;
+		uint64_t shadow_pass_counter = 0;
+		bool shadow_pass_active = false;
+		bool shadow_fb_bound = false;
 		bool shadow_shader_bound = false;
 		RSE::CanvasOccluderPolygonCullMode shadow_cull_mode = RSE::CANVAS_OCCLUDER_POLYGON_CULL_DISABLED;
 
@@ -379,6 +411,8 @@ public:
 	void light_update_shadow(RID p_rid, int p_shadow_index, const Transform2D &p_light_xform, int p_light_mask, float p_near, float p_far, LightOccluderInstance *p_occluders, const Rect2 &p_light_rect) override;
 	void light_update_directional_shadow(RID p_rid, int p_shadow_index, const Transform2D &p_light_xform, int p_light_mask, float p_cull_distance, const Rect2 &p_clip_rect, LightOccluderInstance *p_occluders) override;
 	static uint8_t compute_shadow_occluder_quadrant_mask(const Rect2 &p_light_local_aabb, float p_far);
+	static bool shadow_occluder_lists_match(const LocalVector<CachedShadowOccluder> &p_first, const LocalVector<CachedShadowOccluder> &p_second);
+	static int32_t select_shadow_band(const LocalVector<ShadowBandCache> &p_bands, RID p_light_rid, int32_t p_preferred_band, uint64_t p_current_pass);
 
 	void render_sdf(RID p_render_target, LightOccluderInstance *p_occluders) override;
 	RID occluder_polygon_create() override;
@@ -406,6 +440,9 @@ public:
 	void _acquire_instance_data_buffer();
 	void _invalidate_shadow_framebuffer(bool p_invalidate_color, bool p_invalidate_depth);
 	void _apply_shadow_cull_mode(RSE::CanvasOccluderPolygonCullMode p_cull_mode);
+	void _ensure_shadow_pass_bound();
+	int32_t _acquire_shadow_band(RID p_light_rid, CanvasLight *p_light);
+	void _release_shadow_band(RID p_light_rid, CanvasLight *p_light);
 	void _enable_attributes(uint32_t p_start, bool p_primitive, uint32_t p_rate = 1);
 	void _set_instance_attribute_pointers(uint32_t p_start, bool p_primitive);
 
