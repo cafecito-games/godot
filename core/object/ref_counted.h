@@ -47,6 +47,7 @@ public:
 
 	_FORCE_INLINE_ bool is_referenced() const { return refcount_init.get() != 1; }
 	bool init_ref();
+	_FORCE_INLINE_ void init_ref_fresh() { refcount_init.init(0); }
 	void deinit_ref(); // Effectively decrements refcount by increasing refcount_init by one.
 	bool reference(); // returns false if refcount is at zero and didn't get increased
 	bool unreference();

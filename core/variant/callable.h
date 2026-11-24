@@ -108,6 +108,9 @@ public:
 	ObjectID get_object_id() const;
 	StringName get_method() const;
 	CallableCustom *get_custom() const;
+	_FORCE_INLINE_ CallableCustom *get_custom_unchecked() const { return custom; }
+	_FORCE_INLINE_ ObjectID get_object_id_standard_unchecked() const { return ObjectID(object); }
+	_FORCE_INLINE_ const StringName &get_method_standard_unchecked() const { return method; }
 	int get_argument_count(bool *r_is_valid = nullptr) const;
 	int get_bound_arguments_count() const;
 	void get_bound_arguments_ref(Vector<Variant> &r_arguments) const; // Internal engine use, the exposed one is below.
@@ -146,6 +149,21 @@ class CallableCustom {
 	bool referenced = false;
 
 public:
+	enum CustomKind : uint8_t {
+		CUSTOM_KIND_GENERIC = 0,
+		CUSTOM_KIND_GDSCRIPT_LAMBDA = 1,
+		CUSTOM_KIND_GDSCRIPT_SELF_LAMBDA = 2,
+	};
+
+private:
+	uint8_t custom_kind = CUSTOM_KIND_GENERIC;
+
+protected:
+	_FORCE_INLINE_ void _set_custom_kind(CustomKind p_kind) { custom_kind = p_kind; }
+
+public:
+	_FORCE_INLINE_ CustomKind get_custom_kind() const { return static_cast<CustomKind>(custom_kind); }
+
 	typedef bool (*CompareEqualFunc)(const CallableCustom *p_a, const CallableCustom *p_b);
 	typedef bool (*CompareLessFunc)(const CallableCustom *p_a, const CallableCustom *p_b);
 

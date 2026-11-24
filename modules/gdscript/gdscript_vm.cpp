@@ -57,19 +57,35 @@ struct GDScriptFunction::VMInlineFrame {
 	int line = 0;
 	uint32_t alloca_size = 0;
 	uint32_t callee_frame_bytes = 0;
-	bool caller_owns_self_ref = true;
+	uint8_t caller_self_flags = 0;
 #ifdef DEBUG_ENABLED
 	bool call_ret = false;
 	bool call_async = false;
 #endif
 };
 
+constexpr uint8_t VM_SELF_FLAG_NONE = 0;
+constexpr uint8_t VM_SELF_FLAG_OWNED_REF = 1;
+constexpr uint8_t VM_SELF_FLAG_MOVE_TO_RET = 2;
+constexpr int VM_INLINE_LAMBDA_MAX_ARGS = 16;
+
 constexpr uint32_t VM_SINGLE_FRAME_ALLOCA_LIMIT = 4096;
 constexpr uint32_t VM_TOTAL_ALLOCA_BUDGET = 256 * 1024;
 
 struct GDScriptFunction::VMThreadState {
+	enum ScriptNewInlineResult {
+		SCRIPT_NEW_FALLBACK = 0,
+		SCRIPT_NEW_DONE_NO_INIT = 1,
+		SCRIPT_NEW_PUSH_INIT = 2,
+		SCRIPT_NEW_FAILED = 3,
+	};
+
 	uint8_t *buffer = nullptr;
 	GDScriptFunction::VMInlineFrame *frames = nullptr;
+	const Variant *pending_lambda_args[VM_INLINE_LAMBDA_MAX_ARGS] = {};
+	GDScriptInstance *prepared_callable_instance = nullptr;
+	const Variant *const *prepared_callable_args = nullptr;
+	int prepared_callable_argc = 0;
 	int call_depth = 0;
 	uint32_t alloca_bytes_in_use = 0;
 	uint32_t inline_frame_top = 0;
@@ -90,6 +106,224 @@ struct GDScriptFunction::VMThreadState {
 			frames = memnew_arr(GDScriptFunction::VMInlineFrame, GDScriptFunction::MAX_CALL_DEPTH);
 		}
 		return frames;
+	}
+
+	_NO_INLINE_ GDScriptFunction *prepare_inline_callable_call(
+			const Variant *p_base,
+			const GDScript *p_caller_script,
+			const Variant *p_caller_stack,
+			int p_caller_stack_size,
+			const Variant *const *p_arguments,
+			int p_argc) {
+		const Callable *callable = VariantInternal::get_callable(p_base);
+		GDScriptFunction *target_function = nullptr;
+		GDScriptInstance *target_instance = nullptr;
+		const Variant *const *call_args = p_arguments;
+		int call_argc = p_argc;
+
+		if (likely(callable->is_custom())) {
+			const CallableCustom *custom = callable->get_custom_unchecked();
+			const CallableCustom::CustomKind custom_kind = custom->get_custom_kind();
+			if (custom_kind == CallableCustom::CUSTOM_KIND_GDSCRIPT_LAMBDA) {
+				const GDScriptLambdaCallable *lambda_callable = static_cast<const GDScriptLambdaCallable *>(custom);
+				target_function = lambda_callable->get_function();
+				if (unlikely(target_function == nullptr)) {
+					return nullptr;
+				}
+				const bool base_on_caller_stack = p_base >= p_caller_stack && p_base < p_caller_stack + p_caller_stack_size;
+				if (unlikely(lambda_callable->get_script_ptr() != p_caller_script && !base_on_caller_stack)) {
+					return nullptr;
+				}
+				const Vector<Variant> &captures = lambda_callable->get_captures();
+				const int captures_count = captures.size();
+				if (captures_count > 0) {
+					if (unlikely(lambda_callable->has_object_captures() || captures_count + p_argc > VM_INLINE_LAMBDA_MAX_ARGS)) {
+						return nullptr;
+					}
+					const Variant *captures_ptr = captures.ptr();
+					for (int index = 0; index < captures_count; index++) {
+						pending_lambda_args[index] = &captures_ptr[index];
+					}
+					for (int index = 0; index < p_argc; index++) {
+						pending_lambda_args[captures_count + index] = p_arguments[index];
+					}
+					call_args = pending_lambda_args;
+					call_argc = captures_count + p_argc;
+				}
+			} else if (custom_kind == CallableCustom::CUSTOM_KIND_GDSCRIPT_SELF_LAMBDA) {
+				const GDScriptLambdaSelfCallable *lambda_callable = static_cast<const GDScriptLambdaSelfCallable *>(custom);
+				target_function = lambda_callable->get_function();
+				if (unlikely(target_function == nullptr)) {
+					return nullptr;
+				}
+				Object *self_object = lambda_callable->get_self_object();
+				if (unlikely(!lambda_callable->is_self_ref_counted() && ObjectDB::get_instance(lambda_callable->get_self_object_id()) == nullptr)) {
+					return nullptr;
+				}
+				ScriptInstance *script_instance = self_object->get_script_instance();
+				if (unlikely(script_instance == nullptr || script_instance->get_language() != GDScriptLanguage::get_singleton() || script_instance->is_placeholder())) {
+					return nullptr;
+				}
+				const Vector<Variant> &captures = lambda_callable->get_captures();
+				const int captures_count = captures.size();
+				if (captures_count > 0) {
+					if (unlikely(lambda_callable->has_object_captures() || captures_count + p_argc > VM_INLINE_LAMBDA_MAX_ARGS)) {
+						return nullptr;
+					}
+					const Variant *captures_ptr = captures.ptr();
+					for (int index = 0; index < captures_count; index++) {
+						pending_lambda_args[index] = &captures_ptr[index];
+					}
+					for (int index = 0; index < p_argc; index++) {
+						pending_lambda_args[captures_count + index] = p_arguments[index];
+					}
+					call_args = pending_lambda_args;
+					call_argc = captures_count + p_argc;
+				}
+				target_instance = static_cast<GDScriptInstance *>(script_instance);
+			} else {
+				return nullptr;
+			}
+		} else if (callable->is_standard()) {
+			Object *target_object = ObjectDB::get_instance(callable->get_object_id_standard_unchecked());
+			if (unlikely(target_object == nullptr)) {
+				return nullptr;
+			}
+			ScriptInstance *script_instance = target_object->get_script_instance();
+			if (unlikely(script_instance == nullptr || script_instance->get_language() != GDScriptLanguage::get_singleton() || script_instance->is_placeholder())) {
+				return nullptr;
+			}
+			GDScriptInstance *gds_instance = static_cast<GDScriptInstance *>(script_instance);
+			const StringName &method_name = callable->get_method_standard_unchecked();
+			const GDScript *cursor = gds_instance->get_script_ptr();
+			while (cursor != nullptr) {
+				if (likely(cursor->is_valid())) {
+					HashMap<StringName, GDScriptFunction *>::ConstIterator entry = cursor->get_member_functions().find(method_name);
+					if (entry) {
+						target_function = entry->value;
+						target_instance = gds_instance;
+						break;
+					}
+				}
+				cursor = cursor->get_base_script_ptr();
+			}
+			if (target_function == nullptr) {
+				return nullptr;
+			}
+		} else {
+			return nullptr;
+		}
+
+		const uint32_t callee_frame_bytes = likely(target_function->_frame_bytes != 0)
+				? target_function->_frame_bytes
+				: static_cast<uint32_t>(sizeof(Variant) * static_cast<size_t>(target_function->_stack_size) + sizeof(Variant *) * static_cast<size_t>(target_function->_instruction_args_size));
+		if (unlikely(
+					target_function->_code_ptr == nullptr ||
+					target_function->is_vararg() ||
+					call_argc > target_function->_argument_count ||
+					call_argc < target_function->_argument_count - target_function->_default_arg_count ||
+					call_depth >= GDScriptFunction::MAX_CALL_DEPTH ||
+					inline_frame_top >= static_cast<uint32_t>(GDScriptFunction::MAX_CALL_DEPTH) ||
+					callee_frame_bytes > VM_SINGLE_FRAME_ALLOCA_LIMIT ||
+					alloca_bytes_in_use > VM_TOTAL_ALLOCA_BUDGET ||
+					callee_frame_bytes > VM_TOTAL_ALLOCA_BUDGET - alloca_bytes_in_use)) {
+			return nullptr;
+		}
+
+		if (likely(target_function->_all_args_fast_check)) {
+			for (int arg_index = 0; arg_index < call_argc; arg_index++) {
+				const uint8_t expected_type = target_function->_fast_arg_types[arg_index];
+				if (unlikely(expected_type != Variant::NIL && static_cast<uint8_t>(call_args[arg_index]->get_type()) != expected_type)) {
+					return nullptr;
+				}
+			}
+		} else {
+			const GDScriptDataType *arg_types_ptr = target_function->argument_types.ptr();
+			for (int arg_index = 0; arg_index < call_argc; arg_index++) {
+				if (unlikely(!arg_types_ptr[arg_index].is_type_exact_fast(*call_args[arg_index]))) {
+					return nullptr;
+				}
+			}
+		}
+
+		if (unlikely(ensure_buffer() == nullptr || ensure_frames() == nullptr)) {
+			return nullptr;
+		}
+
+		prepared_callable_instance = target_instance;
+		prepared_callable_args = call_args;
+		prepared_callable_argc = call_argc;
+		return target_function;
+	}
+
+	_NO_INLINE_ int prepare_inline_script_new(
+			GDScript *p_script,
+			Variant *const *p_arguments,
+			int p_argc,
+			Callable::CallError &r_error,
+			GDScriptFunction *&r_init_function,
+			GDScriptInstance *&r_instance) {
+		if (unlikely(!p_script->valid)) {
+			return SCRIPT_NEW_FALLBACK;
+		}
+		p_script->ensure_instantiation_cache();
+		GDScriptFunction *init_function = p_script->get_cached_initializer();
+		if (init_function == nullptr) {
+			if (unlikely(p_argc != 0)) {
+				return SCRIPT_NEW_FALLBACK;
+			}
+			GDScriptInstance *new_instance = p_script->_create_instance_without_init(r_error);
+			if (unlikely(new_instance == nullptr)) {
+				return SCRIPT_NEW_FAILED;
+			}
+			r_instance = new_instance;
+			return SCRIPT_NEW_DONE_NO_INIT;
+		}
+
+		const uint32_t callee_frame_bytes = likely(init_function->_frame_bytes != 0)
+				? init_function->_frame_bytes
+				: static_cast<uint32_t>(sizeof(Variant) * static_cast<size_t>(init_function->_stack_size) + sizeof(Variant *) * static_cast<size_t>(init_function->_instruction_args_size));
+		if (unlikely(
+					init_function->_code_ptr == nullptr ||
+					init_function->is_vararg() ||
+					p_argc > init_function->_argument_count ||
+					p_argc < init_function->_argument_count - init_function->_default_arg_count ||
+					call_depth >= GDScriptFunction::MAX_CALL_DEPTH ||
+					inline_frame_top >= static_cast<uint32_t>(GDScriptFunction::MAX_CALL_DEPTH) ||
+					callee_frame_bytes > VM_SINGLE_FRAME_ALLOCA_LIMIT ||
+					alloca_bytes_in_use > VM_TOTAL_ALLOCA_BUDGET ||
+					callee_frame_bytes > VM_TOTAL_ALLOCA_BUDGET - alloca_bytes_in_use)) {
+			return SCRIPT_NEW_FALLBACK;
+		}
+
+		if (likely(init_function->_all_args_fast_check)) {
+			for (int arg_index = 0; arg_index < p_argc; arg_index++) {
+				const uint8_t expected_type = init_function->_fast_arg_types[arg_index];
+				if (unlikely(expected_type != Variant::NIL && static_cast<uint8_t>(p_arguments[arg_index]->get_type()) != expected_type)) {
+					return SCRIPT_NEW_FALLBACK;
+				}
+			}
+		} else {
+			const GDScriptDataType *arg_types_ptr = init_function->argument_types.ptr();
+			for (int arg_index = 0; arg_index < p_argc; arg_index++) {
+				if (unlikely(!arg_types_ptr[arg_index].is_type_exact_fast(*p_arguments[arg_index]))) {
+					return SCRIPT_NEW_FALLBACK;
+				}
+			}
+		}
+
+		if (unlikely(ensure_buffer() == nullptr || ensure_frames() == nullptr)) {
+			return SCRIPT_NEW_FALLBACK;
+		}
+
+		GDScriptInstance *new_instance = p_script->_create_instance_without_init(r_error);
+		if (unlikely(new_instance == nullptr)) {
+			return SCRIPT_NEW_FAILED;
+		}
+
+		r_init_function = init_function;
+		r_instance = new_instance;
+		return SCRIPT_NEW_PUSH_INIT;
 	}
 
 	~VMThreadState() {
@@ -792,6 +1026,40 @@ static _NO_INLINE_ void _get_keyed_fallback(const Variant *p_source, const Varia
 }
 #endif
 
+static _NO_INLINE_ void _create_lambda_into(Variant *p_destination, GDScript *p_script, GDScriptFunction *p_lambda, Variant *const *p_arguments, int p_captures_count) {
+	Vector<Variant> captures;
+	if (p_captures_count > 0) {
+		captures.resize(p_captures_count);
+		Variant *write = captures.ptrw();
+		for (int index = 0; index < p_captures_count; index++) {
+			VariantInternal::assign_fast(&write[index], p_arguments[index]);
+		}
+	}
+	GDScriptLambdaCallable *callable = memnew(GDScriptLambdaCallable(Ref<GDScript>(p_script), p_lambda, std::move(captures)));
+	Variant result = Callable(callable);
+	VariantInternal::assign_move_fast(p_destination, result);
+}
+
+static _NO_INLINE_ void _create_self_lambda_into(Variant *p_destination, GDScriptInstance *p_instance, GDScriptFunction *p_lambda, Variant *const *p_arguments, int p_captures_count) {
+	Vector<Variant> captures;
+	if (p_captures_count > 0) {
+		captures.resize(p_captures_count);
+		Variant *write = captures.ptrw();
+		for (int index = 0; index < p_captures_count; index++) {
+			VariantInternal::assign_fast(&write[index], p_arguments[index]);
+		}
+	}
+	GDScriptLambdaSelfCallable *callable = nullptr;
+	Object *owner = p_instance->get_owner();
+	if (owner->is_ref_counted()) {
+		callable = memnew(GDScriptLambdaSelfCallable(Ref<RefCounted>(static_cast<RefCounted *>(owner)), p_lambda, std::move(captures)));
+	} else {
+		callable = memnew(GDScriptLambdaSelfCallable(owner, p_lambda, std::move(captures)));
+	}
+	Variant result = Callable(callable);
+	VariantInternal::assign_move_fast(p_destination, result);
+}
+
 Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_args, int p_argcount, Callable::CallError &r_err, CallState *p_state) {
 	return _call_vm(this, p_instance, p_args, p_argcount, r_err, p_state);
 }
@@ -989,11 +1257,11 @@ Variant GDScriptFunction::_call_vm(GDScriptFunction *func, GDScriptInstance *p_i
 		}
 	}
 
-	bool active_owns_self_ref = false;
+	uint8_t active_self_flags = VM_SELF_FLAG_NONE;
 	if (p_instance) {
 		if (p_instance->owner->is_ref_counted()) {
 			memnew_placement(&stack[ADDR_STACK_SELF], Variant(p_instance->owner));
-			active_owns_self_ref = true;
+			active_self_flags = VM_SELF_FLAG_OWNED_REF;
 		} else {
 			memnew_placement(&stack[ADDR_STACK_SELF], Variant);
 			VariantInternal::object_assign_without_ref_unsafe(&stack[ADDR_STACK_SELF], p_instance->owner);
@@ -1031,7 +1299,8 @@ Variant GDScriptFunction::_call_vm(GDScriptFunction *func, GDScriptInstance *p_i
 		Variant *pending_ret_slot = nullptr;
 		int pending_argc = 0;
 		int pending_return_ip = 0;
-		bool active_owns_self_ref = false;
+		uint8_t active_self_flags = VM_SELF_FLAG_NONE;
+		uint8_t pending_self_flags = VM_SELF_FLAG_NONE;
 		bool track_call_stack = false;
 #ifdef DEBUG_ENABLED
 		bool pending_call_ret = false;
@@ -1041,7 +1310,7 @@ Variant GDScriptFunction::_call_vm(GDScriptFunction *func, GDScriptInstance *p_i
 	cold_state.entry_inline_frame_top = vm_state.inline_frame_top;
 	cold_state.active_ret_slot = &retvalue;
 	cold_state.active_call_level = &call_level;
-	cold_state.active_owns_self_ref = active_owns_self_ref;
+	cold_state.active_self_flags = active_self_flags;
 	cold_state.track_call_stack = track_call_stack;
 	int *code_ptr = func->_code_ptr;
 
@@ -2986,6 +3255,26 @@ Variant GDScriptFunction::_call_vm(GDScriptFunction *func, GDScriptInstance *p_i
 						native_target_obj = nullptr;
 #endif
 					}
+				} else if (base->get_type() == Variant::CALLABLE && *methodname == CoreStringName(call)
+#ifdef DEBUG_ENABLED
+						&& !call_async &&
+						!GDScriptLanguage::get_singleton()->profiling
+#endif
+				) {
+					GDScriptFunction *callable_func = vm_state.prepare_inline_callable_call(base, script, stack, func->_stack_size, const_cast<const Variant *const *>(argptrs), argc);
+					if (likely(callable_func != nullptr)) {
+						cold_state.pending_callee = callable_func;
+						cold_state.pending_instance = vm_state.prepared_callable_instance;
+						cold_state.pending_args = vm_state.prepared_callable_args;
+						cold_state.pending_argc = vm_state.prepared_callable_argc;
+						cold_state.pending_ret_slot = call_ret ? instruction_args[argc + 1] : nullptr;
+						cold_state.pending_return_ip = ip + 3;
+#ifdef DEBUG_ENABLED
+						cold_state.pending_call_ret = call_ret;
+						cold_state.pending_call_async = call_async;
+#endif
+						goto INLINE_FRAME_PUSH;
+					}
 				}
 
 				if (likely(cached_gdscript_func != nullptr)) {
@@ -3202,14 +3491,49 @@ Variant GDScriptFunction::_call_vm(GDScriptFunction *func, GDScriptInstance *p_i
 				}
 #endif
 
-				Variant temp_ret;
 				Callable::CallError err;
 				if (call_ret) {
 					GET_INSTRUCTION_ARG(ret, argc + 1);
-					temp_ret = method->call(base_obj, (const Variant **)argptrs, argc, err);
-					*ret = temp_ret;
+					bool handled_new = false;
+					if (unlikely(method == GDScript::get_new_method_bind() && base_obj->is_class_ptr(GDScript::get_class_ptr_static()))
+#ifdef DEBUG_ENABLED
+							&& !GDScriptLanguage::get_singleton()->profiling
+#endif
+					) {
+						GDScriptFunction *init_func = nullptr;
+						GDScriptInstance *new_instance = nullptr;
+						const int new_result = vm_state.prepare_inline_script_new(static_cast<GDScript *>(base_obj), argptrs, argc, err, init_func, new_instance);
+						if (likely(new_result == VMThreadState::SCRIPT_NEW_PUSH_INIT)) {
+							cold_state.pending_callee = init_func;
+							cold_state.pending_instance = new_instance;
+							cold_state.pending_args = const_cast<const Variant *const *>(argptrs);
+							cold_state.pending_argc = argc;
+							cold_state.pending_ret_slot = ret;
+							cold_state.pending_self_flags = VM_SELF_FLAG_MOVE_TO_RET;
+							cold_state.pending_return_ip = ip + 3;
+#ifdef DEBUG_ENABLED
+							cold_state.pending_call_ret = false;
+							cold_state.pending_call_async = false;
+#endif
+							goto INLINE_FRAME_PUSH;
+						}
+						if (likely(new_result == VMThreadState::SCRIPT_NEW_DONE_NO_INIT)) {
+							VariantInternal::clear(ret);
+							VariantInternal::object_assign_without_ref_unsafe(ret, new_instance->owner);
+							ip += 3;
+							DISPATCH_OPCODE;
+						}
+						if (unlikely(new_result == VMThreadState::SCRIPT_NEW_FAILED)) {
+							VariantInternal::clear(ret);
+							handled_new = true;
+						}
+					}
+					if (!handled_new) {
+						Variant temp_ret = method->call(base_obj, (const Variant **)argptrs, argc, err);
+						VariantInternal::assign_move_fast(ret, temp_ret);
+					}
 				} else {
-					temp_ret = method->call(base_obj, (const Variant **)argptrs, argc, err);
+					method->call(base_obj, (const Variant **)argptrs, argc, err);
 				}
 
 #ifdef DEBUG_ENABLED
@@ -3242,7 +3566,8 @@ Variant GDScriptFunction::_call_vm(GDScriptFunction *func, GDScriptInstance *p_i
 							}
 						}
 					}
-					err_text = func->_get_call_error("function '" + methodstr + "' in base '" + basestr + "'", (const Variant **)argptrs, argc, temp_ret, err);
+					const Variant &error_ret = call_ret ? *instruction_args[argc + 1] : Variant();
+					err_text = func->_get_call_error("function '" + methodstr + "' in base '" + basestr + "'", (const Variant **)argptrs, argc, error_ret, err);
 					OPCODE_BREAK;
 				}
 #endif
@@ -3833,17 +4158,8 @@ Variant GDScriptFunction::_call_vm(GDScriptFunction *func, GDScriptInstance *p_i
 				GD_ERR_BREAK(lambda_index < 0 || lambda_index >= func->_lambdas_count);
 				GDScriptFunction *lambda = func->_lambdas_ptr[lambda_index];
 
-				Vector<Variant> captures;
-				captures.resize(captures_count);
-				for (int i = 0; i < captures_count; i++) {
-					GET_INSTRUCTION_ARG(arg, i);
-					captures.write[i] = *arg;
-				}
-
-				GDScriptLambdaCallable *callable = memnew(GDScriptLambdaCallable(Ref<GDScript>(script), lambda, captures));
-
 				GET_INSTRUCTION_ARG(result, captures_count);
-				*result = Callable(callable);
+				_create_lambda_into(result, script, lambda, instruction_args, captures_count);
 
 				ip += 3;
 			}
@@ -3864,22 +4180,8 @@ Variant GDScriptFunction::_call_vm(GDScriptFunction *func, GDScriptInstance *p_i
 				GD_ERR_BREAK(lambda_index < 0 || lambda_index >= func->_lambdas_count);
 				GDScriptFunction *lambda = func->_lambdas_ptr[lambda_index];
 
-				Vector<Variant> captures;
-				captures.resize(captures_count);
-				for (int i = 0; i < captures_count; i++) {
-					GET_INSTRUCTION_ARG(arg, i);
-					captures.write[i] = *arg;
-				}
-
-				GDScriptLambdaSelfCallable *callable;
-				if (Object::cast_to<RefCounted>(p_instance->owner)) {
-					callable = memnew(GDScriptLambdaSelfCallable(Ref<RefCounted>(Object::cast_to<RefCounted>(p_instance->owner)), lambda, captures));
-				} else {
-					callable = memnew(GDScriptLambdaSelfCallable(p_instance->owner, lambda, captures));
-				}
-
 				GET_INSTRUCTION_ARG(result, captures_count);
-				*result = Callable(callable);
+				_create_self_lambda_into(result, p_instance, lambda, instruction_args, captures_count);
 
 				ip += 3;
 			}
@@ -5234,14 +5536,25 @@ Variant GDScriptFunction::_call_vm(GDScriptFunction *func, GDScriptInstance *p_i
 			}
 		}
 
-		const bool callee_owns_self_ref = (target_instance != p_instance) && target_instance->owner->is_ref_counted();
-		if (likely(!callee_owns_self_ref)) {
-			memnew_placement(&callee_stack[ADDR_STACK_SELF], Variant);
-			VariantInternal::object_assign_without_ref_unsafe(&callee_stack[ADDR_STACK_SELF], target_instance->owner);
+		uint8_t callee_self_flags = cold_state.pending_self_flags;
+		cold_state.pending_self_flags = VM_SELF_FLAG_NONE;
+		GDScript *callee_script = nullptr;
+		if (likely(target_instance != nullptr)) {
+			if (unlikely(callee_self_flags == VM_SELF_FLAG_MOVE_TO_RET)) {
+				memnew_placement(&callee_stack[ADDR_STACK_SELF], Variant);
+				VariantInternal::object_assign_without_ref_unsafe(&callee_stack[ADDR_STACK_SELF], target_instance->owner);
+			} else if (likely(target_instance == p_instance || !target_instance->owner->is_ref_counted())) {
+				memnew_placement(&callee_stack[ADDR_STACK_SELF], Variant);
+				VariantInternal::object_assign_without_ref_unsafe(&callee_stack[ADDR_STACK_SELF], target_instance->owner);
+			} else {
+				callee_self_flags = VM_SELF_FLAG_OWNED_REF;
+				memnew_placement(&callee_stack[ADDR_STACK_SELF], Variant(target_instance->owner));
+			}
+			callee_script = target_instance->script.ptr();
 		} else {
-			memnew_placement(&callee_stack[ADDR_STACK_SELF], Variant(target_instance->owner));
+			memnew_placement(&callee_stack[ADDR_STACK_SELF], Variant);
+			callee_script = callee->_script;
 		}
-		GDScript *callee_script = target_instance->script.ptr();
 		memnew_placement(&callee_stack[ADDR_STACK_CLASS], Variant);
 		VariantInternal::object_assign_without_ref_unsafe(&callee_stack[ADDR_STACK_CLASS], callee_script);
 		memnew_placement(&callee_stack[ADDR_STACK_NIL], Variant);
@@ -5260,7 +5573,7 @@ Variant GDScriptFunction::_call_vm(GDScriptFunction *func, GDScriptInstance *p_i
 		saved.line = line;
 		saved.alloca_size = alloca_size;
 		saved.callee_frame_bytes = callee_frame_bytes;
-		saved.caller_owns_self_ref = cold_state.active_owns_self_ref;
+		saved.caller_self_flags = cold_state.active_self_flags;
 #ifdef DEBUG_ENABLED
 		saved.call_ret = cold_state.pending_call_ret;
 		saved.call_async = cold_state.pending_call_async;
@@ -5274,14 +5587,14 @@ Variant GDScriptFunction::_call_vm(GDScriptFunction *func, GDScriptInstance *p_i
 		code_ptr = func->_code_ptr;
 		variant_addresses[0] = stack;
 		variant_addresses[1] = func->_constants_ptr;
-		variant_addresses[2] = p_instance->members.ptrw();
+		variant_addresses[2] = p_instance ? p_instance->members.ptrw() : nullptr;
 #ifdef DEBUG_ENABLED
 		variant_address_limits[0] = func->_stack_size;
 		variant_address_limits[1] = func->_constant_count;
-		variant_address_limits[2] = static_cast<int>(p_instance->members.size());
+		variant_address_limits[2] = p_instance ? static_cast<int>(p_instance->members.size()) : 0;
 #endif
 		cold_state.active_ret_slot = cold_state.pending_ret_slot;
-		cold_state.active_owns_self_ref = callee_owns_self_ref;
+		cold_state.active_self_flags = callee_self_flags;
 		defarg = func->_argument_count - call_argc;
 		alloca_size = callee_frame_bytes;
 		line = func->_initial_line;
@@ -5300,9 +5613,6 @@ Variant GDScriptFunction::_call_vm(GDScriptFunction *func, GDScriptInstance *p_i
 		if (unlikely(cold_state.track_call_stack)) {
 			GDScriptLanguage::get_singleton()->exit_function();
 		}
-		if (unlikely(cold_state.active_owns_self_ref)) {
-			stack[ADDR_STACK_SELF].~Variant();
-		}
 		if (likely(func->_has_deinit_slot_mask)) {
 			uint64_t deinit_mask = func->_deinit_slot_mask;
 			while (deinit_mask != 0) {
@@ -5315,6 +5625,13 @@ Variant GDScriptFunction::_call_vm(GDScriptFunction *func, GDScriptInstance *p_i
 				stack[i].~Variant();
 			}
 		}
+		if (unlikely(cold_state.active_self_flags != VM_SELF_FLAG_NONE)) {
+			if (likely(cold_state.active_self_flags == VM_SELF_FLAG_OWNED_REF)) {
+				stack[ADDR_STACK_SELF].~Variant();
+			} else {
+				VariantInternal::assign_move_fast(cold_state.active_ret_slot, stack[ADDR_STACK_SELF]);
+			}
+		}
 		vm_state.call_depth--;
 		const VMInlineFrame &saved = vm_state.frames[--vm_state.inline_frame_top];
 		vm_state.alloca_bytes_in_use -= saved.callee_frame_bytes;
@@ -5325,7 +5642,7 @@ Variant GDScriptFunction::_call_vm(GDScriptFunction *func, GDScriptInstance *p_i
 		instruction_args = saved.instruction_args;
 		code_ptr = saved.code_ptr;
 		cold_state.active_ret_slot = saved.ret_slot;
-		cold_state.active_owns_self_ref = saved.caller_owns_self_ref;
+		cold_state.active_self_flags = saved.caller_self_flags;
 		defarg = saved.defarg;
 		alloca_size = saved.alloca_size;
 		line = saved.line;
@@ -5393,9 +5710,6 @@ Variant GDScriptFunction::_call_vm(GDScriptFunction *func, GDScriptInstance *p_i
 			if (unlikely(cold_state.track_call_stack)) {
 				GDScriptLanguage::get_singleton()->exit_function();
 			}
-			if (cold_state.active_owns_self_ref) {
-				stack[ADDR_STACK_SELF].~Variant();
-			}
 			if (likely(func->_has_deinit_slot_mask)) {
 				uint64_t deinit_mask = func->_deinit_slot_mask;
 				while (deinit_mask != 0) {
@@ -5408,6 +5722,13 @@ Variant GDScriptFunction::_call_vm(GDScriptFunction *func, GDScriptInstance *p_i
 					stack[i].~Variant();
 				}
 			}
+			if (unlikely(cold_state.active_self_flags != VM_SELF_FLAG_NONE)) {
+				if (likely(cold_state.active_self_flags == VM_SELF_FLAG_OWNED_REF)) {
+					stack[ADDR_STACK_SELF].~Variant();
+				} else {
+					VariantInternal::assign_move_fast(cold_state.active_ret_slot, stack[ADDR_STACK_SELF]);
+				}
+			}
 			vm_state.call_depth--;
 			const VMInlineFrame &saved = vm_state.frames[--vm_state.inline_frame_top];
 			vm_state.alloca_bytes_in_use -= saved.callee_frame_bytes;
@@ -5418,7 +5739,7 @@ Variant GDScriptFunction::_call_vm(GDScriptFunction *func, GDScriptInstance *p_i
 			instruction_args = saved.instruction_args;
 			code_ptr = saved.code_ptr;
 			cold_state.active_ret_slot = saved.ret_slot;
-			cold_state.active_owns_self_ref = saved.caller_owns_self_ref;
+			cold_state.active_self_flags = saved.caller_self_flags;
 			defarg = saved.defarg;
 			alloca_size = saved.alloca_size;
 			line = saved.line;
@@ -5478,7 +5799,7 @@ Variant GDScriptFunction::_call_vm(GDScriptFunction *func, GDScriptInstance *p_i
 
 	// We deliberately avoid calling the destructor for `ADDR_STACK_CLASS`, since we initialized it
 	// without incrementing any reference count that it might have, and `ADDR_STACK_NIL` is always NIL.
-	if (cold_state.active_owns_self_ref) {
+	if (cold_state.active_self_flags == VM_SELF_FLAG_OWNED_REF) {
 		stack[ADDR_STACK_SELF].~Variant();
 	}
 

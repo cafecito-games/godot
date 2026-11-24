@@ -293,9 +293,20 @@ public:
 		if (likely(!Variant::needs_deinit[p_src->type])) {
 			memnew_placement(p_uninitialized_dst, Variant);
 			p_uninitialized_dst->type = p_src->type;
-			p_uninitialized_dst->_data = p_src->_data;
+			if (likely(p_src->type != Variant::NIL)) {
+				p_uninitialized_dst->_data = p_src->_data;
+			}
 		} else {
 			memnew_placement(p_uninitialized_dst, Variant(*p_src));
+		}
+	}
+
+	// Copy-construct a Variant from a source already verified to have !Variant::needs_deinit[type].
+	_FORCE_INLINE_ static void construct_copy_trivial_unsafe(Variant *p_uninitialized_destination, const Variant *p_source) {
+		memnew_placement(p_uninitialized_destination, Variant);
+		p_uninitialized_destination->type = p_source->type;
+		if (likely(p_source->type != Variant::NIL)) {
+			p_uninitialized_destination->_data = p_source->_data;
 		}
 	}
 

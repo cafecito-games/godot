@@ -101,16 +101,23 @@ void GDScriptLambdaCallable::call(const Variant **p_arguments, int p_argcount, V
 	if (captures_amount > 0) {
 		const int total_argcount = p_argcount + captures_amount;
 		const Variant **args = (const Variant **)alloca(sizeof(Variant *) * total_argcount);
-		for (int i = 0; i < captures_amount; i++) {
-			args[i] = &captures[i];
-			if (captures[i].get_type() == Variant::OBJECT) {
-				bool was_freed = false;
-				captures[i].get_validated_object_with_check(was_freed);
-				if (was_freed) {
-					ERR_PRINT(vformat(R"(Lambda capture at index %d was freed. Passed "null" instead.)", i));
-					static Variant nil;
-					args[i] = &nil;
+		const Variant *captures_ptr = captures.ptr();
+		if (unlikely(has_object_capture)) {
+			for (int i = 0; i < captures_amount; i++) {
+				args[i] = &captures_ptr[i];
+				if (captures_ptr[i].get_type() == Variant::OBJECT) {
+					bool was_freed = false;
+					captures_ptr[i].get_validated_object_with_check(was_freed);
+					if (was_freed) {
+						ERR_PRINT(vformat(R"(Lambda capture at index %d was freed. Passed "null" instead.)", i));
+						static Variant nil;
+						args[i] = &nil;
+					}
 				}
+			}
+		} else {
+			for (int i = 0; i < captures_amount; i++) {
+				args[i] = &captures_ptr[i];
 			}
 		}
 		for (int i = 0; i < p_argcount; i++) {
@@ -150,12 +157,37 @@ void GDScriptLambdaCallable::call(const Variant **p_arguments, int p_argcount, V
 	}
 }
 
+static bool _captures_contain_object(const Vector<Variant> &p_captures) {
+	const int capture_count = p_captures.size();
+	const Variant *captures_ptr = p_captures.ptr();
+	for (int index = 0; index < capture_count; index++) {
+		if (captures_ptr[index].get_type() == Variant::OBJECT) {
+			return true;
+		}
+	}
+	return false;
+}
+
 GDScriptLambdaCallable::GDScriptLambdaCallable(Ref<GDScript> p_script, GDScriptFunction *p_function, const Vector<Variant> &p_captures) :
 		function(p_function) {
+	_set_custom_kind(CUSTOM_KIND_GDSCRIPT_LAMBDA);
 	ERR_FAIL_COND(p_script.is_null());
 	ERR_FAIL_NULL(p_function);
-	script = p_script;
+	script = std::move(p_script);
 	captures = p_captures;
+	has_object_capture = _captures_contain_object(captures);
+
+	h = (uint32_t)hash_murmur3_one_64((uint64_t)this);
+}
+
+GDScriptLambdaCallable::GDScriptLambdaCallable(Ref<GDScript> p_script, GDScriptFunction *p_function, Vector<Variant> &&p_captures) :
+		function(p_function) {
+	_set_custom_kind(CUSTOM_KIND_GDSCRIPT_LAMBDA);
+	ERR_FAIL_COND(p_script.is_null());
+	ERR_FAIL_NULL(p_function);
+	script = std::move(p_script);
+	captures = std::move(p_captures);
+	has_object_capture = _captures_contain_object(captures);
 
 	h = (uint32_t)hash_murmur3_one_64((uint64_t)this);
 }
@@ -171,7 +203,7 @@ bool GDScriptLambdaSelfCallable::compare_less(const CallableCustom *p_a, const C
 }
 
 bool GDScriptLambdaSelfCallable::is_valid() const {
-	return CallableCustom::is_valid() && function != nullptr;
+	return function != nullptr && (reference.is_valid() || ObjectDB::get_instance(object_id) != nullptr);
 }
 
 uint32_t GDScriptLambdaSelfCallable::hash() const {
@@ -197,7 +229,7 @@ CallableCustom::CompareLessFunc GDScriptLambdaSelfCallable::get_compare_less_fun
 }
 
 ObjectID GDScriptLambdaSelfCallable::get_object() const {
-	return object->get_instance_id();
+	return object_id;
 }
 
 StringName GDScriptLambdaSelfCallable::get_method() const {
@@ -233,16 +265,23 @@ void GDScriptLambdaSelfCallable::call(const Variant **p_arguments, int p_argcoun
 	if (captures_amount > 0) {
 		const int total_argcount = p_argcount + captures_amount;
 		const Variant **args = (const Variant **)alloca(sizeof(Variant *) * total_argcount);
-		for (int i = 0; i < captures_amount; i++) {
-			args[i] = &captures[i];
-			if (captures[i].get_type() == Variant::OBJECT) {
-				bool was_freed = false;
-				captures[i].get_validated_object_with_check(was_freed);
-				if (was_freed) {
-					ERR_PRINT(vformat(R"(Lambda capture at index %d was freed. Passed "null" instead.)", i));
-					static Variant nil;
-					args[i] = &nil;
+		const Variant *captures_ptr = captures.ptr();
+		if (unlikely(has_object_capture)) {
+			for (int i = 0; i < captures_amount; i++) {
+				args[i] = &captures_ptr[i];
+				if (captures_ptr[i].get_type() == Variant::OBJECT) {
+					bool was_freed = false;
+					captures_ptr[i].get_validated_object_with_check(was_freed);
+					if (was_freed) {
+						ERR_PRINT(vformat(R"(Lambda capture at index %d was freed. Passed "null" instead.)", i));
+						static Variant nil;
+						args[i] = &nil;
+					}
 				}
+			}
+		} else {
+			for (int i = 0; i < captures_amount; i++) {
+				args[i] = &captures_ptr[i];
 			}
 		}
 		for (int i = 0; i < p_argcount; i++) {
@@ -284,21 +323,54 @@ void GDScriptLambdaSelfCallable::call(const Variant **p_arguments, int p_argcoun
 
 GDScriptLambdaSelfCallable::GDScriptLambdaSelfCallable(Ref<RefCounted> p_self, GDScriptFunction *p_function, const Vector<Variant> &p_captures) :
 		function(p_function) {
+	_set_custom_kind(CUSTOM_KIND_GDSCRIPT_SELF_LAMBDA);
 	ERR_FAIL_COND(p_self.is_null());
 	ERR_FAIL_NULL(p_function);
-	reference = p_self;
-	object = p_self.ptr();
+	reference = std::move(p_self);
+	object = reference.ptr();
+	object_id = object->get_instance_id();
 	captures = p_captures;
+	has_object_capture = _captures_contain_object(captures);
+
+	h = (uint32_t)hash_murmur3_one_64((uint64_t)this);
+}
+
+GDScriptLambdaSelfCallable::GDScriptLambdaSelfCallable(Ref<RefCounted> p_self, GDScriptFunction *p_function, Vector<Variant> &&p_captures) :
+		function(p_function) {
+	_set_custom_kind(CUSTOM_KIND_GDSCRIPT_SELF_LAMBDA);
+	ERR_FAIL_COND(p_self.is_null());
+	ERR_FAIL_NULL(p_function);
+	reference = std::move(p_self);
+	object = reference.ptr();
+	object_id = object->get_instance_id();
+	captures = std::move(p_captures);
+	has_object_capture = _captures_contain_object(captures);
 
 	h = (uint32_t)hash_murmur3_one_64((uint64_t)this);
 }
 
 GDScriptLambdaSelfCallable::GDScriptLambdaSelfCallable(Object *p_self, GDScriptFunction *p_function, const Vector<Variant> &p_captures) :
 		function(p_function) {
+	_set_custom_kind(CUSTOM_KIND_GDSCRIPT_SELF_LAMBDA);
 	ERR_FAIL_NULL(p_self);
 	ERR_FAIL_NULL(p_function);
 	object = p_self;
+	object_id = object->get_instance_id();
 	captures = p_captures;
+	has_object_capture = _captures_contain_object(captures);
+
+	h = (uint32_t)hash_murmur3_one_64((uint64_t)this);
+}
+
+GDScriptLambdaSelfCallable::GDScriptLambdaSelfCallable(Object *p_self, GDScriptFunction *p_function, Vector<Variant> &&p_captures) :
+		function(p_function) {
+	_set_custom_kind(CUSTOM_KIND_GDSCRIPT_SELF_LAMBDA);
+	ERR_FAIL_NULL(p_self);
+	ERR_FAIL_NULL(p_function);
+	object = p_self;
+	object_id = object->get_instance_id();
+	captures = std::move(p_captures);
+	has_object_capture = _captures_contain_object(captures);
 
 	h = (uint32_t)hash_murmur3_one_64((uint64_t)this);
 }

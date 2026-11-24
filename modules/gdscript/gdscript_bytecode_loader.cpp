@@ -356,6 +356,7 @@ class GDScriptBytecodeLoader::LoadContext {
 			return;
 		}
 		p_script->valid = false;
+		p_script->invalidate_instantiation_cache();
 		p_script->members.clear();
 		p_script->member_indices.clear();
 		p_script->static_variables.clear();

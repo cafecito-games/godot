@@ -37,6 +37,7 @@
 #include "core/doc_data.h"
 #include "core/object/script_language.h"
 #include "core/templates/rb_set.h"
+#include "core/variant/variant_internal.h"
 
 class GDScriptNativeClass : public RefCounted {
 	GDCLASS(GDScriptNativeClass, RefCounted);
@@ -180,6 +181,23 @@ private:
 	GDScriptFunction *implicit_ready = nullptr; // `@implicit_ready()` special function.
 	GDScriptFunction *static_initializer = nullptr; // `@static_initializer()` special function.
 
+	struct CachedNotification {
+		GDScript *script = nullptr;
+		GDScriptFunction *function = nullptr;
+	};
+
+	static inline MethodBind *_new_method_bind = nullptr;
+	std::atomic<uint64_t> _instantiation_cache_epoch{ 0 };
+	GDScript *_cached_root_script = nullptr;
+	GDScriptFunction *_cached_initializer = nullptr;
+	LocalVector<CachedNotification> _cached_notification_functions;
+	Vector<Variant> _member_init_template;
+	bool _cached_native_is_refcounted = false;
+	bool _has_member_init_template = false;
+	bool _member_init_all_trivial = false;
+
+	void _prepare_instantiation_cache();
+
 	Error _static_init();
 	void _static_default_init(); // Initialize static variables with default values based on their types.
 
@@ -287,6 +305,7 @@ public:
 	bool is_tool() const override { return tool; }
 	bool is_abstract() const override { return _is_abstract; }
 	Ref<GDScript> get_base() const;
+	_FORCE_INLINE_ GDScript *get_base_script_ptr() const { return base.ptr(); }
 
 	const HashMap<StringName, MemberInfo> &debug_get_member_indices() const { return member_indices; }
 	const HashMap<StringName, GDScriptFunction *> &debug_get_member_functions() const; //this is debug only
@@ -294,6 +313,26 @@ public:
 	StringName debug_get_static_var_by_index(int p_idx) const;
 
 	Variant _new(const Variant **p_args, int p_argcount, Callable::CallError &r_error);
+	static _FORCE_INLINE_ MethodBind *get_new_method_bind() { return _new_method_bind; }
+	_FORCE_INLINE_ void ensure_instantiation_cache() {
+		const uint64_t current_epoch = GDScriptFunction::get_script_clear_epoch() + 1;
+		if (unlikely(_instantiation_cache_epoch.load(std::memory_order_acquire) != current_epoch)) {
+			_prepare_instantiation_cache();
+		}
+	}
+	void invalidate_instantiation_cache() {
+		GDScriptFunction::invalidate_call_caches();
+		_instantiation_cache_epoch.store(0, std::memory_order_release);
+		_cached_root_script = nullptr;
+		_cached_initializer = nullptr;
+		_cached_notification_functions.clear();
+		_member_init_template.clear();
+		_cached_native_is_refcounted = false;
+		_has_member_init_template = false;
+		_member_init_all_trivial = false;
+	}
+	_FORCE_INLINE_ GDScriptFunction *get_cached_initializer() const { return _cached_initializer; }
+	GDScriptInstance *_create_instance_without_init(Callable::CallError &r_error);
 	virtual bool can_instantiate() const override;
 
 	virtual Ref<Script> get_base_script() const override;
@@ -361,6 +400,120 @@ public:
 	~GDScript();
 };
 
+class GDScriptMemberStorage {
+public:
+	static constexpr int INLINE_CAPACITY = 8;
+
+private:
+	alignas(Variant) uint8_t inline_storage[sizeof(Variant) * INLINE_CAPACITY];
+	Variant *data = nullptr;
+	int count = 0;
+
+	_FORCE_INLINE_ Variant *_inline_ptr() { return reinterpret_cast<Variant *>(inline_storage); }
+	_FORCE_INLINE_ bool _is_inline() const { return data == reinterpret_cast<const Variant *>(inline_storage); }
+
+public:
+	_FORCE_INLINE_ int size() const { return count; }
+	_FORCE_INLINE_ Variant *ptrw() { return data; }
+	_FORCE_INLINE_ const Variant *ptr() const { return data; }
+	_FORCE_INLINE_ Variant &operator[](int p_index) { return data[p_index]; }
+	_FORCE_INLINE_ const Variant &operator[](int p_index) const { return data[p_index]; }
+
+	void clear() {
+		for (int index = 0; index < count; index++) {
+			data[index].~Variant();
+		}
+		if (data != nullptr && !_is_inline()) {
+			memfree(data);
+		}
+		data = nullptr;
+		count = 0;
+	}
+
+	_FORCE_INLINE_ void init_from_trivial_template(const Variant *p_template, int p_count) {
+		if (unlikely(count != 0)) {
+			clear();
+		}
+		if (p_count <= 0) {
+			return;
+		}
+		Variant *destination = (p_count <= INLINE_CAPACITY) ? _inline_ptr() : reinterpret_cast<Variant *>(memalloc(sizeof(Variant) * static_cast<size_t>(p_count)));
+		for (int index = 0; index < p_count; index++) {
+			VariantInternal::construct_copy_trivial_unsafe(&destination[index], &p_template[index]);
+		}
+		data = destination;
+		count = p_count;
+	}
+
+	_FORCE_INLINE_ void init_from_template(const Variant *p_template, int p_count) {
+		if (unlikely(count != 0)) {
+			clear();
+		}
+		if (p_count <= 0) {
+			return;
+		}
+		Variant *destination = (p_count <= INLINE_CAPACITY) ? _inline_ptr() : reinterpret_cast<Variant *>(memalloc(sizeof(Variant) * static_cast<size_t>(p_count)));
+		for (int index = 0; index < p_count; index++) {
+			VariantInternal::construct_copy_fast(&destination[index], &p_template[index]);
+		}
+		data = destination;
+		count = p_count;
+	}
+
+	void resize(int p_new_size) {
+		if (p_new_size == count) {
+			return;
+		}
+		if (p_new_size <= 0) {
+			clear();
+			return;
+		}
+		if (count == 0) {
+			Variant *destination = (p_new_size <= INLINE_CAPACITY) ? _inline_ptr() : reinterpret_cast<Variant *>(memalloc(sizeof(Variant) * static_cast<size_t>(p_new_size)));
+			for (int index = 0; index < p_new_size; index++) {
+				memnew_placement(&destination[index], Variant);
+			}
+			data = destination;
+			count = p_new_size;
+			return;
+		}
+		if (p_new_size <= INLINE_CAPACITY && _is_inline()) {
+			if (p_new_size < count) {
+				for (int index = p_new_size; index < count; index++) {
+					data[index].~Variant();
+				}
+			} else {
+				for (int index = count; index < p_new_size; index++) {
+					memnew_placement(&data[index], Variant);
+				}
+			}
+			count = p_new_size;
+			return;
+		}
+		Variant *new_data = (p_new_size <= INLINE_CAPACITY) ? _inline_ptr() : reinterpret_cast<Variant *>(memalloc(sizeof(Variant) * static_cast<size_t>(p_new_size)));
+		const int copy_count = MIN(count, p_new_size);
+		for (int index = 0; index < copy_count; index++) {
+			memnew_placement(&new_data[index], Variant(std::move(data[index])));
+		}
+		for (int index = copy_count; index < p_new_size; index++) {
+			memnew_placement(&new_data[index], Variant);
+		}
+		for (int index = 0; index < count; index++) {
+			data[index].~Variant();
+		}
+		if (!_is_inline()) {
+			memfree(data);
+		}
+		data = new_data;
+		count = p_new_size;
+	}
+
+	GDScriptMemberStorage() = default;
+	GDScriptMemberStorage(const GDScriptMemberStorage &) = delete;
+	GDScriptMemberStorage &operator=(const GDScriptMemberStorage &) = delete;
+	~GDScriptMemberStorage() { clear(); }
+};
+
 class GDScriptInstance : public ScriptInstance {
 	friend class GDScript;
 	friend class GDScriptFunction;
@@ -376,7 +529,7 @@ class GDScriptInstance : public ScriptInstance {
 #ifdef DEBUG_ENABLED
 	HashMap<StringName, int> member_indices_cache; //used only for hot script reloading
 #endif
-	Vector<Variant> members;
+	GDScriptMemberStorage members;
 
 	SelfList<GDScriptFunctionState>::List pending_func_states;
 
@@ -410,6 +563,7 @@ public:
 	String to_string(bool *r_valid);
 
 	virtual Ref<Script> get_script() const;
+	_FORCE_INLINE_ GDScript *get_script_ptr() const { return script.ptr(); }
 
 	virtual ScriptLanguage *get_language();
 
