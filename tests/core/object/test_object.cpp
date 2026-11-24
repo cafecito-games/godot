@@ -691,4 +691,108 @@ TEST_CASE("[Object] RequiredResult") {
 	CHECK_EQ(ref, var);
 }
 
+TEST_CASE("[Object] Signal dispatch fast paths and edge cases") {
+	SUBCASE("Empty signal map fast exit and empty slot map semantics") {
+		Object object;
+		// Built-in signal with empty signal_map returns ERR_UNAVAILABLE.
+		CHECK_EQ(object.emit_signal("script_changed"), ERR_UNAVAILABLE);
+
+		// Adding a user signal with 0 listeners inserts into signal_map and returns OK.
+		object.add_user_signal(MethodInfo("custom_empty"));
+		CHECK_EQ(object.emit_signal("custom_empty"), OK);
+		CHECK_EQ(object.emit_signal("script_changed"), ERR_UNAVAILABLE);
+
+		// Connecting and disconnecting a built-in signal removes it from signal_map cleanly.
+		Object receiver;
+		CHECK_EQ(object.connect("script_changed", Callable(&receiver, "notify_property_list_changed")), OK);
+		CHECK_EQ(object.emit_signal("script_changed"), OK);
+		object.disconnect("script_changed", Callable(&receiver, "notify_property_list_changed"));
+		CHECK_EQ(object.emit_signal("script_changed"), ERR_UNAVAILABLE);
+
+		// Connecting and disconnecting a user signal leaves it with 0 slots and returns OK.
+		CHECK_EQ(object.connect("custom_empty", Callable(&receiver, "notify_property_list_changed")), OK);
+		CHECK_EQ(object.emit_signal("custom_empty"), OK);
+		object.disconnect("custom_empty", Callable(&receiver, "notify_property_list_changed"));
+		CHECK_EQ(object.emit_signal("custom_empty"), OK);
+	}
+
+	SUBCASE("One-shot and >8 listener heap spill") {
+		Object emitter;
+		emitter.add_user_signal(MethodInfo("burst"));
+
+		constexpr int LISTENER_COUNT = 12;
+		Object listeners[LISTENER_COUNT];
+		for (int index = 0; index < LISTENER_COUNT; index++) {
+			uint32_t flags = (index % 2 == 0) ? Object::CONNECT_ONE_SHOT : 0;
+			CHECK_EQ(emitter.connect("burst", Callable(&listeners[index], "notify_property_list_changed"), flags), OK);
+		}
+
+		List<Object::Connection> connections;
+		emitter.get_signal_connection_list("burst", &connections);
+		CHECK_EQ(connections.size(), LISTENER_COUNT);
+
+		CHECK_EQ(emitter.emit_signal("burst"), OK);
+
+		connections.clear();
+		emitter.get_signal_connection_list("burst", &connections);
+		CHECK_EQ(connections.size(), LISTENER_COUNT / 2);
+	}
+
+	SUBCASE("Missing method on live target is skipped without error") {
+		Object emitter;
+		Object target;
+		emitter.add_user_signal(MethodInfo("ping"));
+		CHECK_EQ(emitter.connect("ping", Callable(&target, "nonexistent_method")), OK);
+		CHECK_EQ(emitter.emit_signal("ping"), OK);
+	}
+
+	SUBCASE("CONNECT_APPEND_SOURCE_OBJECT with >16 arguments spills cleanly") {
+		Object emitter;
+		emitter.add_user_signal(MethodInfo("many_args"));
+
+		int received_count = -1;
+		Variant last_arg;
+		class ManyArgCallable : public CallableCustom {
+			int *count_ptr = nullptr;
+			Variant *last_ptr = nullptr;
+			ObjectID owner_id;
+
+		public:
+			ManyArgCallable(ObjectID p_owner_id, int *p_count_ptr, Variant *p_last_ptr) :
+					count_ptr(p_count_ptr), last_ptr(p_last_ptr), owner_id(p_owner_id) {}
+			uint32_t hash() const override { return static_cast<uint32_t>(reinterpret_cast<uintptr_t>(this)); }
+			String get_as_text() const override { return "ManyArgCallable"; }
+			CompareEqualFunc get_compare_equal_func() const override {
+				return [](const CallableCustom *p_a, const CallableCustom *p_b) { return p_a == p_b; };
+			}
+			CompareLessFunc get_compare_less_func() const override {
+				return [](const CallableCustom *p_a, const CallableCustom *p_b) { return p_a < p_b; };
+			}
+			ObjectID get_object() const override { return owner_id; }
+			void call(const Variant **p_arguments, int p_argcount, Variant &r_return_value, Callable::CallError &r_call_error) const override {
+				*count_ptr = p_argcount;
+				if (p_argcount > 0) {
+					*last_ptr = *p_arguments[p_argcount - 1];
+				}
+				r_call_error.error = Callable::CallError::CALL_OK;
+			}
+		};
+
+		Callable custom(memnew(ManyArgCallable(emitter.get_instance_id(), &received_count, &last_arg)));
+		CHECK_EQ(emitter.connect("many_args", custom, Object::CONNECT_APPEND_SOURCE_OBJECT), OK);
+
+		constexpr int ARG_COUNT = 20;
+		Variant arg_values[ARG_COUNT];
+		const Variant *arg_ptrs[ARG_COUNT];
+		for (int index = 0; index < ARG_COUNT; index++) {
+			arg_values[index] = index;
+			arg_ptrs[index] = &arg_values[index];
+		}
+
+		CHECK_EQ(emitter.emit_signalp("many_args", arg_ptrs, ARG_COUNT), OK);
+		CHECK_EQ(received_count, ARG_COUNT + 1);
+		CHECK_EQ(last_arg, Variant(&emitter));
+	}
+}
+
 } // namespace TestObject

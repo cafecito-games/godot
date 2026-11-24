@@ -3301,6 +3301,200 @@ func run_all() -> Dictionary:
 			CHECK(int(obj_ref->call("set_b", 5)) == 15);
 		}
 	}
+
+	TEST_CASE("Native member caches, builtin member caches, and signal emit fast paths round-trip through .gdb") {
+		const String source = R"(extends RefCounted
+
+class PolyNodeScript extends Node:
+	var tag: int = 7
+
+class CustomGetSetNode extends Node2D:
+	var intercept_reads: int = 0
+	var intercept_writes: int = 0
+	var custom_pos: Vector2 = Vector2(99.0, 88.0)
+
+	func _get(property: StringName) -> Variant:
+		if property == &"position":
+			intercept_reads += 1
+			return custom_pos
+		return null
+
+	func _set(property: StringName, value: Variant) -> bool:
+		if property == &"position":
+			intercept_writes += 1
+			custom_pos = value
+			return true
+		return false
+
+class SelfMemberNode extends Node2D:
+	func set_untyped(new_position, new_rotation) -> void:
+		position = new_position
+		rotation = new_rotation
+
+	func get_sum() -> float:
+		return position.x + position.y + rotation
+
+class SignalHost extends RefCounted:
+	signal ping(value: int, delta: int)
+	signal multi(value: int)
+	signal unused(value: int)
+
+	func emit_self(value: int) -> void:
+		ping.emit(value, 4)
+
+class SignalTarget extends RefCounted:
+	var total: int = 0
+	var oneshot_hits: int = 0
+
+	func on_ping(value: int, delta: int) -> void:
+		total += value + delta
+
+	func on_multi_a(value: int) -> void:
+		total += value * 2
+
+	func on_oneshot(value: int) -> void:
+		oneshot_hits += value
+
+func run_poly_scripted_native(target: Node, value: Vector2) -> Vector2:
+	target.position = value
+	return target.position
+
+func run_builtin_untyped(vec):
+	vec.x = vec.x + 2.5
+	vec.y = 5
+	var alias = vec
+	alias = alias.x
+	return [vec, alias]
+
+func run_untyped_native_call(node):
+	node.set_position(Vector2(11.0, 22.0))
+	return node.get_position()
+
+func run_all() -> Dictionary:
+	var result := {}
+
+	# 1. Same script attached to Node2D and Control exercises (GDScript*, GDType*) disambiguation.
+	var node2d := Node2D.new()
+	node2d.set_script(PolyNodeScript)
+	var control := Control.new()
+	control.set_script(PolyNodeScript)
+	var pos_node2d := run_poly_scripted_native(node2d, Vector2(10.0, 20.0))
+	var pos_control := run_poly_scripted_native(control, Vector2(30.0, 40.0))
+	var pos_node2d_2 := run_poly_scripted_native(node2d, Vector2(12.0, 24.0))
+	var call_pos = run_untyped_native_call(node2d)
+	result["poly_node2d"] = pos_node2d
+	result["poly_control"] = pos_control
+	result["poly_node2d_2"] = pos_node2d_2
+	result["untyped_call_pos"] = call_pos
+	node2d.free()
+	control.free()
+
+	# 2. _get/_set overrides on scripted Node2D must NOT be bypassed by native member cache.
+	var custom_node := CustomGetSetNode.new()
+	var custom_initial: Vector2 = custom_node.position
+	custom_node.position = Vector2(5.0, 6.0)
+	var custom_after: Vector2 = custom_node.position
+	result["custom_initial"] = custom_initial
+	result["custom_after"] = custom_after
+	result["custom_reads"] = custom_node.intercept_reads
+	result["custom_writes"] = custom_node.intercept_writes
+	custom_node.free()
+
+	# 3. OPCODE_SET_MEMBER / OPCODE_GET_MEMBER with exact types and int->float implicit conversion.
+	var self_node := SelfMemberNode.new()
+	self_node.set_untyped(Vector2(3.0, 4.0), 1.5)
+	var sum_exact := self_node.get_sum()
+	self_node.set_untyped(Vector2(3.0, 4.0), 2)
+	var sum_conv := self_node.get_sum()
+	result["self_member_exact"] = sum_exact
+	result["self_member_conv"] = sum_conv
+	self_node.free()
+
+	# 4. Untyped builtin member cache (Vector2.x/y, int->float fallback, src==dst aliasing).
+	result["builtin_untyped"] = run_builtin_untyped(Vector2(1.5, 0.0))
+
+	# 5. Signal emit lowering (self, typed object, Signal variable, multi-listener + RefCounted lambda + one-shot + unconnected).
+	var host := SignalHost.new()
+	var other_host := SignalHost.new()
+	var target := SignalTarget.new()
+	host.ping.connect(target.on_ping)
+	host.multi.connect(target.on_multi_a)
+	host.multi.connect(func(v: int) -> void:
+		target.total += v + 10
+	)
+	host.multi.connect(target.on_oneshot, Object.CONNECT_ONE_SHOT)
+	other_host.ping.connect(target.on_ping)
+
+	host.emit_self(3) # +7
+	host.ping.emit(5, 6) # +11
+	host.multi.emit(4) # +8 +14, oneshot +4
+	host.multi.emit(4) # +8 +14, oneshot disconnected
+	host.unused.emit(99)
+
+	# Signal stored in a local variable must emit on other_host, not self.
+	var stored_signal: Signal = other_host.ping
+	stored_signal.emit(10, 2) # +12
+
+	result["signal_total"] = target.total
+	result["oneshot_hits"] = target.oneshot_hits
+	return result
+)";
+
+		Ref<GDScript> script = compile_source(source);
+
+		const Vector<uint8_t> bytes = export_script_bytes(script);
+		Ref<GDScript> loaded = load_script_bytes(bytes, "res://native_caches_signals.gd");
+		REQUIRE(GDScriptBytecodeVerifier::verify_class(loaded.ptr()) == OK);
+
+		Ref<RefCounted> orig_inst = memnew(RefCounted);
+		orig_inst->set_script(script);
+		Ref<RefCounted> loaded_inst = memnew(RefCounted);
+		loaded_inst->set_script(loaded);
+
+		Dictionary orig_res = orig_inst->call("run_all");
+		Dictionary loaded_res = loaded_inst->call("run_all");
+		CHECK(orig_res == loaded_res);
+		CHECK(Vector2(loaded_res["poly_node2d"]) == Vector2(10.0, 20.0));
+		CHECK(Vector2(loaded_res["poly_control"]) == Vector2(30.0, 40.0));
+		CHECK(Vector2(loaded_res["poly_node2d_2"]) == Vector2(12.0, 24.0));
+		CHECK(Vector2(loaded_res["untyped_call_pos"]) == Vector2(11.0, 22.0));
+		CHECK(Vector2(loaded_res["custom_initial"]) == Vector2(99.0, 88.0));
+		CHECK(Vector2(loaded_res["custom_after"]) == Vector2(5.0, 6.0));
+		CHECK(int(loaded_res["custom_reads"]) == 2);
+		CHECK(int(loaded_res["custom_writes"]) == 1);
+		CHECK(Math::is_equal_approx(double(loaded_res["self_member_exact"]), 8.5));
+		CHECK(Math::is_equal_approx(double(loaded_res["self_member_conv"]), 9.0));
+		Array builtin_untyped = loaded_res["builtin_untyped"];
+		CHECK(Vector2(builtin_untyped[0]) == Vector2(4.0, 5.0));
+		CHECK(Math::is_equal_approx(double(builtin_untyped[1]), 4.0));
+		CHECK(int(loaded_res["signal_total"]) == 74);
+		CHECK(int(loaded_res["oneshot_hits"]) == 4);
+
+		// Hot-reloading a listener script must invalidate SignalData::Slot cached dispatch.
+		{
+			Ref<GDScript> listener_script;
+			listener_script.instantiate();
+			listener_script->set_source_code("extends RefCounted\nvar value: int = 0\nfunc on_sig(x: int) -> void:\n\tvalue += x\n");
+			REQUIRE(listener_script->reload() == OK);
+
+			Callable::CallError err;
+			Variant listener_var = listener_script->_new(nullptr, 0, err);
+			REQUIRE(err.error == Callable::CallError::CALL_OK);
+			Ref<RefCounted> listener_obj = listener_var;
+			REQUIRE(listener_obj.is_valid());
+
+			Object emitter;
+			emitter.add_user_signal(MethodInfo("tick"));
+			REQUIRE(emitter.connect("tick", Callable(listener_obj.ptr(), "on_sig")) == OK);
+			CHECK(emitter.emit_signal("tick", 5) == OK);
+			CHECK(int(listener_obj->get("value")) == 5);
+
+			listener_script->set_source_code("extends RefCounted\nvar value: int = 0\nfunc on_sig(x: int) -> void:\n\tvalue += x * 10\n");
+			REQUIRE(listener_script->reload(true) == OK);
+			CHECK(emitter.emit_signal("tick", 5) == OK);
+			CHECK(int(listener_obj->get("value")) == 55);
+		}
+	}
 }
 
 } // namespace TestGDScriptBytecode

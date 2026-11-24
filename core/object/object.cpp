@@ -1114,6 +1114,7 @@ void Object::add_user_signal(const MethodInfo &p_signal) {
 	SignalData s;
 	s.user = p_signal;
 	signal_map[p_signal.name] = s;
+	_signal_map_size.store(signal_map.size(), std::memory_order_release);
 }
 
 bool Object::_has_user_signal(const StringName &p_name) const {
@@ -1137,6 +1138,7 @@ void Object::_remove_user_signal(const StringName &p_name) {
 
 		slots_to_disconnect = std::move(s->slot_map);
 		signal_map.erase(p_name);
+		_signal_map_size.store(signal_map.size(), std::memory_order_release);
 	}
 
 	for (const KeyValue<Callable, SignalData::Slot> &slot_kv : slots_to_disconnect) {
@@ -1155,6 +1157,17 @@ Error Object::_emit_signal(const Variant **p_args, int p_argcount, Callable::Cal
 		ERR_FAIL_V(Error::ERR_INVALID_PARAMETER);
 	}
 
+	const Variant **args = nullptr;
+	const int argc = p_argcount - 1;
+	if (argc) {
+		args = &p_args[1];
+	}
+
+	if (likely(p_args[0]->get_type() == Variant::STRING_NAME)) {
+		r_error.error = Callable::CallError::CALL_OK;
+		return emit_signalp(*VariantInternal::get_string_name(p_args[0]), args, argc);
+	}
+
 	if (unlikely(!p_args[0]->is_string())) {
 		r_error.error = Callable::CallError::CALL_ERROR_INVALID_ARGUMENT;
 		r_error.argument = 0;
@@ -1166,35 +1179,40 @@ Error Object::_emit_signal(const Variant **p_args, int p_argcount, Callable::Cal
 
 	StringName signal = *p_args[0];
 
-	const Variant **args = nullptr;
-
-	int argc = p_argcount - 1;
-	if (argc) {
-		args = &p_args[1];
-	}
-
 	return emit_signalp(signal, args, argc);
 }
 
 Error Object::emit_signalp(const StringName &p_name, const Variant **p_args, int p_argcount) {
-	if (_block_signals) {
+	if (unlikely(_block_signals)) {
 		return ERR_CANT_ACQUIRE_RESOURCE; //no emit, signals blocked
 	}
 
-	constexpr int MAX_SLOTS_ON_STACK = 5;
+	if (likely(_signal_map_size.load(std::memory_order_acquire) == 0)) {
+#ifdef DEBUG_ENABLED
+		bool signal_is_valid = get_gdtype().get_signal_map(false).has(p_name);
+		//check in script
+		ERR_FAIL_COND_V_MSG(!signal_is_valid && script_instance && !script_instance->get_script()->has_script_signal(p_name), ERR_UNAVAILABLE, vformat("Can't emit non-existing signal \"%s\".", p_name));
+#endif
+		return ERR_UNAVAILABLE;
+	}
+
+	constexpr uint32_t MAX_SLOTS_ON_STACK = 8;
 	// Don't default initialize the Callable objects on the stack, just reserve the space - we'll memnew_placement() them later.
 	alignas(Callable) uint8_t slot_callable_stack[sizeof(Callable) * MAX_SLOTS_ON_STACK];
 	uint32_t slot_flags_stack[MAX_SLOTS_ON_STACK];
+	SignalData::Slot::CachedDispatch slot_dispatch_stack[MAX_SLOTS_ON_STACK];
 
 	Callable *slot_callables = (Callable *)slot_callable_stack;
 	uint32_t *slot_flags = slot_flags_stack;
+	SignalData::Slot::CachedDispatch *slot_dispatches = slot_dispatch_stack;
 	uint32_t slot_count = 0;
+	uint32_t combined_flags = 0;
 
 	{
 		ObjectSignalLock signal_lock(this);
 
-		SignalData *s = signal_map.getptr(p_name);
-		if (!s) {
+		SignalData *signal_data = signal_map.getptr(p_name);
+		if (!signal_data) {
 #ifdef DEBUG_ENABLED
 			bool signal_is_valid = get_gdtype().get_signal_map(false).has(p_name);
 			//check in script
@@ -1204,33 +1222,44 @@ Error Object::emit_signalp(const StringName &p_name, const Variant **p_args, int
 			return ERR_UNAVAILABLE;
 		}
 
-		if (s->slot_map.size() > MAX_SLOTS_ON_STACK) {
-			slot_callables = (Callable *)memalloc(sizeof(Callable) * s->slot_map.size());
-			slot_flags = (uint32_t *)memalloc(sizeof(uint32_t) * s->slot_map.size());
+		const uint32_t connected_slot_count = signal_data->slot_map.size();
+		if (connected_slot_count == 0) {
+			return OK;
+		}
+
+		if (unlikely(connected_slot_count > MAX_SLOTS_ON_STACK)) {
+			slot_callables = (Callable *)memalloc(sizeof(Callable) * connected_slot_count);
+			slot_flags = (uint32_t *)memalloc(sizeof(uint32_t) * connected_slot_count);
+			slot_dispatches = (SignalData::Slot::CachedDispatch *)memalloc(sizeof(SignalData::Slot::CachedDispatch) * connected_slot_count);
 		}
 
 		// Ensure that disconnecting the signal or even deleting the object
 		// will not affect the signal calling.
-		for (const KeyValue<Callable, SignalData::Slot> &slot_kv : s->slot_map) {
+		for (const KeyValue<Callable, SignalData::Slot> &slot_kv : signal_data->slot_map) {
 			memnew_placement(&slot_callables[slot_count], Callable(slot_kv.value.conn.callable));
-			slot_flags[slot_count] = slot_kv.value.conn.flags;
+			const uint32_t flags = slot_kv.value.conn.flags;
+			slot_flags[slot_count] = flags;
+			slot_dispatches[slot_count] = slot_kv.value.cached_dispatch;
+			combined_flags |= flags;
 			++slot_count;
 		}
 
-		DEV_ASSERT(slot_count == s->slot_map.size());
+		DEV_ASSERT(slot_count == connected_slot_count);
 	}
 
 	// Disconnect all one-shot connections before emitting to prevent recursion.
-	for (uint32_t i = 0; i < slot_count; ++i) {
-		bool disconnect = slot_flags[i] & CONNECT_ONE_SHOT;
+	if (unlikely(combined_flags & CONNECT_ONE_SHOT)) {
+		for (uint32_t i = 0; i < slot_count; ++i) {
+			bool disconnect = slot_flags[i] & CONNECT_ONE_SHOT;
 #ifdef TOOLS_ENABLED
-		if (disconnect && (slot_flags[i] & CONNECT_PERSIST) && Engine::get_singleton()->is_editor_hint()) {
-			// This signal was connected from the editor, and is being edited. Just don't disconnect for now.
-			disconnect = false;
-		}
+			if (disconnect && (slot_flags[i] & CONNECT_PERSIST) && Engine::get_singleton()->is_editor_hint()) {
+				// This signal was connected from the editor, and is being edited. Just don't disconnect for now.
+				disconnect = false;
+			}
 #endif
-		if (disconnect) {
-			_disconnect(p_name, slot_callables[i]);
+			if (disconnect) {
+				_disconnect(p_name, slot_callables[i]);
+			}
 		}
 	}
 
@@ -1241,76 +1270,142 @@ Error Object::emit_signalp(const StringName &p_name, const Variant **p_args, int
 	// Moreover, since signals can be emitted from constructors (classic example being
 	// notify_property_list_changed), we must be careful not to do the ref init ourselves,
 	// which would lead to the object being destroyed at the end of this function.
-	bool pending_unref = Object::cast_to<RefCounted>(this) ? ((RefCounted *)this)->reference() : false;
+	bool pending_unref = is_ref_counted() ? static_cast<RefCounted *>(this)->reference() : false;
 
 	Error err = OK;
 
-	Vector<const Variant *> append_source_mem;
-	Variant source = this;
+	constexpr int APPEND_SOURCE_STACK_ARGS = 16;
+	const Variant *append_source_stack[APPEND_SOURCE_STACK_ARGS];
+	Vector<const Variant *> append_source_storage;
+	Variant source;
+	if (unlikely(combined_flags & CONNECT_APPEND_SOURCE_OBJECT)) {
+		source = this;
+	}
+
+	auto build_appended_args = [&](int p_unbound_count, const Variant **&r_args, int &r_argc) {
+		// Source is being appended regardless of unbinds.
+		// Implemented by inserting before the first to-be-unbinded arg.
+		const int source_index = p_argcount - p_unbound_count;
+		if (source_index >= 0) {
+			const int new_argc = p_argcount + 1;
+			const Variant **args_mem = append_source_stack;
+			if (unlikely(new_argc > APPEND_SOURCE_STACK_ARGS)) {
+				append_source_storage.resize(new_argc);
+				args_mem = append_source_storage.ptrw();
+			}
+			for (int j = 0; j < source_index; j++) {
+				args_mem[j] = p_args[j];
+			}
+			args_mem[source_index] = &source;
+			for (int j = source_index; j < p_argcount; j++) {
+				args_mem[j + 1] = p_args[j];
+			}
+			r_args = args_mem;
+			r_argc = new_argc;
+		}
+	};
+
+	auto handle_call_error = [&](const Callable &p_callable, uint32_t p_flags, const Variant **p_call_args, int p_call_argc, const Callable::CallError &p_call_error) {
+		Object *target = p_callable.get_object();
+#ifdef DEBUG_ENABLED
+		if (target && (p_flags & CONNECT_PERSIST) && Engine::get_singleton()->is_editor_hint()) {
+			Ref<Script> other_scr = target->get_script();
+			if (other_scr.is_valid() && !other_scr->is_tool()) {
+				// Trying to call not-tool method in editor, just ignore it.
+				return;
+			}
+		}
+#endif
+		if (p_call_error.error == Callable::CallError::CALL_ERROR_INVALID_METHOD && target && !ClassDB::class_exists(target->get_class_name())) {
+			// Most likely object is not initialized yet, do not throw error.
+		} else {
+			ERR_PRINT(vformat("Error calling from signal '%s' to callable: %s.", String(p_name), Variant::get_callable_error_text(p_callable, p_call_args, p_call_argc, p_call_error)));
+			err = ERR_METHOD_NOT_FOUND;
+		}
+	};
 
 	for (uint32_t i = 0; i < slot_count; ++i) {
 		const Callable &callable = slot_callables[i];
-		const uint32_t &flags = slot_flags[i];
-
-		if (!callable.is_valid()) {
-			// Target might have been deleted during signal callback, this is expected and OK.
-			continue;
-		}
+		const uint32_t flags = slot_flags[i];
 
 		const Variant **args = p_args;
 		int argc = p_argcount;
 
-		if (flags & CONNECT_APPEND_SOURCE_OBJECT) {
-			// Source is being appended regardless of unbinds.
-			// Implemented by inserting before the first to-be-unbinded arg.
-			int source_index = p_argcount - callable.get_unbound_arguments_count();
-			if (source_index >= 0) {
-				append_source_mem.resize(p_argcount + 1);
-				const Variant **args_mem = append_source_mem.ptrw();
-
-				for (int j = 0; j < source_index; j++) {
-					args_mem[j] = p_args[j];
-				}
-				args_mem[source_index] = &source;
-				for (int j = source_index; j < p_argcount; j++) {
-					args_mem[j + 1] = p_args[j];
-				}
-
-				args = args_mem;
-				argc = p_argcount + 1;
-			} else {
-				// More args unbound than provided, call will fail.
-				// Since appended source is non-unbindable, the error
-				// about too many unbinds should be correct as is.
+		if (unlikely(flags & CONNECT_DEFERRED)) {
+			if (!callable.is_valid()) {
+				// Target might have been deleted during signal callback, this is expected and OK.
+				continue;
 			}
+			if (unlikely(flags & CONNECT_APPEND_SOURCE_OBJECT)) {
+				build_appended_args(callable.get_unbound_arguments_count(), args, argc);
+			}
+			MessageQueue::get_singleton()->push_callablep(callable, args, argc, true);
+			continue;
 		}
 
-		if (flags & CONNECT_DEFERRED) {
-			MessageQueue::get_singleton()->push_callablep(callable, args, argc, true);
-		} else {
-			Callable::CallError ce;
-			_emitting = true;
+		if (likely(callable.is_standard())) {
+			Object *target_object = ObjectDB::get_instance(callable.get_object_id_standard_unchecked());
+			if (unlikely(target_object == nullptr)) {
+				// Target might have been deleted during signal callback, this is expected and OK.
+				continue;
+			}
+
+			if (unlikely(flags & CONNECT_APPEND_SOURCE_OBJECT)) {
+				build_appended_args(0, args, argc);
+			}
+
+			const StringName &method_name = callable.get_method_standard_unchecked();
+			const SignalData::Slot::CachedDispatch &dispatch = slot_dispatches[i];
+			Callable::CallError call_error;
 			Variant ret;
-			callable.callp(args, argc, ret, ce);
+			bool dispatched = false;
+			_emitting = true;
+			if (likely(dispatch.kind == SignalData::Slot::CachedDispatch::SCRIPT_METHOD && target_object->script_instance != nullptr)) {
+#ifdef DEBUG_ENABLED
+				_ObjectDebugLock target_debug_lock(target_object);
+#endif
+				dispatched = target_object->script_instance->call_cached_method(dispatch.target, dispatch.type_key, dispatch.epoch, args, argc, ret, call_error);
+			} else if (dispatch.kind == SignalData::Slot::CachedDispatch::NATIVE_METHOD && target_object->script_instance == nullptr && &target_object->get_gdtype() == dispatch.type_key) {
+#ifdef DEBUG_ENABLED
+				_ObjectDebugLock target_debug_lock(target_object);
+#endif
+				ret = static_cast<MethodBind *>(dispatch.target)->call(target_object, args, argc, call_error);
+				dispatched = true;
+			}
+			if (unlikely(!dispatched)) {
+				if (unlikely(method_name == CoreStringName(_ready) && !target_object->has_method(method_name))) {
+					_emitting = false;
+					continue;
+				}
+				ret = target_object->callp(method_name, args, argc, call_error);
+			}
 			_emitting = false;
 
-			if (ce.error != Callable::CallError::CALL_OK) {
-				Object *target = callable.get_object();
-#ifdef DEBUG_ENABLED
-				if (target && flags & CONNECT_PERSIST && Engine::get_singleton()->is_editor_hint()) {
-					Ref<Script> other_scr = target->get_script();
-					if (other_scr.is_valid() && !other_scr->is_tool()) {
-						// Trying to call not-tool method in editor, just ignore it.
+			if (unlikely(call_error.error != Callable::CallError::CALL_OK)) {
+				if (call_error.error == Callable::CallError::CALL_ERROR_INVALID_METHOD) {
+					Object *target_check = callable.get_object();
+					if (target_check == nullptr || !target_check->has_method(method_name)) {
 						continue;
 					}
 				}
-#endif
-				if (ce.error == Callable::CallError::CALL_ERROR_INVALID_METHOD && target && !ClassDB::class_exists(target->get_class_name())) {
-					// Most likely object is not initialized yet, do not throw error.
-				} else {
-					ERR_PRINT(vformat("Error calling from signal '%s' to callable: %s.", String(p_name), Variant::get_callable_error_text(callable, args, argc, ce)));
-					err = ERR_METHOD_NOT_FOUND;
-				}
+				handle_call_error(callable, flags, args, argc, call_error);
+			}
+		} else if (likely(callable.is_custom())) {
+			CallableCustom *custom = callable.get_custom_unchecked();
+			if (unlikely(!custom->is_valid())) {
+				continue;
+			}
+			if (unlikely(flags & CONNECT_APPEND_SOURCE_OBJECT)) {
+				build_appended_args(custom->get_unbound_arguments_count(), args, argc);
+			}
+			Callable::CallError call_error;
+			Variant ret;
+			_emitting = true;
+			custom->call(args, argc, ret, call_error);
+			_emitting = false;
+
+			if (unlikely(call_error.error != Callable::CallError::CALL_OK)) {
+				handle_call_error(callable, flags, args, argc, call_error);
 			}
 		}
 	}
@@ -1319,16 +1414,17 @@ Error Object::emit_signalp(const StringName &p_name, const Variant **p_args, int
 		slot_callables[i].~Callable();
 	}
 
-	if (slot_callables != (Callable *)slot_callable_stack) {
+	if (unlikely(slot_callables != (Callable *)slot_callable_stack)) {
 		memfree(slot_callables);
 		memfree(slot_flags);
+		memfree(slot_dispatches);
 	}
 
 	if (pending_unref) {
 		// We have to do the same Ref<T> would do. We can't just use Ref<T>
 		// because it would do the init ref logic, which is something this function
 		// shouldn't do, as explained above.
-		if (((RefCounted *)this)->unreference()) {
+		if (static_cast<RefCounted *>(this)->unreference()) {
 			memdelete(this);
 		}
 	}
@@ -1550,6 +1646,7 @@ Error Object::connect(const StringName &p_signal, const Callable &p_callable, ui
 		ERR_FAIL_COND_V_MSG(!signal_is_valid, ERR_INVALID_PARAMETER, vformat("In Object of type '%s': Attempt to connect nonexistent signal '%s' to callable '%s'.", String(get_class()), p_signal, p_callable));
 
 		signal_map[p_signal] = SignalData();
+		_signal_map_size.store(signal_map.size(), std::memory_order_release);
 		s = &signal_map[p_signal];
 	}
 
@@ -1572,6 +1669,29 @@ Error Object::connect(const StringName &p_signal, const Callable &p_callable, ui
 	slot.conn = conn;
 	if (target_object) {
 		slot.cE = target_object->connections.push_back(conn);
+		if (p_callable.is_standard()) {
+			const StringName &method_name = p_callable.get_method_standard_unchecked();
+			if (likely(method_name != CoreStringName(free_) && method_name != CoreStringName(_ready))) {
+				if (target_object->script_instance != nullptr) {
+					const void *script_key = nullptr;
+					uint64_t epoch = 0;
+					void *cached_method = target_object->script_instance->resolve_cached_method(method_name, script_key, epoch);
+					if (cached_method != nullptr) {
+						slot.cached_dispatch.kind = SignalData::Slot::CachedDispatch::SCRIPT_METHOD;
+						slot.cached_dispatch.type_key = script_key;
+						slot.cached_dispatch.target = cached_method;
+						slot.cached_dispatch.epoch = epoch;
+					}
+				} else if (ClassDB::get_api_type(target_object->get_class_name()) == ClassDB::API_CORE) {
+					MethodBind *method_bind = ClassDB::get_method(target_object->get_class_name(), method_name);
+					if (method_bind != nullptr && !method_bind->is_static()) {
+						slot.cached_dispatch.kind = SignalData::Slot::CachedDispatch::NATIVE_METHOD;
+						slot.cached_dispatch.type_key = &target_object->get_gdtype();
+						slot.cached_dispatch.target = method_bind;
+					}
+				}
+			}
+		}
 	}
 	if (p_flags & CONNECT_REFERENCE_COUNTED) {
 		slot.reference_count = 1;
@@ -1661,6 +1781,7 @@ bool Object::_disconnect(const StringName &p_signal, const Callable &p_callable,
 	if (s->slot_map.is_empty() && get_gdtype().get_signal_map(false).has(p_signal)) {
 		//not user signal, delete
 		signal_map.erase(p_signal);
+		_signal_map_size.store(signal_map.size(), std::memory_order_release);
 	}
 
 	return true;
@@ -2340,6 +2461,7 @@ Object::~Object() {
 
 		signal_map.erase(E.key);
 	}
+	_signal_map_size.store(0, std::memory_order_relaxed);
 
 	// Disconnect signals that connect to this object.
 	while (connections.size()) {

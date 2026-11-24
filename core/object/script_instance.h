@@ -56,6 +56,13 @@ public:
 
 	virtual Variant callp(const StringName &p_method, const Variant **p_args, int p_argcount, Callable::CallError &r_error) = 0;
 
+	virtual void *resolve_cached_method(const StringName &p_method, const void *&r_script_key, uint64_t &r_epoch) const {
+		return nullptr;
+	}
+	virtual bool call_cached_method(void *p_cached_method, const void *p_script_key, uint64_t p_epoch, const Variant **p_args, int p_argcount, Variant &r_return, Callable::CallError &r_error) {
+		return false;
+	}
+
 	template <typename... VarArgs>
 	Variant call(const StringName &p_method, VarArgs... p_args) {
 		Variant args[sizeof...(p_args) + 1] = { p_args..., Variant() }; // +1 makes sure zero sized arrays are also supported.

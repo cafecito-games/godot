@@ -2424,6 +2424,39 @@ Variant GDScriptInstance::callp(const StringName &p_method, const Variant **p_ar
 	return Variant();
 }
 
+void *GDScriptInstance::resolve_cached_method(const StringName &p_method, const void *&r_script_key, uint64_t &r_epoch) const {
+	if (unlikely(p_method == SceneStringName(_ready) || p_method == CoreStringName(free_))) {
+		return nullptr;
+	}
+	const GDScript *root_script = script.ptr();
+	if (unlikely(root_script == nullptr || !root_script->valid)) {
+		return nullptr;
+	}
+	const uint64_t current_epoch = GDScriptFunction::get_script_clear_epoch();
+	const GDScript *script_cursor = root_script;
+	while (script_cursor != nullptr) {
+		if (unlikely(!script_cursor->valid)) {
+			return nullptr;
+		}
+		HashMap<StringName, GDScriptFunction *>::ConstIterator entry = script_cursor->member_functions.find(p_method);
+		if (entry) {
+			r_script_key = root_script;
+			r_epoch = current_epoch;
+			return entry->value;
+		}
+		script_cursor = script_cursor->base.ptr();
+	}
+	return nullptr;
+}
+
+bool GDScriptInstance::call_cached_method(void *p_cached_method, const void *p_script_key, uint64_t p_epoch, const Variant **p_args, int p_argcount, Variant &r_return, Callable::CallError &r_error) {
+	if (likely(script.ptr() == p_script_key && GDScriptFunction::get_script_clear_epoch() == p_epoch)) {
+		r_return = static_cast<GDScriptFunction *>(p_cached_method)->call(this, p_args, p_argcount, r_error);
+		return true;
+	}
+	return false;
+}
+
 void GDScriptInstance::notification(int p_notification, bool p_reversed) {
 	GDScript *target_script = script.ptr();
 	if (unlikely(!target_script->valid)) {

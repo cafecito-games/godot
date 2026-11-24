@@ -43,6 +43,8 @@
 #include "core/templates/safe_refcount.h"
 #include "core/variant/variant.h"
 
+#include <atomic>
+
 #define ADD_SIGNAL(m_signal) get_gdtype_static_mutable().add_signal(m_signal)
 #define ADD_PROPERTY(m_property, m_setter, m_getter) ::ClassDB::add_property(get_class_static(), m_property, StringName(m_setter), StringName(m_getter))
 #define ADD_PROPERTYI(m_property, m_setter, m_getter, m_index) ::ClassDB::add_property(get_class_static(), m_property, StringName(m_setter), StringName(m_getter), m_index)
@@ -410,9 +412,21 @@ private:
 
 	struct SignalData {
 		struct Slot {
+			struct CachedDispatch {
+				enum Kind : uint8_t {
+					NONE = 0,
+					SCRIPT_METHOD,
+					NATIVE_METHOD,
+				};
+				Kind kind = NONE;
+				const void *type_key = nullptr;
+				void *target = nullptr;
+				uint64_t epoch = 0;
+			};
 			int reference_count = 0;
 			Connection conn;
 			List<Connection>::Element *cE = nullptr;
+			CachedDispatch cached_dispatch;
 		};
 
 		MethodInfo user;
@@ -421,6 +435,7 @@ private:
 	};
 	mutable Mutex *signal_mutex = nullptr;
 	HashMap<StringName, SignalData> signal_map;
+	std::atomic<uint32_t> _signal_map_size{ 0 };
 	List<Connection> connections;
 #ifdef DEBUG_ENABLED
 	SafeRefCount _lock_index;

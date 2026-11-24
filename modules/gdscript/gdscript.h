@@ -553,6 +553,8 @@ public:
 	virtual int get_method_argument_count(const StringName &p_method, bool *r_is_valid = nullptr) const;
 
 	virtual Variant callp(const StringName &p_method, const Variant **p_args, int p_argcount, Callable::CallError &r_error);
+	virtual void *resolve_cached_method(const StringName &p_method, const void *&r_script_key, uint64_t &r_epoch) const;
+	virtual bool call_cached_method(void *p_cached_method, const void *p_script_key, uint64_t p_epoch, const Variant **p_args, int p_argcount, Variant &r_return, Callable::CallError &r_error);
 
 	Variant debug_get_member_by_index(int p_idx) const { return members[p_idx]; }
 

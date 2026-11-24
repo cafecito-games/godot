@@ -48,6 +48,7 @@ GDScriptFunction *GDScriptFunction::_populate_call_cache(int p_methodname_idx, c
 
 	const GDScript *script_cursor = p_target_script;
 	GDScriptFunction *found_function = nullptr;
+	bool all_scripts_valid = true;
 	while (script_cursor) {
 		if (likely(script_cursor->valid)) {
 			HashMap<StringName, GDScriptFunction *>::ConstIterator entry = script_cursor->member_functions.find(method_name);
@@ -55,11 +56,13 @@ GDScriptFunction *GDScriptFunction::_populate_call_cache(int p_methodname_idx, c
 				found_function = entry->value;
 				break;
 			}
+		} else {
+			all_scripts_valid = false;
 		}
 		script_cursor = script_cursor->base.ptr();
 	}
 
-	if (found_function == nullptr) {
+	if (found_function == nullptr && !all_scripts_valid) {
 		return nullptr;
 	}
 
@@ -205,7 +208,7 @@ const GDScriptFunction::NativeCallCacheSlot *GDScriptFunction::_populate_native_
 	return result_slot;
 }
 
-bool GDScriptFunction::_try_call_native_cached(int p_methodname_idx, Object *p_target_obj, const GDScript *p_script_key, const Variant *p_base, Variant **p_args, int p_argc, Variant *p_ret_slot, Variant &r_temp_ret, Callable::CallError &r_err) const {
+bool GDScriptFunction::_try_call_native_cached(int p_methodname_idx, Object *p_target_obj, const GDScript *p_script_key, const Variant *p_base, Variant **p_args, int p_argc, Variant *p_ret_slot, Callable::CallError &r_err) const {
 	const void *gdtype_key = &p_target_obj->get_gdtype();
 	const NativeCallCacheSlot *slot = _lookup_native_call_cache(p_methodname_idx, gdtype_key, p_script_key);
 	if (unlikely(slot == nullptr)) {
@@ -225,7 +228,7 @@ bool GDScriptFunction::_try_call_native_cached(int p_methodname_idx, Object *p_t
 		}
 		if (likely(types_match)) {
 			if (p_ret_slot != nullptr) {
-				if (slot->has_return) {
+				if (likely(slot->has_return)) {
 					bool aliased = (p_ret_slot == p_base);
 					for (int arg_index = 0; !aliased && arg_index < p_argc; arg_index++) {
 						if (p_ret_slot == p_args[arg_index]) {
@@ -248,9 +251,10 @@ bool GDScriptFunction::_try_call_native_cached(int p_methodname_idx, Object *p_t
 					slot->method->validated_call(p_target_obj, const_cast<const Variant **>(p_args), nullptr);
 				}
 			} else {
-				if (slot->has_return) {
-					VariantInternal::initialize(&r_temp_ret, slot->return_type);
-					slot->method->validated_call(p_target_obj, const_cast<const Variant **>(p_args), &r_temp_ret);
+				if (unlikely(slot->has_return)) {
+					Variant discarded_return;
+					VariantInternal::initialize(&discarded_return, slot->return_type);
+					slot->method->validated_call(p_target_obj, const_cast<const Variant **>(p_args), &discarded_return);
 				} else {
 					slot->method->validated_call(p_target_obj, const_cast<const Variant **>(p_args), nullptr);
 				}
@@ -264,7 +268,7 @@ bool GDScriptFunction::_try_call_native_cached(int p_methodname_idx, Object *p_t
 		Variant call_result = slot->method->call(p_target_obj, const_cast<const Variant **>(p_args), p_argc, r_err);
 		VariantInternal::assign_move_fast(p_ret_slot, call_result);
 	} else {
-		r_temp_ret = slot->method->call(p_target_obj, const_cast<const Variant **>(p_args), p_argc, r_err);
+		slot->method->call(p_target_obj, const_cast<const Variant **>(p_args), p_argc, r_err);
 	}
 	return true;
 }
@@ -337,37 +341,55 @@ GDScriptFunction *GDScriptFunction::_find_gdscript_function_in_chain(const GDScr
 	return nullptr;
 }
 
-const GDScriptFunction::MemberCacheSlot *GDScriptFunction::_populate_gdscript_member_cache(int p_name_idx, const GDScript *p_target_script) const {
-	const StringName &member_name = _global_names_ptr[p_name_idx];
-	HashMap<StringName, GDScript::MemberInfo>::ConstIterator member_it = p_target_script->member_indices.find(member_name);
-	if (!member_it) {
-		return nullptr;
+static void _resolve_native_property_binds(
+		const Object *p_object,
+		const StringName &p_property_name,
+		MethodBind *&r_native_getter,
+		Variant::Type &r_getter_return_type,
+		MethodBind *&r_native_setter,
+		Variant::Type &r_setter_arg_type) {
+	r_native_getter = nullptr;
+	r_getter_return_type = Variant::NIL;
+	r_native_setter = nullptr;
+	r_setter_arg_type = Variant::NIL;
+
+	const StringName &class_name = p_object->get_class_name();
+	if (ClassDB::get_api_type(class_name) != ClassDB::API_CORE) {
+		return;
 	}
 
-	const GDScript::MemberInfo &member_info = member_it->value;
-	MemberCacheSlot populated;
-	populated.key = p_target_script;
-	populated.member_index = member_info.index;
-	populated.member_data_type = &member_info.data_type;
+	bool valid_index = false;
+	const int property_index = ClassDB::get_property_index(class_name, p_property_name, &valid_index);
+	if (!valid_index || property_index >= 0) {
+		return;
+	}
 
-	if (member_info.getter == StringName() && member_info.setter == StringName()) {
-		populated.kind = MemberCacheSlot::GDSCRIPT_DIRECT;
-	} else {
-		populated.kind = MemberCacheSlot::GDSCRIPT_ACCESSOR;
-		if (member_info.getter != StringName()) {
-			populated.getter_func = _find_gdscript_function_in_chain(p_target_script, member_info.getter);
-			if (populated.getter_func == nullptr) {
-				return nullptr;
-			}
-		}
-		if (member_info.setter != StringName()) {
-			populated.setter_func = _find_gdscript_function_in_chain(p_target_script, member_info.setter);
-			if (populated.setter_func == nullptr) {
-				return nullptr;
+	const StringName getter_name = ClassDB::get_property_getter(class_name, p_property_name);
+	if (getter_name != StringName()) {
+		MethodBind *candidate = ClassDB::get_method(class_name, getter_name);
+		if (candidate && !candidate->is_static() && !candidate->is_vararg() && candidate->has_return() && candidate->get_argument_count() == 0) {
+			const Variant::Type return_type = candidate->get_return_info().type;
+			if (return_type != Variant::NIL) {
+				r_native_getter = candidate;
+				r_getter_return_type = return_type;
 			}
 		}
 	}
 
+	const StringName setter_name = ClassDB::get_property_setter(class_name, p_property_name);
+	if (setter_name != StringName()) {
+		MethodBind *candidate = ClassDB::get_method(class_name, setter_name);
+		if (candidate && !candidate->is_static() && !candidate->is_vararg() && !candidate->has_return() && candidate->get_argument_count() == 1) {
+			const Variant::Type argument_type = candidate->get_argument_info(0).type;
+			if (argument_type != Variant::NIL && argument_type != Variant::OBJECT && argument_type != Variant::ARRAY && argument_type != Variant::DICTIONARY) {
+				r_native_setter = candidate;
+				r_setter_arg_type = argument_type;
+			}
+		}
+	}
+}
+
+const GDScriptFunction::MemberCacheSlot *GDScriptFunction::_insert_member_cache_slot(int p_name_idx, const MemberCacheSlot &p_populated) const {
 	MemberInlineCache *cache_array = _member_cache.load(std::memory_order_acquire);
 	if (unlikely(cache_array == nullptr)) {
 		if (_global_names_count <= 0) {
@@ -397,14 +419,14 @@ const GDScriptFunction::MemberCacheSlot *GDScriptFunction::_populate_gdscript_me
 	uint32_t count = ((expected_meta >> 8) == current_epoch) ? static_cast<uint32_t>(expected_meta & 0xFF) : 0;
 	const MemberCacheSlot *result_slot = nullptr;
 	for (uint32_t slot_index = 0; slot_index < count; slot_index++) {
-		if (cache_entry.slots[slot_index].key == p_target_script) {
-			cache_entry.slots[slot_index] = populated;
+		if (cache_entry.slots[slot_index].key == p_populated.key && cache_entry.slots[slot_index].native_gdtype_key == p_populated.native_gdtype_key) {
+			cache_entry.slots[slot_index] = p_populated;
 			result_slot = &cache_entry.slots[slot_index];
 			break;
 		}
 	}
 	if (result_slot == nullptr && count < MemberInlineCache::MAX_SLOTS) {
-		cache_entry.slots[count] = populated;
+		cache_entry.slots[count] = p_populated;
 		result_slot = &cache_entry.slots[count];
 		count++;
 	}
@@ -413,51 +435,117 @@ const GDScriptFunction::MemberCacheSlot *GDScriptFunction::_populate_gdscript_me
 	return result_slot;
 }
 
-const GDScriptFunction::MemberCacheSlot *GDScriptFunction::_populate_native_member_cache(int p_name_idx, const Object *p_object) const {
-	const StringName &class_name = p_object->get_class_name();
-	if (ClassDB::get_api_type(class_name) != ClassDB::API_CORE) {
-		return nullptr;
+const GDScriptFunction::MemberCacheSlot *GDScriptFunction::_populate_gdscript_member_cache(int p_name_idx, const GDScript *p_target_script, const Object *p_object) const {
+	const StringName &member_name = _global_names_ptr[p_name_idx];
+	HashMap<StringName, GDScript::MemberInfo>::ConstIterator member_it = p_target_script->member_indices.find(member_name);
+	if (member_it) {
+		const GDScript::MemberInfo &member_info = member_it->value;
+		MemberCacheSlot populated;
+		populated.key = p_target_script;
+		populated.native_gdtype_key = nullptr;
+		populated.member_index = member_info.index;
+		populated.member_data_type = &member_info.data_type;
+
+		if (member_info.getter == StringName() && member_info.setter == StringName()) {
+			populated.kind = MemberCacheSlot::GDSCRIPT_DIRECT;
+		} else {
+			populated.kind = MemberCacheSlot::GDSCRIPT_ACCESSOR;
+			if (member_info.getter != StringName()) {
+				populated.getter_func = _find_gdscript_function_in_chain(p_target_script, member_info.getter);
+				if (populated.getter_func == nullptr) {
+					return nullptr;
+				}
+			}
+			if (member_info.setter != StringName()) {
+				populated.setter_func = _find_gdscript_function_in_chain(p_target_script, member_info.setter);
+				if (populated.setter_func == nullptr) {
+					return nullptr;
+				}
+			}
+		}
+		return _insert_member_cache_slot(p_name_idx, populated);
 	}
 
-	const StringName &property_name = _global_names_ptr[p_name_idx];
-	bool valid_index = false;
-	const int property_index = ClassDB::get_property_index(class_name, property_name, &valid_index);
-	if (!valid_index || property_index >= 0) {
-		return nullptr;
+	const StringName &custom_get_name = GDScriptLanguage::get_singleton()->strings._get;
+	const StringName &custom_set_name = GDScriptLanguage::get_singleton()->strings._set;
+	bool script_has_custom_get = false;
+	bool script_has_custom_set = false;
+	bool script_shadows_get = false;
+	bool found_script_signal = false;
+
+	const GDScript *script_cursor = p_target_script;
+	while (script_cursor != nullptr) {
+		if (unlikely(!script_cursor->valid)) {
+			return nullptr;
+		}
+		if (script_cursor->static_variables_indices.has(member_name)) {
+			return nullptr;
+		}
+		if (!script_shadows_get && !found_script_signal) {
+			if (script_cursor->constants.has(member_name)) {
+				script_shadows_get = true;
+			} else if (script_cursor->_signals.has(member_name)) {
+				found_script_signal = true;
+			} else if (script_cursor->member_functions.has(member_name) || script_cursor->subclasses.has(member_name)) {
+				script_shadows_get = true;
+			}
+		}
+		if (script_cursor->member_functions.has(custom_get_name)) {
+			script_has_custom_get = true;
+			if (!found_script_signal) {
+				script_shadows_get = true;
+			}
+		}
+		if (script_cursor->member_functions.has(custom_set_name)) {
+			script_has_custom_set = true;
+		}
+		script_cursor = script_cursor->base.ptr();
+	}
+
+	if (found_script_signal) {
+		MemberCacheSlot populated;
+		populated.kind = MemberCacheSlot::GDSCRIPT_SIGNAL;
+		populated.key = p_target_script;
+		populated.native_gdtype_key = nullptr;
+		return _insert_member_cache_slot(p_name_idx, populated);
 	}
 
 	MethodBind *native_getter = nullptr;
 	Variant::Type getter_return_type = Variant::NIL;
-	const StringName getter_name = ClassDB::get_property_getter(class_name, property_name);
-	if (getter_name != StringName()) {
-		MethodBind *candidate = ClassDB::get_method(class_name, getter_name);
-		if (candidate && !candidate->is_static() && !candidate->is_vararg() && candidate->has_return() && candidate->get_argument_count() == 0) {
-			const Variant::Type return_type = candidate->get_return_info().type;
-			if (return_type != Variant::NIL) {
-				native_getter = candidate;
-				getter_return_type = return_type;
-			}
-		}
-	}
-
 	MethodBind *native_setter = nullptr;
 	Variant::Type setter_arg_type = Variant::NIL;
-#ifndef TOOLS_ENABLED
-	const StringName setter_name = ClassDB::get_property_setter(class_name, property_name);
-	if (setter_name != StringName()) {
-		MethodBind *candidate = ClassDB::get_method(class_name, setter_name);
-		if (candidate && !candidate->is_static() && !candidate->is_vararg() && !candidate->has_return() && candidate->get_argument_count() == 1) {
-			MethodInfo method_info;
-			if (ClassDB::get_method_info(class_name, setter_name, &method_info) && method_info.arguments.size() == 1) {
-				const Variant::Type argument_type = method_info.arguments[0].type;
-				if (argument_type != Variant::NIL && argument_type != Variant::OBJECT && argument_type != Variant::ARRAY && argument_type != Variant::DICTIONARY) {
-					native_setter = candidate;
-					setter_arg_type = argument_type;
-				}
-			}
-		}
+	_resolve_native_property_binds(p_object, member_name, native_getter, getter_return_type, native_setter, setter_arg_type);
+
+	if (script_has_custom_get || script_shadows_get) {
+		native_getter = nullptr;
+		getter_return_type = Variant::NIL;
 	}
-#endif
+	if (script_has_custom_set) {
+		native_setter = nullptr;
+		setter_arg_type = Variant::NIL;
+	}
+	if (native_getter == nullptr && native_setter == nullptr) {
+		return nullptr;
+	}
+
+	MemberCacheSlot populated;
+	populated.kind = MemberCacheSlot::NATIVE_PROPERTY;
+	populated.key = p_target_script;
+	populated.native_gdtype_key = &p_object->get_gdtype();
+	populated.native_getter = native_getter;
+	populated.getter_return_type = getter_return_type;
+	populated.native_setter = native_setter;
+	populated.setter_arg_type = setter_arg_type;
+	return _insert_member_cache_slot(p_name_idx, populated);
+}
+
+const GDScriptFunction::MemberCacheSlot *GDScriptFunction::_populate_native_member_cache(int p_name_idx, const Object *p_object) const {
+	const StringName &property_name = _global_names_ptr[p_name_idx];
+	MethodBind *native_getter = nullptr;
+	Variant::Type getter_return_type = Variant::NIL;
+	MethodBind *native_setter = nullptr;
+	Variant::Type setter_arg_type = Variant::NIL;
+	_resolve_native_property_binds(p_object, property_name, native_getter, getter_return_type, native_setter, setter_arg_type);
 
 	if (native_getter == nullptr && native_setter == nullptr) {
 		return nullptr;
@@ -467,54 +555,177 @@ const GDScriptFunction::MemberCacheSlot *GDScriptFunction::_populate_native_memb
 	MemberCacheSlot populated;
 	populated.kind = MemberCacheSlot::NATIVE_PROPERTY;
 	populated.key = gdtype_key;
+	populated.native_gdtype_key = gdtype_key;
 	populated.native_getter = native_getter;
 	populated.getter_return_type = getter_return_type;
 	populated.native_setter = native_setter;
 	populated.setter_arg_type = setter_arg_type;
+	return _insert_member_cache_slot(p_name_idx, populated);
+}
 
-	MemberInlineCache *cache_array = _member_cache.load(std::memory_order_acquire);
-	if (unlikely(cache_array == nullptr)) {
-		if (_global_names_count <= 0) {
-			return nullptr;
-		}
-		MemberInlineCache *allocated = memnew_arr(MemberInlineCache, _global_names_count);
-		MemberInlineCache *expected = nullptr;
-		if (_member_cache.compare_exchange_strong(expected, allocated, std::memory_order_acq_rel, std::memory_order_acquire)) {
-			cache_array = allocated;
-		} else {
-			memdelete_arr(allocated);
-			cache_array = expected;
-		}
-	}
-
-	MemberInlineCache &cache_entry = cache_array[p_name_idx];
-	const uint64_t current_epoch = _script_clear_epoch.load(std::memory_order_acquire);
-	uint64_t expected_meta = cache_entry.epoch_and_count.load(std::memory_order_acquire);
-	if ((expected_meta & 0xFF) == MemberInlineCache::LOCKED_STATE) {
+const GDScriptFunction::MemberCacheSlot *GDScriptFunction::_populate_builtin_member_cache(int p_name_idx, Variant::Type p_type) const {
+	const StringName &member_name = _global_names_ptr[p_name_idx];
+	const Variant::ValidatedGetter builtin_getter = Variant::get_member_validated_getter(p_type, member_name);
+	const Variant::ValidatedSetter builtin_setter = Variant::get_member_validated_setter(p_type, member_name);
+	if (builtin_getter == nullptr && builtin_setter == nullptr) {
 		return nullptr;
 	}
-	const uint64_t locked_meta = (expected_meta & ~uint64_t(0xFF)) | MemberInlineCache::LOCKED_STATE;
-	if (!cache_entry.epoch_and_count.compare_exchange_strong(expected_meta, locked_meta, std::memory_order_acq_rel, std::memory_order_acquire)) {
+	const Variant::Type member_type = Variant::get_member_type(p_type, member_name);
+	if (member_type == Variant::NIL || member_type == Variant::VARIANT_MAX) {
 		return nullptr;
 	}
 
-	uint32_t count = ((expected_meta >> 8) == current_epoch) ? static_cast<uint32_t>(expected_meta & 0xFF) : 0;
-	const MemberCacheSlot *result_slot = nullptr;
-	for (uint32_t slot_index = 0; slot_index < count; slot_index++) {
-		if (cache_entry.slots[slot_index].key == gdtype_key) {
-			cache_entry.slots[slot_index] = populated;
-			result_slot = &cache_entry.slots[slot_index];
-			break;
+	MemberCacheSlot populated;
+	populated.kind = MemberCacheSlot::BUILTIN_MEMBER;
+	populated.key = reinterpret_cast<const void *>(static_cast<uintptr_t>(p_type));
+	populated.native_gdtype_key = nullptr;
+	populated.builtin_getter = builtin_getter;
+	populated.builtin_setter = builtin_setter;
+	populated.getter_return_type = member_type;
+	populated.setter_arg_type = member_type;
+	return _insert_member_cache_slot(p_name_idx, populated);
+}
+
+bool GDScriptFunction::_set_named_cached_fallback(int p_name_idx, Variant *p_dst, const Variant *p_value, Object *p_target_obj, const GDScript *p_target_script, const MemberCacheSlot *p_slot) const {
+	if (p_target_obj != nullptr) {
+#ifndef TOOLS_ENABLED
+		const MemberCacheSlot *slot = p_slot;
+		if (slot == nullptr) {
+			if (p_target_script != nullptr) {
+				slot = _lookup_script_member_cache(p_name_idx, p_target_script, p_target_obj);
+				if (unlikely(slot == nullptr)) {
+					slot = _populate_gdscript_member_cache(p_name_idx, p_target_script, p_target_obj);
+				}
+			} else {
+				const void *gdtype_key = &p_target_obj->get_gdtype();
+				slot = _lookup_member_cache(p_name_idx, gdtype_key);
+				if (unlikely(slot == nullptr)) {
+					slot = _populate_native_member_cache(p_name_idx, p_target_obj);
+				}
+			}
 		}
-	}
-	if (result_slot == nullptr && count < MemberInlineCache::MAX_SLOTS) {
-		cache_entry.slots[count] = populated;
-		result_slot = &cache_entry.slots[count];
-		count++;
+		if (likely(slot != nullptr && slot->kind == MemberCacheSlot::NATIVE_PROPERTY && slot->native_setter != nullptr && p_value->get_type() == slot->setter_arg_type)) {
+			const Variant *arg_ptr = p_value;
+			slot->native_setter->validated_call(p_target_obj, &arg_ptr, nullptr);
+			return true;
+		}
+#endif
+		return false;
 	}
 
-	cache_entry.epoch_and_count.store((current_epoch << 8) | count, std::memory_order_release);
-	return result_slot;
+	const Variant::Type dst_type = p_dst->get_type();
+	if (dst_type != Variant::NIL && dst_type != Variant::DICTIONARY) {
+		const void *type_key = reinterpret_cast<const void *>(static_cast<uintptr_t>(dst_type));
+		const MemberCacheSlot *slot = _lookup_member_cache(p_name_idx, type_key);
+		if (unlikely(slot == nullptr)) {
+			slot = _populate_builtin_member_cache(p_name_idx, dst_type);
+		}
+		if (likely(slot != nullptr && slot->kind == MemberCacheSlot::BUILTIN_MEMBER && slot->builtin_setter != nullptr && p_value->get_type() == slot->setter_arg_type)) {
+			slot->builtin_setter(p_dst, p_value);
+			return true;
+		}
+	}
+	return false;
+}
+
+bool GDScriptFunction::_get_named_cached_fallback(int p_name_idx, const Variant *p_src, Variant *p_dst, Object *p_target_obj, const GDScript *p_target_script, const MemberCacheSlot *p_slot) const {
+	if (p_target_obj != nullptr) {
+		const MemberCacheSlot *slot = p_slot;
+		if (slot == nullptr) {
+			if (p_target_script != nullptr) {
+				slot = _lookup_script_member_cache(p_name_idx, p_target_script, p_target_obj);
+				if (unlikely(slot == nullptr)) {
+					slot = _populate_gdscript_member_cache(p_name_idx, p_target_script, p_target_obj);
+				}
+			} else {
+				const void *gdtype_key = &p_target_obj->get_gdtype();
+				slot = _lookup_member_cache(p_name_idx, gdtype_key);
+				if (unlikely(slot == nullptr)) {
+					slot = _populate_native_member_cache(p_name_idx, p_target_obj);
+				}
+			}
+		}
+		if (likely(slot != nullptr)) {
+			if (slot->kind == MemberCacheSlot::NATIVE_PROPERTY) {
+				if (likely(slot->native_getter != nullptr)) {
+					if (likely(p_src != p_dst)) {
+						if (unlikely(p_dst->get_type() != slot->getter_return_type)) {
+							VariantInternal::initialize(p_dst, slot->getter_return_type);
+						}
+						slot->native_getter->validated_call(p_target_obj, nullptr, p_dst);
+					} else {
+						Variant temp_ret;
+						VariantInternal::initialize(&temp_ret, slot->getter_return_type);
+						slot->native_getter->validated_call(p_target_obj, nullptr, &temp_ret);
+						VariantInternal::assign_move_fast(p_dst, temp_ret);
+					}
+					return true;
+				}
+			} else if (slot->kind == MemberCacheSlot::GDSCRIPT_SIGNAL) {
+				const ObjectID target_id = p_target_obj->get_instance_id();
+				if (unlikely(p_dst->get_type() != Variant::SIGNAL)) {
+					VariantInternal::initialize(p_dst, Variant::SIGNAL);
+				}
+				*VariantInternal::get_signal(p_dst) = Signal(target_id, _global_names_ptr[p_name_idx]);
+				return true;
+			}
+		}
+		return false;
+	}
+
+	const Variant::Type src_type = p_src->get_type();
+	if (src_type != Variant::NIL && src_type != Variant::DICTIONARY) {
+		const void *type_key = reinterpret_cast<const void *>(static_cast<uintptr_t>(src_type));
+		const MemberCacheSlot *slot = _lookup_member_cache(p_name_idx, type_key);
+		if (unlikely(slot == nullptr)) {
+			slot = _populate_builtin_member_cache(p_name_idx, src_type);
+		}
+		if (likely(slot != nullptr && slot->kind == MemberCacheSlot::BUILTIN_MEMBER && slot->builtin_getter != nullptr)) {
+			if (likely(p_src != p_dst)) {
+				if (unlikely(p_dst->get_type() != slot->getter_return_type)) {
+					VariantInternal::initialize(p_dst, slot->getter_return_type);
+				}
+				slot->builtin_getter(p_src, p_dst);
+			} else {
+				Variant temp_ret;
+				VariantInternal::initialize(&temp_ret, slot->getter_return_type);
+				slot->builtin_getter(p_src, &temp_ret);
+				VariantInternal::assign_move_fast(p_dst, temp_ret);
+			}
+			return true;
+		}
+	}
+	return false;
+}
+
+bool GDScriptFunction::_set_member_cached(int p_name_idx, Object *p_owner, const Variant *p_src) const {
+	const void *gdtype_key = &p_owner->get_gdtype();
+	const MemberCacheSlot *slot = _lookup_member_cache(p_name_idx, gdtype_key);
+	if (unlikely(slot == nullptr)) {
+		slot = _populate_native_member_cache(p_name_idx, p_owner);
+	}
+	if (likely(slot != nullptr && slot->kind == MemberCacheSlot::NATIVE_PROPERTY && slot->native_setter != nullptr && p_src->get_type() == slot->setter_arg_type)) {
+		const Variant *arg_ptr = p_src;
+		slot->native_setter->validated_call(p_owner, &arg_ptr, nullptr);
+		return true;
+	}
+	return false;
+}
+
+bool GDScriptFunction::_get_member_cached(int p_name_idx, Object *p_owner, Variant *p_dst) const {
+	const void *gdtype_key = &p_owner->get_gdtype();
+	const MemberCacheSlot *slot = _lookup_member_cache(p_name_idx, gdtype_key);
+	if (unlikely(slot == nullptr)) {
+		slot = _populate_native_member_cache(p_name_idx, p_owner);
+	}
+	if (likely(slot != nullptr && slot->kind == MemberCacheSlot::NATIVE_PROPERTY && slot->native_getter != nullptr)) {
+		if (unlikely(p_dst->get_type() != slot->getter_return_type)) {
+			VariantInternal::initialize(p_dst, slot->getter_return_type);
+		}
+		slot->native_getter->validated_call(p_owner, nullptr, p_dst);
+		return true;
+	}
+	return false;
 }
 
 bool GDScriptDataType::is_type(const Variant &p_variant, bool p_allow_implicit_conversion) const {
