@@ -217,6 +217,15 @@ void GDScript::_prepare_instantiation_cache() {
 	}
 	_has_notification_functions = has_notifications;
 
+	Vector<Pair<int, Variant::Type>> typed_builtin_members;
+	for (const KeyValue<StringName, MemberInfo> &entry : member_indices) {
+		const GDScriptDataType &member_type = entry.value.data_type;
+		if (member_type.kind == GDScriptDataType::BUILTIN && member_type.builtin_type != Variant::NIL && !member_type.has_container_element_types()) {
+			typed_builtin_members.push_back(Pair<int, Variant::Type>(entry.value.index, member_type.builtin_type));
+		}
+	}
+	_typed_builtin_members = std::move(typed_builtin_members);
+
 	const int member_count = member_indices.size();
 	Vector<Variant> template_members;
 	template_members.resize(member_count);
@@ -470,6 +479,10 @@ GDScriptInstance *GDScript::_create_instance(const Variant **p_args, int p_argco
 		}
 	} else {
 		instance->members.resize(member_indices.size());
+		for (int index = 0; index < _typed_builtin_members.size(); index++) {
+			const Pair<int, Variant::Type> &member_default = _typed_builtin_members[index];
+			VariantInternal::initialize(&instance->members[member_default.first], member_default.second);
+		}
 		_super_implicit_constructor(this, instance, r_error);
 		if (r_error.error != Callable::CallError::CALL_OK) {
 			String error_text = Variant::get_call_error_text(instance->owner, "@implicit_new", nullptr, 0, r_error);
@@ -555,6 +568,10 @@ GDScriptInstance *GDScript::_create_instance_without_init(Callable::CallError &r
 	}
 
 	instance->members.resize(member_indices.size());
+	for (int index = 0; index < _typed_builtin_members.size(); index++) {
+		const Pair<int, Variant::Type> &member_default = _typed_builtin_members[index];
+		VariantInternal::initialize(&instance->members[member_default.first], member_default.second);
+	}
 	_super_implicit_constructor(this, instance, r_error);
 	if (unlikely(r_error.error != Callable::CallError::CALL_OK)) {
 		String error_text = Variant::get_call_error_text(instance->owner, "@implicit_new", nullptr, 0, r_error);
@@ -2506,9 +2523,17 @@ void GDScriptInstance::reload_members() {
 
 	//pass the values to the new indices
 	for (KeyValue<StringName, GDScript::MemberInfo> &E : script->member_indices) {
+		const GDScriptDataType &member_type = E.value.data_type;
+		const bool requires_typed_builtin = member_type.kind == GDScriptDataType::BUILTIN && member_type.builtin_type != Variant::NIL && !member_type.has_container_element_types();
 		if (member_indices_cache.has(E.key)) {
 			Variant value = members[member_indices_cache[E.key]];
-			new_members.write[E.value.index] = value;
+			if (requires_typed_builtin && value.get_type() != member_type.builtin_type) {
+				VariantInternal::initialize(&new_members.write[E.value.index], member_type.builtin_type);
+			} else {
+				new_members.write[E.value.index] = value;
+			}
+		} else if (requires_typed_builtin) {
+			VariantInternal::initialize(&new_members.write[E.value.index], member_type.builtin_type);
 		}
 	}
 

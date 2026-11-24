@@ -3003,6 +3003,285 @@ func _notification(what: int) -> void:
 			DirAccess::remove_absolute(base_path);
 		}
 	}
+
+	TEST_CASE("Bytecode optimizer: typed match, constant jumps, producer folding, dead null clears, and temp compaction") {
+		Ref<GDScript> script = compile_source(R"(
+extends RefCounted
+
+class TrackedRef extends RefCounted:
+	static var freed_count: int = 0
+	var tag: int = 0
+	func _init(p_tag: int) -> void:
+		tag = p_tag
+	func _notification(what: int) -> void:
+		if what == NOTIFICATION_PREDELETE:
+			freed_count += 1
+
+class EarlyMemberOrder extends RefCounted:
+	var observed_in_early: int = -1
+	var early_value: int = _init_early()
+	var late_value: int = 50
+	func _init_early() -> int:
+		late_value = 7 + 8
+		observed_in_early = late_value
+		return late_value + 1
+
+class ReentrantMember extends RefCounted:
+	var count: int = 10
+	var seen_during_call: int = 0
+	func _mutate_and_return() -> int:
+		seen_during_call = count
+		count = 99
+		return seen_during_call + 5
+	func run() -> Array:
+		count = _mutate_and_return()
+		return [seen_during_call, count]
+
+class SideEffectHolder extends RefCounted:
+	var hits: int = 0
+	var side_effect_float: float:
+		get:
+			hits += 1
+			return 1.0
+
+var side_effect_holder: SideEffectHolder = SideEffectHolder.new()
+var match_member: int = 1
+var direct_counter: int = 3
+var direct_weight: float = 2.0
+
+func _bump_match_member() -> bool:
+	match_member = 2
+	return false
+
+func match_typed_int(code: int) -> int:
+	match code:
+		1.0:
+			return -100
+		1:
+			return 10
+		2, 3:
+			return 23
+		4:
+			return 40
+		var big when big > 10:
+			return big * 2
+		_:
+			return -1
+
+func match_side_effect_expr(code: int) -> int:
+	var holder: SideEffectHolder = side_effect_holder
+	match code:
+		holder.side_effect_float:
+			return 999
+		1:
+			return 42
+		_:
+			return 0
+
+func match_string_and_stringname(text: String, name_val: StringName) -> Array:
+	var a: int = 0
+	match text:
+		&"alpha":
+			a = 1
+		"beta":
+			a = 2
+		_:
+			a = 3
+	var b: int = 0
+	match name_val:
+		"gamma":
+			b = 10
+		&"delta":
+			b = 20
+		_:
+			b = 30
+	return [a, b]
+
+func match_member_with_mutating_guard() -> int:
+	match_member = 1
+	match match_member:
+		1 when _bump_match_member():
+			return 111
+		1:
+			return 222
+		2:
+			return 333
+		_:
+			return 444
+
+func match_nested_containers(payload) -> int:
+	match payload:
+		[1, var second]:
+			return int(second) + 10
+		{"k": var mapped}:
+			return int(mapped) + 20
+		_:
+			return -1
+
+func constant_jump_while_true(limit: int) -> int:
+	var total: int = 0
+	var index: int = 0
+	while true:
+		if index >= limit:
+			break
+		total += index
+		index += 1
+	if false:
+		total = -999
+	if true:
+		total += 1
+	return total
+
+func untyped_primitive_expr(a, b):
+	return ((a * 3 + 1) - (b & 7)) ^ (a + 5)
+
+func untyped_primitive_loop(limit):
+	var accumulator = 1
+	var index = 0
+	while index < limit:
+		var delta = (index * 3 + 1) - (index & 7)
+		accumulator = (accumulator + delta) & 0x3fffffff
+		index += 1
+	return accumulator
+
+func member_direct_fold(steps: int) -> Array:
+	direct_counter = 3
+	direct_weight = 2.0
+	for i: int in range(steps):
+		direct_counter = (direct_counter + (i & 7)) & 0x3fffffff
+		direct_weight = direct_weight * 0.5 + 1.0
+	return [direct_counter, int(direct_weight * 100.0)]
+
+func fold_construct_cast_lambda(input_val) -> Dictionary:
+	var as_int: int = input_val as int
+	var typed_arr: Array[int] = [as_int, as_int + 1]
+	var typed_dict: Dictionary[String, int] = { "x": as_int, "y": as_int + 2 }
+	var multiplier: int = 3
+	var fn: Callable = func(v: int) -> int:
+		return v * multiplier + as_int
+	return {
+		"as_int": as_int,
+		"arr": typed_arr,
+		"dict": typed_dict,
+		"lambda": fn.call(4),
+	}
+
+func make_tracked_array(tag: int) -> Array:
+	return [TrackedRef.new(tag)]
+
+func verify_temp_object_release() -> Array:
+	TrackedRef.freed_count = 0
+	# Temporary Array + Array holding TrackedRef must still be cleared right after the statement.
+	var combined_size: int = (make_tracked_array(1) + make_tracked_array(2)).size()
+	var freed_after_stmt: int = TrackedRef.freed_count
+	return [combined_size, freed_after_stmt]
+
+func run_all() -> Dictionary:
+	side_effect_holder.hits = 0
+	var side_effect_res: int = match_side_effect_expr(1)
+	var early := EarlyMemberOrder.new()
+	var reentrant := ReentrantMember.new()
+	return {
+		"match_int_1": match_typed_int(1),
+		"match_int_2": match_typed_int(2),
+		"match_int_3": match_typed_int(3),
+		"match_int_15": match_typed_int(15),
+		"match_int_9": match_typed_int(9),
+		"match_side_effect_res": side_effect_res,
+		"match_side_effect_hits": side_effect_holder.hits,
+		"match_strings": match_string_and_stringname("alpha", &"gamma"),
+		"match_strings_2": match_string_and_stringname("beta", &"delta"),
+		"match_member_guard": match_member_with_mutating_guard(),
+		"match_nested_arr": match_nested_containers([1, 7]),
+		"match_nested_dict": match_nested_containers({"k": 8}),
+		"while_true": constant_jump_while_true(6),
+		"untyped_prim": untyped_primitive_loop(20),
+		"member_fold": member_direct_fold(5),
+		"fold_misc": fold_construct_cast_lambda(5),
+		"early_order": [early.observed_in_early, early.early_value, early.late_value],
+		"reentrant_member": reentrant.run(),
+		"temp_release": verify_temp_object_release(),
+	}
+)",
+				"res://compiler_opt_tier2d.gd");
+
+		// Verify bytecode-level invariants on compiled functions.
+		auto count_opcode = [](const GDScriptFunction *p_fn, GDScriptFunction::Opcode p_target) -> int {
+			int count = 0;
+			const Vector<int> &code = GDScriptBytecodeTestAccessor::mutable_code(const_cast<GDScriptFunction *>(p_fn));
+			for (int ip = 0; ip < code.size();) {
+				const GDScriptFunction::Opcode op = static_cast<GDScriptFunction::Opcode>(code[ip]);
+				if (op == p_target) {
+					count++;
+				}
+				const auto &layout = GDScriptFunction::get_opcode_layout(op);
+				ip += layout.is_vararg ? (2 + code[ip + 1] + layout.word_count) : layout.word_count;
+			}
+			return count;
+		};
+
+		GDScriptFunction *match_int_fn = script->get_member_functions()[StringName("match_typed_int")];
+		REQUIRE(match_int_fn != nullptr);
+		CHECK(count_opcode(match_int_fn, GDScriptFunction::OPCODE_JUMP_IF_NOT_INT_EQ) >= 2);
+		CHECK(count_opcode(match_int_fn, GDScriptFunction::OPCODE_JUMP_IF_NOT_INT_NE) >= 1);
+		CHECK(count_opcode(match_int_fn, GDScriptFunction::OPCODE_CALL_UTILITY_VALIDATED) == 0);
+		CHECK(count_opcode(match_int_fn, GDScriptFunction::OPCODE_CALL_UTILITY) == 0);
+
+		GDScriptFunction *untyped_prim_fn = script->get_member_functions()[StringName("untyped_primitive_expr")];
+		REQUIRE(untyped_prim_fn != nullptr);
+		CHECK(count_opcode(untyped_prim_fn, GDScriptFunction::OPCODE_ASSIGN_NULL) == 0);
+
+		const Vector<uint8_t> bytes = export_script_bytes(script);
+		Ref<GDScript> loaded = load_script_bytes(bytes, "res://compiler_opt_tier2d.gd");
+		REQUIRE(GDScriptBytecodeVerifier::verify_class(loaded.ptr()) == OK);
+
+		Ref<RefCounted> orig_inst = memnew(RefCounted);
+		orig_inst->set_script(script);
+		Ref<RefCounted> loaded_inst = memnew(RefCounted);
+		loaded_inst->set_script(loaded);
+
+		Dictionary orig_res = orig_inst->call("run_all");
+		Dictionary loaded_res = loaded_inst->call("run_all");
+		CHECK(orig_res == loaded_res);
+		CHECK(int(loaded_res["match_int_1"]) == 10);
+		CHECK(int(loaded_res["match_int_2"]) == 23);
+		CHECK(int(loaded_res["match_int_3"]) == 23);
+		CHECK(int(loaded_res["match_int_15"]) == 30);
+		CHECK(int(loaded_res["match_int_9"]) == -1);
+		CHECK(int(loaded_res["match_side_effect_res"]) == 42);
+		CHECK(int(loaded_res["match_side_effect_hits"]) == 1);
+		CHECK(Array(loaded_res["match_strings"]) == Array{ 1, 10 });
+		CHECK(Array(loaded_res["match_strings_2"]) == Array{ 2, 20 });
+		CHECK(int(loaded_res["match_member_guard"]) == 222);
+		CHECK(int(loaded_res["match_nested_arr"]) == 17);
+		CHECK(int(loaded_res["match_nested_dict"]) == 28);
+		CHECK(int(loaded_res["while_true"]) == 16);
+		CHECK(int(loaded_res["untyped_prim"]) == 529);
+		CHECK(Array(loaded_res["early_order"]) == Array{ 15, 16, 50 });
+		CHECK(Array(loaded_res["reentrant_member"]) == Array{ 10, 15 });
+		CHECK(Array(loaded_res["temp_release"]) == Array{ 2, 2 });
+		Dictionary misc = loaded_res["fold_misc"];
+		CHECK(int(misc["as_int"]) == 5);
+		CHECK(int(misc["lambda"]) == 17);
+
+		// Hot-reload adding a new typed builtin member must pre-initialize it before member-folded inline ops execute.
+		{
+			Ref<GDScript> reloadable;
+			reloadable.instantiate();
+			reloadable->set_source_code("extends RefCounted\nvar a: int = 1\n");
+			REQUIRE(reloadable->reload() == OK);
+
+			Callable::CallError err;
+			Variant obj = reloadable->_new(nullptr, 0, err);
+			REQUIRE(err.error == Callable::CallError::CALL_OK);
+			Ref<RefCounted> obj_ref = obj;
+			REQUIRE(obj_ref.is_valid());
+
+			reloadable->set_source_code("extends RefCounted\nvar a: int = 1\nvar b: int = 2\nfunc set_b(x: int) -> int:\n\tb = x + 10\n\treturn b\n");
+			REQUIRE(reloadable->reload(true) == OK);
+			CHECK(int(obj_ref->call("set_b", 5)) == 15);
+		}
+	}
 }
 
 } // namespace TestGDScriptBytecode
