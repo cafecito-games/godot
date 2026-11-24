@@ -1495,6 +1495,24 @@ static bool _match_builtin_types_compatible(Variant::Type p_a, Variant::Type p_b
 	return (p_a == Variant::STRING && p_b == Variant::STRING_NAME) || (p_a == Variant::STRING_NAME && p_b == Variant::STRING);
 }
 
+static bool _match_type_is_immutable_value(const GDScriptDataType &p_type) {
+	if (p_type.kind != GDScriptDataType::BUILTIN) {
+		return false;
+	}
+	switch (p_type.builtin_type) {
+		case Variant::BOOL:
+		case Variant::INT:
+		case Variant::FLOAT:
+		case Variant::STRING:
+		case Variant::STRING_NAME:
+		case Variant::NODE_PATH:
+		case Variant::RID:
+			return true;
+		default:
+			return false;
+	}
+}
+
 GDScriptCodeGenerator::Address GDScriptCompiler::_parse_match_pattern(CodeGen &codegen, Error &r_error, const GDScriptParser::PatternNode *p_pattern, const GDScriptCodeGenerator::Address &p_value_addr, const GDScriptCodeGenerator::Address &p_type_addr, const GDScriptCodeGenerator::Address &p_previous_test, bool p_is_first, bool p_is_nested) {
 	switch (p_pattern->pattern_type) {
 		case GDScriptParser::PatternNode::PT_LITERAL: {
@@ -2118,9 +2136,19 @@ Error GDScriptCompiler::_parse_block(CodeGen &codegen, const GDScriptParser::Sui
 				}
 
 				GDScriptCodeGenerator::Address value;
-				if (value_expr.mode == GDScriptCodeGenerator::Address::LOCAL_VARIABLE ||
-						value_expr.mode == GDScriptCodeGenerator::Address::FUNCTION_PARAMETER ||
-						value_expr.mode == GDScriptCodeGenerator::Address::CONSTANT) {
+				bool has_guard = false;
+				for (int branch_index = 0; branch_index < match->branches.size(); branch_index++) {
+					if (match->branches[branch_index]->guard_body != nullptr) {
+						has_guard = true;
+						break;
+					}
+				}
+				const bool can_reuse_subject =
+						value_expr.mode == GDScriptCodeGenerator::Address::CONSTANT ||
+						((value_expr.mode == GDScriptCodeGenerator::Address::LOCAL_VARIABLE ||
+								 value_expr.mode == GDScriptCodeGenerator::Address::FUNCTION_PARAMETER) &&
+								(!has_guard || _match_type_is_immutable_value(value_expr.type)));
+				if (can_reuse_subject) {
 					value = value_expr;
 				} else {
 					value = codegen.add_local("@match_value", _gdtype_from_datatype(match->test->get_datatype(), codegen.script));

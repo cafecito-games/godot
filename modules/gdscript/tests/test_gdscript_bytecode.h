@@ -3109,6 +3109,23 @@ func match_member_with_mutating_guard() -> int:
 		_:
 			return 444
 
+func match_packed_array_with_mutating_guard() -> int:
+	var data: PackedInt32Array = PackedInt32Array([1])
+	var expected_after_resize: int = 0
+	var reference_data: PackedInt32Array = PackedInt32Array([1])
+	var reference_snapshot: PackedInt32Array = reference_data
+	reference_data.resize(2)
+	expected_after_resize = 1 if reference_snapshot.size() == 1 else 2
+	var actual: int = 0
+	match data:
+		_ when data.resize(2) != OK:
+			actual = 99
+		var current when current.size() == 1:
+			actual = 1
+		_:
+			actual = 2
+	return 1 if actual == expected_after_resize else 0
+
 func match_nested_containers(payload) -> int:
 	match payload:
 		[1, var second]:
@@ -3192,6 +3209,7 @@ func run_all() -> Dictionary:
 		"match_strings": match_string_and_stringname("alpha", &"gamma"),
 		"match_strings_2": match_string_and_stringname("beta", &"delta"),
 		"match_member_guard": match_member_with_mutating_guard(),
+		"match_packed_guard": match_packed_array_with_mutating_guard(),
 		"match_nested_arr": match_nested_containers([1, 7]),
 		"match_nested_dict": match_nested_containers({"k": 8}),
 		"while_true": constant_jump_while_true(6),
@@ -3253,6 +3271,7 @@ func run_all() -> Dictionary:
 		CHECK(Array(loaded_res["match_strings"]) == Array{ 1, 10 });
 		CHECK(Array(loaded_res["match_strings_2"]) == Array{ 2, 20 });
 		CHECK(int(loaded_res["match_member_guard"]) == 222);
+		CHECK(int(loaded_res["match_packed_guard"]) == 1);
 		CHECK(int(loaded_res["match_nested_arr"]) == 17);
 		CHECK(int(loaded_res["match_nested_dict"]) == 28);
 		CHECK(int(loaded_res["while_true"]) == 16);
