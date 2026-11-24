@@ -44,6 +44,7 @@ class GDScriptLambdaCallable : public CallableCustom {
 	GDScript::UpdatableFuncPtr function;
 	Ref<GDScript> script;
 	uint32_t h;
+	bool has_object_capture = false;
 
 	Vector<Variant> captures;
 
@@ -51,6 +52,11 @@ class GDScriptLambdaCallable : public CallableCustom {
 	static bool compare_less(const CallableCustom *p_a, const CallableCustom *p_b);
 
 public:
+	_FORCE_INLINE_ GDScriptFunction *get_function() const { return function; }
+	_FORCE_INLINE_ GDScript *get_script_ptr() const { return script.ptr(); }
+	_FORCE_INLINE_ const Vector<Variant> &get_captures() const { return captures; }
+	_FORCE_INLINE_ bool has_object_captures() const { return has_object_capture; }
+
 	bool is_valid() const override;
 	uint32_t hash() const override;
 	String get_as_text() const override;
@@ -64,6 +70,7 @@ public:
 	GDScriptLambdaCallable(GDScriptLambdaCallable &) = delete;
 	GDScriptLambdaCallable(const GDScriptLambdaCallable &) = delete;
 	GDScriptLambdaCallable(Ref<GDScript> p_script, GDScriptFunction *p_function, const Vector<Variant> &p_captures);
+	GDScriptLambdaCallable(Ref<GDScript> p_script, GDScriptFunction *p_function, Vector<Variant> &&p_captures);
 	virtual ~GDScriptLambdaCallable() = default;
 };
 
@@ -72,7 +79,9 @@ class GDScriptLambdaSelfCallable : public CallableCustom {
 	GDScript::UpdatableFuncPtr function;
 	Ref<RefCounted> reference; // For objects that are RefCounted, keep a reference.
 	Object *object = nullptr; // For non RefCounted objects, use a direct pointer.
+	ObjectID object_id;
 	uint32_t h;
+	bool has_object_capture = false;
 
 	Vector<Variant> captures;
 
@@ -80,6 +89,13 @@ class GDScriptLambdaSelfCallable : public CallableCustom {
 	static bool compare_less(const CallableCustom *p_a, const CallableCustom *p_b);
 
 public:
+	_FORCE_INLINE_ GDScriptFunction *get_function() const { return function; }
+	_FORCE_INLINE_ Object *get_self_object() const { return object; }
+	_FORCE_INLINE_ ObjectID get_self_object_id() const { return object_id; }
+	_FORCE_INLINE_ bool is_self_ref_counted() const { return reference.is_valid(); }
+	_FORCE_INLINE_ const Vector<Variant> &get_captures() const { return captures; }
+	_FORCE_INLINE_ bool has_object_captures() const { return has_object_capture; }
+
 	bool is_valid() const override;
 	uint32_t hash() const override;
 	String get_as_text() const override;
@@ -93,6 +109,8 @@ public:
 	GDScriptLambdaSelfCallable(GDScriptLambdaSelfCallable &) = delete;
 	GDScriptLambdaSelfCallable(const GDScriptLambdaSelfCallable &) = delete;
 	GDScriptLambdaSelfCallable(Ref<RefCounted> p_self, GDScriptFunction *p_function, const Vector<Variant> &p_captures);
+	GDScriptLambdaSelfCallable(Ref<RefCounted> p_self, GDScriptFunction *p_function, Vector<Variant> &&p_captures);
 	GDScriptLambdaSelfCallable(Object *p_self, GDScriptFunction *p_function, const Vector<Variant> &p_captures);
+	GDScriptLambdaSelfCallable(Object *p_self, GDScriptFunction *p_function, Vector<Variant> &&p_captures);
 	virtual ~GDScriptLambdaSelfCallable() = default;
 };

@@ -155,11 +155,292 @@ void GDScript::_super_implicit_constructor(GDScript *p_script, GDScriptInstance 
 	}
 }
 
+static bool _is_template_safe_variant_type(Variant::Type p_type) {
+	return !Variant::is_type_shared(p_type) && p_type != Variant::CALLABLE && p_type != Variant::SIGNAL;
+}
+
+static bool _decode_member_address(int p_encoded_address, int p_member_count, int &r_member_index) {
+	const int address_type = (p_encoded_address & GDScriptFunction::ADDR_TYPE_MASK) >> GDScriptFunction::ADDR_BITS;
+	if (address_type != GDScriptFunction::ADDR_TYPE_MEMBER) {
+		return false;
+	}
+	const int member_index = p_encoded_address & GDScriptFunction::ADDR_MASK;
+	if (member_index < 0 || member_index >= p_member_count) {
+		return false;
+	}
+	r_member_index = member_index;
+	return true;
+}
+
+static bool _decode_safe_constant(const Variant *p_constants, int p_constant_count, int p_encoded_address, const Variant *&r_constant) {
+	const int address_type = (p_encoded_address & GDScriptFunction::ADDR_TYPE_MASK) >> GDScriptFunction::ADDR_BITS;
+	if (address_type != GDScriptFunction::ADDR_TYPE_CONSTANT) {
+		return false;
+	}
+	const int constant_index = p_encoded_address & GDScriptFunction::ADDR_MASK;
+	if (constant_index < 0 || constant_index >= p_constant_count) {
+		return false;
+	}
+	const Variant *constant_value = &p_constants[constant_index];
+	if (!_is_template_safe_variant_type(constant_value->get_type())) {
+		return false;
+	}
+	r_constant = constant_value;
+	return true;
+}
+
+void GDScript::_prepare_instantiation_cache() {
+	MutexLock lock(GDScriptLanguage::singleton->mutex);
+	const uint64_t current_epoch = GDScriptFunction::get_script_clear_epoch() + 1;
+	if (_instantiation_cache_epoch.load(std::memory_order_acquire) == current_epoch) {
+		return;
+	}
+
+	LocalVector<GDScript *> hierarchy;
+	for (GDScript *cursor = this; cursor != nullptr; cursor = cursor->base.ptr()) {
+		hierarchy.push_back(cursor);
+	}
+	hierarchy.reverse();
+
+	_cached_root_script = hierarchy[0];
+	_cached_native_is_refcounted = _cached_root_script->native.is_valid() && _cached_root_script->native->get_name() == RefCounted::get_class_static();
+	_cached_initializer = _super_constructor(this);
+
+	bool has_notifications = false;
+	const StringName &notification_name = GDScriptLanguage::get_singleton()->strings._notification;
+	for (uint32_t class_index = 0; class_index < hierarchy.size(); class_index++) {
+		GDScript *current_script = hierarchy[class_index];
+		if (likely(current_script->valid) && current_script->member_functions.has(notification_name)) {
+			has_notifications = true;
+			break;
+		}
+	}
+	_has_notification_functions = has_notifications;
+
+	const int member_count = member_indices.size();
+	Vector<Variant> template_members;
+	template_members.resize(member_count);
+	Variant *template_write = template_members.ptrw();
+
+	bool can_template = true;
+	for (uint32_t class_index = 0; class_index < hierarchy.size() && can_template; class_index++) {
+		GDScript *current_script = hierarchy[class_index];
+		if (!current_script->valid || current_script->implicit_initializer == nullptr || current_script->implicit_initializer->_code_ptr == nullptr) {
+			can_template = false;
+			break;
+		}
+		const GDScriptFunction *init_function = current_script->implicit_initializer;
+		const int *code_ptr = init_function->_code_ptr;
+		const int code_size = init_function->_code_size;
+		const Variant *constants_ptr = init_function->_constants_ptr;
+		const int constant_count = init_function->_constant_count;
+		int ip = 0;
+		bool reached_end = false;
+
+		while (ip < code_size) {
+			const int opcode = code_ptr[ip];
+			switch (opcode) {
+				case GDScriptFunction::OPCODE_LINE: {
+					if (ip + 2 > code_size) {
+						can_template = false;
+						break;
+					}
+					ip += 2;
+				} break;
+				case GDScriptFunction::OPCODE_END: {
+					reached_end = true;
+					ip = code_size;
+				} break;
+				case GDScriptFunction::OPCODE_ASSIGN_NULL: {
+					int member_index = -1;
+					if (ip + 2 > code_size || !_decode_member_address(code_ptr[ip + 1], member_count, member_index)) {
+						can_template = false;
+						break;
+					}
+					template_write[member_index] = Variant();
+					ip += 2;
+				} break;
+				case GDScriptFunction::OPCODE_ASSIGN_TRUE: {
+					int member_index = -1;
+					if (ip + 2 > code_size || !_decode_member_address(code_ptr[ip + 1], member_count, member_index)) {
+						can_template = false;
+						break;
+					}
+					template_write[member_index] = true;
+					ip += 2;
+				} break;
+				case GDScriptFunction::OPCODE_ASSIGN_FALSE: {
+					int member_index = -1;
+					if (ip + 2 > code_size || !_decode_member_address(code_ptr[ip + 1], member_count, member_index)) {
+						can_template = false;
+						break;
+					}
+					template_write[member_index] = false;
+					ip += 2;
+				} break;
+				case GDScriptFunction::OPCODE_ASSIGN: {
+					int member_index = -1;
+					const Variant *constant_value = nullptr;
+					if (ip + 3 > code_size || !_decode_member_address(code_ptr[ip + 1], member_count, member_index) || !_decode_safe_constant(constants_ptr, constant_count, code_ptr[ip + 2], constant_value)) {
+						can_template = false;
+						break;
+					}
+					template_write[member_index] = *constant_value;
+					ip += 3;
+				} break;
+				case GDScriptFunction::OPCODE_ASSIGN_TYPED_BUILTIN: {
+					int member_index = -1;
+					const Variant *constant_value = nullptr;
+					if (ip + 4 > code_size || !_decode_member_address(code_ptr[ip + 1], member_count, member_index) || !_decode_safe_constant(constants_ptr, constant_count, code_ptr[ip + 2], constant_value)) {
+						can_template = false;
+						break;
+					}
+					const int raw_type = code_ptr[ip + 3];
+					if (raw_type < 0 || raw_type >= Variant::VARIANT_MAX) {
+						can_template = false;
+						break;
+					}
+					const Variant::Type target_type = static_cast<Variant::Type>(raw_type);
+					if (!_is_template_safe_variant_type(target_type)) {
+						can_template = false;
+						break;
+					}
+					if (constant_value->get_type() != target_type) {
+						if (!Variant::can_convert_strict(constant_value->get_type(), target_type)) {
+							can_template = false;
+							break;
+						}
+						Callable::CallError call_error;
+						Variant::construct(target_type, template_write[member_index], &constant_value, 1, call_error);
+						if (call_error.error != Callable::CallError::CALL_OK) {
+							can_template = false;
+							break;
+						}
+					} else {
+						template_write[member_index] = *constant_value;
+					}
+					ip += 4;
+				} break;
+				case GDScriptFunction::OPCODE_CONSTRUCT: {
+					if (ip + 2 > code_size) {
+						can_template = false;
+						break;
+					}
+					const int instr_arg_count = code_ptr[ip + 1];
+					if (instr_arg_count < 1 || ip + 4 + instr_arg_count > code_size) {
+						can_template = false;
+						break;
+					}
+					const int argc = code_ptr[ip + 2 + instr_arg_count];
+					if (argc < 0 || argc > 8 || instr_arg_count != argc + 1) {
+						can_template = false;
+						break;
+					}
+					const int raw_type = code_ptr[ip + 3 + instr_arg_count];
+					if (raw_type < 0 || raw_type >= Variant::VARIANT_MAX) {
+						can_template = false;
+						break;
+					}
+					const Variant::Type target_type = static_cast<Variant::Type>(raw_type);
+					int member_index = -1;
+					if (!_is_template_safe_variant_type(target_type) || !_decode_member_address(code_ptr[ip + 2 + argc], member_count, member_index)) {
+						can_template = false;
+						break;
+					}
+					const Variant *arg_pointers[8];
+					for (int arg_index = 0; arg_index < argc; arg_index++) {
+						if (!_decode_safe_constant(constants_ptr, constant_count, code_ptr[ip + 2 + arg_index], arg_pointers[arg_index])) {
+							can_template = false;
+							break;
+						}
+					}
+					if (!can_template) {
+						break;
+					}
+					Callable::CallError call_error;
+					Variant::construct(target_type, template_write[member_index], argc > 0 ? arg_pointers : nullptr, argc, call_error);
+					if (call_error.error != Callable::CallError::CALL_OK) {
+						can_template = false;
+						break;
+					}
+					ip += 4 + instr_arg_count;
+				} break;
+				case GDScriptFunction::OPCODE_CONSTRUCT_VALIDATED: {
+					if (ip + 2 > code_size) {
+						can_template = false;
+						break;
+					}
+					const int instr_arg_count = code_ptr[ip + 1];
+					if (instr_arg_count < 1 || ip + 4 + instr_arg_count > code_size) {
+						can_template = false;
+						break;
+					}
+					const int argc = code_ptr[ip + 2 + instr_arg_count];
+					if (argc < 0 || argc > 8 || instr_arg_count != argc + 1) {
+						can_template = false;
+						break;
+					}
+					const int constructor_index = code_ptr[ip + 3 + instr_arg_count];
+					int member_index = -1;
+					if (constructor_index < 0 || constructor_index >= init_function->_constructors_count || !_decode_member_address(code_ptr[ip + 2 + argc], member_count, member_index)) {
+						can_template = false;
+						break;
+					}
+					const Variant *arg_pointers[8];
+					for (int arg_index = 0; arg_index < argc; arg_index++) {
+						if (!_decode_safe_constant(constants_ptr, constant_count, code_ptr[ip + 2 + arg_index], arg_pointers[arg_index])) {
+							can_template = false;
+							break;
+						}
+					}
+					if (!can_template) {
+						break;
+					}
+					init_function->_constructors_ptr[constructor_index](&template_write[member_index], argc > 0 ? arg_pointers : nullptr);
+					if (!_is_template_safe_variant_type(template_write[member_index].get_type())) {
+						can_template = false;
+						break;
+					}
+					ip += 4 + instr_arg_count;
+				} break;
+				default: {
+					can_template = false;
+				} break;
+			}
+			if (!can_template) {
+				break;
+			}
+		}
+		if (!reached_end) {
+			can_template = false;
+		}
+	}
+
+	if (can_template) {
+		bool all_trivial = true;
+		for (int index = 0; index < member_count; index++) {
+			if (VariantInternal::type_needs_deinit(template_write[index].get_type())) {
+				all_trivial = false;
+				break;
+			}
+		}
+		_member_init_template = std::move(template_members);
+		_has_member_init_template = true;
+		_member_init_all_trivial = all_trivial;
+	} else {
+		_member_init_template.clear();
+		_has_member_init_template = false;
+		_member_init_all_trivial = false;
+	}
+
+	_instantiation_cache_epoch.store(current_epoch, std::memory_order_release);
+}
+
 GDScriptInstance *GDScript::_create_instance(const Variant **p_args, int p_argcount, Object *p_owner, Callable::CallError &r_error) {
 	/* STEP 1, CREATE */
+	ensure_instantiation_cache();
 
 	GDScriptInstance *instance = memnew(GDScriptInstance);
-	instance->members.resize(member_indices.size());
 	instance->script = Ref<GDScript>(this);
 	instance->owner = p_owner;
 	instance->owner_id = p_owner->get_instance_id();
@@ -177,23 +458,36 @@ GDScriptInstance *GDScript::_create_instance(const Variant **p_args, int p_argco
 		instances.add(&instance->script_instance_list);
 	}
 
-	_super_implicit_constructor(this, instance, r_error);
-	if (r_error.error != Callable::CallError::CALL_OK) {
-		String error_text = Variant::get_call_error_text(instance->owner, "@implicit_new", nullptr, 0, r_error);
-		instance->script = Ref<GDScript>();
-		instance->owner->set_script_instance(nullptr);
-		{
-			MutexLock lock(GDScriptLanguage::singleton->mutex);
-			instances.remove(&instance->script_instance_list);
+	if (likely(_has_member_init_template
+#ifdef DEBUG_ENABLED
+				&& !EngineDebugger::is_active() && !GDScriptLanguage::get_singleton()->profiling
+#endif
+				)) {
+		if (likely(_member_init_all_trivial)) {
+			instance->members.init_from_trivial_template(_member_init_template.ptr(), _member_init_template.size());
+		} else {
+			instance->members.init_from_template(_member_init_template.ptr(), _member_init_template.size());
 		}
-		ERR_FAIL_V_MSG(nullptr, "Error constructing a GDScriptInstance: " + error_text);
+	} else {
+		instance->members.resize(member_indices.size());
+		_super_implicit_constructor(this, instance, r_error);
+		if (r_error.error != Callable::CallError::CALL_OK) {
+			String error_text = Variant::get_call_error_text(instance->owner, "@implicit_new", nullptr, 0, r_error);
+			instance->script = Ref<GDScript>();
+			instance->owner->set_script_instance(nullptr);
+			{
+				MutexLock lock(GDScriptLanguage::singleton->mutex);
+				instances.remove(&instance->script_instance_list);
+			}
+			ERR_FAIL_V_MSG(nullptr, "Error constructing a GDScriptInstance: " + error_text);
+		}
 	}
 
 	if (p_argcount < 0) {
 		return instance;
 	}
 
-	GDScriptFunction *applicable_initializer = _super_constructor(this);
+	GDScriptFunction *applicable_initializer = _cached_initializer;
 	if (applicable_initializer != nullptr) {
 		applicable_initializer->call(instance, p_args, p_argcount, r_error);
 		if (r_error.error != Callable::CallError::CALL_OK) {
@@ -211,6 +505,78 @@ GDScriptInstance *GDScript::_create_instance(const Variant **p_args, int p_argco
 	return instance;
 }
 
+GDScriptInstance *GDScript::_create_instance_without_init(Callable::CallError &r_error) {
+	r_error.error = Callable::CallError::CALL_OK;
+
+	Object *owner = nullptr;
+	RefCounted *ref_counted = nullptr;
+	if (likely(_cached_native_is_refcounted)) {
+		ref_counted = ::new (DefaultAllocator{}) RefCounted;
+		postinitialize_handler(static_cast<Object *>(ref_counted));
+		ref_counted->init_ref_fresh();
+		owner = ref_counted;
+	} else {
+		GDScript *root_script = _cached_root_script;
+		ERR_FAIL_COND_V(root_script == nullptr || root_script->native.is_null(), nullptr);
+		owner = root_script->native->instantiate();
+		ERR_FAIL_NULL_V_MSG(owner, nullptr, "Can't inherit from a virtual class.");
+		if (owner->is_ref_counted()) {
+			ref_counted = static_cast<RefCounted *>(owner);
+			ref_counted->init_ref();
+		}
+	}
+
+	GDScriptInstance *instance = memnew(GDScriptInstance);
+	instance->script = Ref<GDScript>(this);
+	instance->owner = owner;
+	instance->owner_id = owner->get_instance_id();
+#ifdef DEBUG_ENABLED
+	for (const KeyValue<StringName, MemberInfo> &E : member_indices) {
+		instance->member_indices_cache[E.key] = E.value.index;
+	}
+#endif
+	owner->set_script_instance(instance);
+	{
+		MutexLock lock(GDScriptLanguage::singleton->mutex);
+		instances.add(&instance->script_instance_list);
+	}
+
+	if (likely(_has_member_init_template
+#ifdef DEBUG_ENABLED
+				&& !EngineDebugger::is_active() && !GDScriptLanguage::get_singleton()->profiling
+#endif
+				)) {
+		if (likely(_member_init_all_trivial)) {
+			instance->members.init_from_trivial_template(_member_init_template.ptr(), _member_init_template.size());
+		} else {
+			instance->members.init_from_template(_member_init_template.ptr(), _member_init_template.size());
+		}
+		return instance;
+	}
+
+	instance->members.resize(member_indices.size());
+	_super_implicit_constructor(this, instance, r_error);
+	if (unlikely(r_error.error != Callable::CallError::CALL_OK)) {
+		String error_text = Variant::get_call_error_text(instance->owner, "@implicit_new", nullptr, 0, r_error);
+		{
+			MutexLock lock(GDScriptLanguage::singleton->mutex);
+			instances.remove(&instance->script_instance_list);
+		}
+		instance->script = Ref<GDScript>();
+		instance->owner->set_script_instance(nullptr);
+		if (ref_counted != nullptr) {
+			if (ref_counted->unreference()) {
+				memdelete(ref_counted);
+			}
+		} else {
+			memdelete(owner);
+		}
+		ERR_FAIL_V_MSG(nullptr, "Error constructing a GDScriptInstance: " + error_text);
+	}
+
+	return instance;
+}
+
 Variant GDScript::_new(const Variant **p_args, int p_argcount, Callable::CallError &r_error) {
 	/* STEP 1, CREATE */
 
@@ -220,41 +586,41 @@ Variant GDScript::_new(const Variant **p_args, int p_argcount, Callable::CallErr
 	}
 
 	r_error.error = Callable::CallError::CALL_OK;
-	Ref<RefCounted> ref;
+	ensure_instantiation_cache();
+
 	Object *owner = nullptr;
-
-	GDScript *_baseptr = this;
-	while (_baseptr->base.ptr()) {
-		_baseptr = _baseptr->base.ptr();
-	}
-
-	ERR_FAIL_COND_V(_baseptr->native.is_null(), Variant());
-	if (_baseptr->native.ptr()) {
-		owner = _baseptr->native->instantiate();
-
-		RefCounted *r = Object::cast_to<RefCounted>(owner);
-		if (r) {
-			ref = Ref<RefCounted>(r);
-		}
+	RefCounted *ref_counted = nullptr;
+	if (likely(_cached_native_is_refcounted)) {
+		ref_counted = ::new (DefaultAllocator{}) RefCounted;
+		postinitialize_handler(static_cast<Object *>(ref_counted));
+		ref_counted->init_ref_fresh();
+		owner = ref_counted;
 	} else {
-		ref = memnew(RefCounted); // By default, no base means use reference.
-		owner = ref.ptr();
+		GDScript *root_script = _cached_root_script;
+		ERR_FAIL_COND_V(root_script == nullptr || root_script->native.is_null(), Variant());
+		owner = root_script->native->instantiate();
+		ERR_FAIL_NULL_V_MSG(owner, Variant(), "Can't inherit from a virtual class.");
+		if (owner->is_ref_counted()) {
+			ref_counted = static_cast<RefCounted *>(owner);
+			ref_counted->init_ref();
+		}
 	}
-	ERR_FAIL_NULL_V_MSG(owner, Variant(), "Can't inherit from a virtual class.");
 
 	GDScriptInstance *instance = _create_instance(p_args, p_argcount, owner, r_error);
 	if (!instance) {
-		if (ref.is_null()) {
+		if (ref_counted != nullptr) {
+			if (ref_counted->unreference()) {
+				memdelete(ref_counted);
+			}
+		} else {
 			memdelete(owner); //no owner, sorry
 		}
 		return Variant();
 	}
 
-	if (ref.is_valid()) {
-		return ref;
-	} else {
-		return owner;
-	}
+	Variant result;
+	VariantInternal::object_assign_without_ref_unsafe(&result, owner);
+	return result;
 }
 
 bool GDScript::can_instantiate() const {
@@ -1141,7 +1507,7 @@ void GDScript::_get_property_list(List<PropertyInfo> *p_properties) const {
 }
 
 void GDScript::_bind_methods() {
-	ClassDB::bind_vararg_method(METHOD_FLAGS_DEFAULT, "new", &GDScript::_new, MethodInfo("new"));
+	_new_method_bind = ClassDB::bind_vararg_method(METHOD_FLAGS_DEFAULT, "new", &GDScript::_new, MethodInfo("new"));
 }
 
 void GDScript::set_path_cache(const String &p_path) {
@@ -1505,7 +1871,7 @@ void GDScript::clear() {
 		return;
 	}
 	clearing = true;
-	GDScriptFunction::invalidate_call_caches();
+	invalidate_instantiation_cache();
 
 	RBSet<GDScriptFunction *> functions_to_clear;
 
@@ -1629,7 +1995,7 @@ bool GDScriptInstance::set(const StringName &p_name, const Variant &p_value) {
 				callp(member->setter, &args, 1, err);
 				return err.error == Callable::CallError::CALL_OK;
 			} else {
-				members.write[member->index] = value;
+				members[member->index] = value;
 				return true;
 			}
 		}
@@ -2042,27 +2408,48 @@ Variant GDScriptInstance::callp(const StringName &p_method, const Variant **p_ar
 }
 
 void GDScriptInstance::notification(int p_notification, bool p_reversed) {
-	if (unlikely(!script->valid)) {
+	GDScript *target_script = script.ptr();
+	if (unlikely(!target_script->valid)) {
 		return;
 	}
 
-	//notification is not virtual, it gets called at ALL levels just like in C.
+	target_script->ensure_instantiation_cache();
+	if (likely(!target_script->_has_notification_functions)) {
+		return;
+	}
+
+	// Notification is not virtual; it gets called at all levels just like in C++.
 	Variant value = p_notification;
 	const Variant *args[1] = { &value };
 	const StringName &notification_str = GDScriptLanguage::get_singleton()->strings._notification;
 
-	LocalVector<GDScript *> script_stack;
+	constexpr uint32_t INLINE_DEPTH = 16;
+	Ref<GDScript> stack_scripts[INLINE_DEPTH];
+	LocalVector<Ref<GDScript>> heap_scripts;
 	uint32_t script_count = 0;
-	for (GDScript *sptr = script.ptr(); sptr; sptr = sptr->base.ptr(), ++script_count) {
-		script_stack.push_back(sptr);
+	for (GDScript *sptr = target_script; sptr != nullptr; sptr = sptr->base.ptr()) {
+		if (likely(script_count < INLINE_DEPTH && heap_scripts.is_empty())) {
+			stack_scripts[script_count++] = Ref<GDScript>(sptr);
+		} else {
+			if (heap_scripts.is_empty()) {
+				heap_scripts.reserve(INLINE_DEPTH * 2);
+				for (uint32_t index = 0; index < script_count; index++) {
+					heap_scripts.push_back(stack_scripts[index]);
+					stack_scripts[index].unref();
+				}
+			}
+			heap_scripts.push_back(Ref<GDScript>(sptr));
+			script_count++;
+		}
 	}
 
-	const int start = p_reversed ? 0 : script_count - 1;
-	const int end = p_reversed ? script_count : -1;
+	const Ref<GDScript> *scripts = heap_scripts.is_empty() ? stack_scripts : heap_scripts.ptr();
+	const int start = p_reversed ? 0 : static_cast<int>(script_count) - 1;
+	const int end = p_reversed ? static_cast<int>(script_count) : -1;
 	const int step = p_reversed ? 1 : -1;
 
 	for (int idx = start; idx != end; idx += step) {
-		GDScript *sc = script_stack[idx];
+		GDScript *sc = scripts[idx].ptr();
 		if (likely(sc->valid)) {
 			HashMap<StringName, GDScriptFunction *>::Iterator E = sc->member_functions.find(notification_str);
 			if (E) {
@@ -2128,7 +2515,9 @@ void GDScriptInstance::reload_members() {
 	members.resize(new_members.size()); //resize
 
 	//apply
-	members = new_members;
+	for (int index = 0; index < new_members.size(); index++) {
+		members[index] = new_members[index];
+	}
 
 	//pass the values to the new indices
 	member_indices_cache.clear();

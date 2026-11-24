@@ -2592,6 +2592,417 @@ func run_container_tests() -> Dictionary:
 		CHECK(int(loaded_res["packed_vector_sum"]) == 10);
 		CHECK(int(loaded_res["empty_packed_count"]) == 0);
 	}
+
+	TEST_CASE("Object instantiation, member storage, notification cache, and lambda/callable dispatch round-trip through .gdb") {
+		// Direct unit coverage for GDScriptMemberStorage inline/heap transitions.
+		{
+			GDScriptMemberStorage storage;
+			CHECK(storage.size() == 0);
+			CHECK(storage.ptr() == nullptr);
+
+			storage.resize(4);
+			REQUIRE(storage.size() == 4);
+			storage[0] = 11;
+			storage[1] = String("inline");
+			storage[2] = Vector2(1.0, 2.0);
+			storage[3] = true;
+
+			storage.resize(8);
+			REQUIRE(storage.size() == 8);
+			CHECK(int(storage[0]) == 11);
+			CHECK(String(storage[1]) == "inline");
+			storage[7] = 77;
+
+			storage.resize(3);
+			REQUIRE(storage.size() == 3);
+			CHECK(int(storage[0]) == 11);
+			CHECK(String(storage[1]) == "inline");
+			CHECK(Vector2(storage[2]) == Vector2(1.0, 2.0));
+
+			storage.resize(12);
+			REQUIRE(storage.size() == 12);
+			CHECK(int(storage[0]) == 11);
+			CHECK(String(storage[1]) == "inline");
+			storage[11] = String("spilled");
+
+			storage.resize(5);
+			REQUIRE(storage.size() == 5);
+			CHECK(int(storage[0]) == 11);
+			CHECK(String(storage[1]) == "inline");
+			CHECK(Vector2(storage[2]) == Vector2(1.0, 2.0));
+
+			storage.resize(0);
+			CHECK(storage.size() == 0);
+			CHECK(storage.ptr() == nullptr);
+		}
+
+		Ref<GDScript> script = compile_source(R"(
+extends RefCounted
+
+class BaseTemplate extends RefCounted:
+	var base_int: int = 10
+	var base_float: float = 3
+	var base_text: String = "base"
+	var base_vec: Vector2 = Vector2(2.0, 4.0)
+	var base_flag: bool = true
+
+class DerivedTemplate extends BaseTemplate:
+	var extra: int = 25
+
+class SpillMembers extends RefCounted:
+	var m0: int = 1
+	var m1: int = 2
+	var m2: int = 3
+	var m3: int = 4
+	var m4: int = 5
+	var m5: int = 6
+	var m6: int = 7
+	var m7: int = 8
+	var m8: int = 9
+	var m9: int = 10
+	var m10: String = "ten"
+	var m11: int = 12
+
+class DynamicFallback extends RefCounted:
+	var items: Array = []
+	var map: Dictionary = {}
+	var computed: int = _make_default()
+	var setter_hits: int = 0
+	var watched: int = 5:
+		set(value):
+			setter_hits += 1
+			watched = value * 2
+
+	func _make_default() -> int:
+		return 13
+
+class InitArgs extends RefCounted:
+	var a: int
+	var b: float
+	var label: String
+	var early_stopped: bool = false
+
+	func _init(p_a: int, p_b: float = 2.5, p_label: String = "ok") -> void:
+		a = p_a
+		b = p_b
+		label = p_label
+		if p_a < 0:
+			early_stopped = true
+			return
+		a += 1
+
+class DerivedInit extends InitArgs:
+	var bonus: int = 7
+
+	func _init(p_a: int) -> void:
+		super(p_a + 10, 4.5, "derived")
+		bonus += a
+
+class NodeHelper extends Node:
+	var tag: int = 0
+	@onready var ready_value: int = 7
+	var seen_in_ready: int = 0
+
+	func _init(p_tag: int) -> void:
+		tag = p_tag
+
+	func _ready() -> void:
+		seen_in_ready = ready_value
+
+	func make_self_lambda() -> Callable:
+		return func(delta: int) -> int:
+			return tag + delta
+
+class NotifyBase extends RefCounted:
+	static var log: Array[String] = []
+
+	func _notification(what: int) -> void:
+		if what == 777 or what == NOTIFICATION_PREDELETE:
+			log.append("base:" + str(what))
+
+class NotifyDerived extends NotifyBase:
+	func _notification(what: int) -> void:
+		if what == 777 or what == NOTIFICATION_PREDELETE:
+			log.append("derived:" + str(what))
+
+class MethodTargetBase extends RefCounted:
+	var offset: int = 100
+
+	func add_offset(value: int) -> int:
+		return value + offset
+
+class MethodTargetDerived extends MethodTargetBase:
+	var scale: int = 3
+
+	func compute(value: int, bonus: int = 2) -> int:
+		return value * scale + bonus
+
+var held_instance: InitArgs = null
+var self_value: int = 40
+
+func _self_method(delta: int) -> int:
+	return self_value + delta
+
+func run_object_and_callable_tests() -> Dictionary:
+	# Template initialization across inheritance chain.
+	var derived := DerivedTemplate.new()
+	var template_sum: int = derived.base_int + int(derived.base_float) + int(derived.base_vec.x + derived.base_vec.y) + derived.extra
+	var template_text: String = derived.base_text
+	var template_flag: bool = derived.base_flag
+
+	# >8 members spilling out of inline GDScriptMemberStorage.
+	var spilled := SpillMembers.new()
+	var spill_sum: int = spilled.m0 + spilled.m1 + spilled.m2 + spilled.m3 + spilled.m4 + spilled.m5 + spilled.m6 + spilled.m7 + spilled.m8 + spilled.m9 + spilled.m11
+	var spill_text: String = spilled.m10
+
+	# Fallback to @implicit_new for container literals and method-call initializers (no shared container aliasing).
+	var dyn_a := DynamicFallback.new()
+	var dyn_b := DynamicFallback.new()
+	dyn_a.items.append(42)
+	dyn_a.map["k"] = 9
+	var dyn_isolated: bool = dyn_b.items.is_empty() and dyn_b.map.is_empty()
+	var dyn_initial_watched: int = dyn_a.watched
+	var dyn_computed: int = dyn_a.computed
+	dyn_a.watched = 7
+	var dyn_setter_value: int = dyn_a.watched
+	var dyn_setter_hits: int = dyn_a.setter_hits
+
+	# Inline _init with defaults, early return, super(), self-aliasing, class-var aliasing, and member target.
+	var init_one := InitArgs.new(5)
+	var init_all := InitArgs.new(10, 1.5, "custom")
+	var init_early := InitArgs.new(-3)
+	var derived_init := DerivedInit.new(4)
+	var aliased_arg: Variant = InitArgs.new(20)
+	aliased_arg = InitArgs.new(aliased_arg.a + 5)
+	var cls_alias: Variant = InitArgs
+	cls_alias = cls_alias.new(30)
+	held_instance = InitArgs.new(8)
+	var member_init_a: int = held_instance.a
+	held_instance = null
+
+	# Non-RefCounted Node subclass instantiation, Callable("_ready") @onready dispatch, and self-capturing lambda.
+	var node_obj := NodeHelper.new(50)
+	var ready_callable := Callable(node_obj, "_ready")
+	ready_callable.call()
+	var node_ready_seen: int = node_obj.seen_in_ready
+	var node_lambda: Callable = node_obj.make_self_lambda()
+	var node_lambda_alive: int = node_lambda.call(7)
+	node_obj.free()
+
+	# _notification ordering (forward, reversed, and PREDELETE).
+	NotifyBase.log.clear()
+	var notify_obj := NotifyDerived.new()
+	notify_obj.notification(777, false)
+	notify_obj.notification(777, true)
+	notify_obj = null
+	var notify_log: String = ",".join(NotifyBase.log)
+
+	# Non-capturing, capturing, default-arg, self-capturing, and self-aliased lambdas.
+	var non_cap := func(x: int) -> int:
+		return x * 3 + 1
+	var mul: int = 4
+	var prefix: String = "v="
+	var cap_lambda := func(x: int, extra: int = 2) -> String:
+		return prefix + str(x * mul + extra)
+	var self_lambda := func(delta: int) -> int:
+		return self._self_method(delta) + self_value
+	var captured_obj := InitArgs.new(12)
+	var obj_cap_lambda := func(delta: int) -> int:
+		return captured_obj.a + delta
+	var alias_lambda: Variant = 9
+	alias_lambda = func() -> int:
+		return alias_lambda
+
+	# Standard GDScript Callable(obj, method) for direct and inherited methods.
+	var target := MethodTargetDerived.new()
+	var direct_callable := Callable(target, "compute")
+	var inherited_callable := Callable(target, "add_offset")
+
+	return {
+		"template_sum": template_sum,
+		"template_text": template_text,
+		"template_flag": template_flag,
+		"spill_sum": spill_sum,
+		"spill_text": spill_text,
+		"dyn_isolated": dyn_isolated,
+		"dyn_initial_watched": dyn_initial_watched,
+		"dyn_computed": dyn_computed,
+		"dyn_setter_value": dyn_setter_value,
+		"dyn_setter_hits": dyn_setter_hits,
+		"init_one_a": init_one.a,
+		"init_one_b": int(init_one.b * 2.0),
+		"init_one_label": init_one.label,
+		"init_all_a": init_all.a,
+		"init_all_label": init_all.label,
+		"init_early_a": init_early.a,
+		"init_early_stopped": init_early.early_stopped,
+		"derived_init_bonus": derived_init.bonus,
+		"aliased_arg_a": aliased_arg.a,
+		"cls_alias_a": cls_alias.a,
+		"member_init_a": member_init_a,
+		"node_ready_seen": node_ready_seen,
+		"node_lambda_alive": node_lambda_alive,
+		"notify_log": notify_log,
+		"non_cap": non_cap.call(7),
+		"cap_default": cap_lambda.call(5),
+		"cap_explicit": cap_lambda.call(5, 9),
+		"self_lambda": self_lambda.call(6),
+		"obj_cap_lambda": obj_cap_lambda.call(3),
+		"alias_lambda": alias_lambda.call(),
+		"direct_callable_default": direct_callable.call(4),
+		"direct_callable_explicit": direct_callable.call(4, 5),
+		"inherited_callable": inherited_callable.call(23),
+	}
+)",
+				"res://objects_and_callables_fast_paths.gd");
+
+		const Vector<uint8_t> bytes = export_script_bytes(script);
+		Ref<GDScript> loaded = load_script_bytes(bytes, "res://objects_and_callables_fast_paths.gd");
+		REQUIRE(GDScriptBytecodeVerifier::verify_class(loaded.ptr()) == OK);
+
+		Ref<RefCounted> orig_inst = memnew(RefCounted);
+		orig_inst->set_script(script);
+		Ref<RefCounted> loaded_inst = memnew(RefCounted);
+		loaded_inst->set_script(loaded);
+
+		Dictionary orig_res = orig_inst->call("run_object_and_callable_tests");
+		Dictionary loaded_res = loaded_inst->call("run_object_and_callable_tests");
+		CHECK(orig_res == loaded_res);
+		CHECK(int(loaded_res["template_sum"]) == 44);
+		CHECK(String(loaded_res["template_text"]) == "base");
+		CHECK(bool(loaded_res["template_flag"]) == true);
+		CHECK(int(loaded_res["spill_sum"]) == 67);
+		CHECK(String(loaded_res["spill_text"]) == "ten");
+		CHECK(bool(loaded_res["dyn_isolated"]) == true);
+		CHECK(int(loaded_res["dyn_initial_watched"]) == 5);
+		CHECK(int(loaded_res["dyn_computed"]) == 13);
+		CHECK(int(loaded_res["dyn_setter_value"]) == 14);
+		CHECK(int(loaded_res["dyn_setter_hits"]) == 1);
+		CHECK(int(loaded_res["init_one_a"]) == 6);
+		CHECK(int(loaded_res["init_one_b"]) == 5);
+		CHECK(String(loaded_res["init_one_label"]) == "ok");
+		CHECK(int(loaded_res["init_all_a"]) == 11);
+		CHECK(String(loaded_res["init_all_label"]) == "custom");
+		CHECK(int(loaded_res["init_early_a"]) == -3);
+		CHECK(bool(loaded_res["init_early_stopped"]) == true);
+		CHECK(int(loaded_res["derived_init_bonus"]) == 22);
+		CHECK(int(loaded_res["aliased_arg_a"]) == 27);
+		CHECK(int(loaded_res["cls_alias_a"]) == 31);
+		CHECK(int(loaded_res["member_init_a"]) == 9);
+		CHECK(int(loaded_res["node_ready_seen"]) == 7);
+		CHECK(int(loaded_res["node_lambda_alive"]) == 57);
+		CHECK(String(loaded_res["notify_log"]) == "base:777,derived:777,derived:777,base:777,derived:1,base:1");
+		CHECK(int(loaded_res["non_cap"]) == 22);
+		CHECK(String(loaded_res["cap_default"]) == "v=22");
+		CHECK(String(loaded_res["cap_explicit"]) == "v=29");
+		CHECK(int(loaded_res["self_lambda"]) == 86);
+		CHECK(int(loaded_res["obj_cap_lambda"]) == 16);
+		CHECK(int(loaded_res["alias_lambda"]) == 9);
+		CHECK(int(loaded_res["direct_callable_default"]) == 14);
+		CHECK(int(loaded_res["direct_callable_explicit"]) == 17);
+		CHECK(int(loaded_res["inherited_callable"]) == 123);
+
+		// Hot-reload invalidation of instantiation template, _init, and _notification caches.
+		{
+			Ref<GDScript> reloadable;
+			reloadable.instantiate();
+			reloadable->set_source_code(R"(
+extends RefCounted
+var value: int = 10
+var notified: int = 0
+func _init(delta: int = 1) -> void:
+	value += delta
+func _notification(what: int) -> void:
+	if what == 555:
+		notified = 100
+)");
+			REQUIRE(reloadable->reload() == OK);
+
+			Callable::CallError err;
+			Variant first_obj = reloadable->_new(nullptr, 0, err);
+			REQUIRE(err.error == Callable::CallError::CALL_OK);
+			Ref<RefCounted> first_ref = first_obj;
+			REQUIRE(first_ref.is_valid());
+			CHECK(int(first_ref->get("value")) == 11);
+			first_ref->notification(555);
+			CHECK(int(first_ref->get("notified")) == 100);
+			first_ref.unref();
+			first_obj = Variant();
+
+			reloadable->set_source_code(R"(
+extends RefCounted
+var value: int = 90
+var notified: int = 0
+func _init(delta: int = 5) -> void:
+	value += delta
+func _notification(what: int) -> void:
+	if what == 555:
+		notified = 200
+)");
+			REQUIRE(reloadable->reload() == OK);
+
+			Variant second_obj = reloadable->_new(nullptr, 0, err);
+			REQUIRE(err.error == Callable::CallError::CALL_OK);
+			Ref<RefCounted> second_ref = second_obj;
+			REQUIRE(second_ref.is_valid());
+			CHECK(int(second_ref->get("value")) == 95);
+			second_ref->notification(555);
+			CHECK(int(second_ref->get("notified")) == 200);
+		}
+
+		// Live reload(true) of a derived script during base _notification dispatch must resolve the replacement function safely.
+		{
+			const String base_path = TestUtils::get_temp_path("test_notify_reload_base.gd");
+			const String derived_path = TestUtils::get_temp_path("test_notify_reload_derived.gd");
+			const String reloaded_derived_source = "extends \"" + base_path + "\"\nfunc _notification(what: int) -> void:\n\tif what == 888:\n\t\ttrace.append(\"derived_reloaded\")\n";
+			{
+				Ref<FileAccess> base_file = FileAccess::open(base_path, FileAccess::WRITE);
+				REQUIRE(base_file.is_valid());
+				base_file->store_string(
+						"extends RefCounted\n"
+						"var trace: Array = []\n"
+						"var reloaded_source: String = \"\"\n"
+						"func _notification(what: int) -> void:\n"
+						"\tif what == 888:\n"
+						"\t\ttrace.append(\"base\")\n"
+						"\t\tvar derived_script: GDScript = get_script()\n"
+						"\t\tderived_script.set_source_code(reloaded_source)\n"
+						"\t\tderived_script.reload(true)\n");
+				base_file->close();
+
+				Ref<FileAccess> derived_file = FileAccess::open(derived_path, FileAccess::WRITE);
+				REQUIRE(derived_file.is_valid());
+				derived_file->store_string("extends \"" + base_path + "\"\nfunc _notification(what: int) -> void:\n\tif what == 888:\n\t\ttrace.append(\"derived_old\")\n");
+				derived_file->close();
+			}
+
+			Ref<GDScript> derived_script = ResourceLoader::load(derived_path);
+			REQUIRE(derived_script.is_valid());
+
+			Callable::CallError err;
+			Variant obj = derived_script->_new(nullptr, 0, err);
+			REQUIRE(err.error == Callable::CallError::CALL_OK);
+			Ref<RefCounted> obj_ref = obj;
+			REQUIRE(obj_ref.is_valid());
+			obj_ref->set("reloaded_source", reloaded_derived_source);
+
+			obj_ref->notification(888, false);
+			Array trace = obj_ref->get("trace");
+			REQUIRE(trace.size() == 2);
+			CHECK(String(trace[0]) == "base");
+			CHECK(String(trace[1]) == "derived_reloaded");
+
+			obj_ref.unref();
+			obj = Variant();
+			Ref<GDScript> base_script = derived_script->get_base();
+			derived_script->clear();
+			if (base_script.is_valid()) {
+				base_script->clear();
+			}
+			DirAccess::remove_absolute(derived_path);
+			DirAccess::remove_absolute(base_path);
+		}
+	}
 }
 
 } // namespace TestGDScriptBytecode

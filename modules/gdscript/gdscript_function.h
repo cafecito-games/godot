@@ -629,6 +629,7 @@ public:
 
 	Variant call(GDScriptInstance *p_instance, const Variant **p_args, int p_argcount, Callable::CallError &r_err, CallState *p_state = nullptr);
 	static void invalidate_call_caches() { _script_clear_epoch.fetch_add(1, std::memory_order_acq_rel); }
+	static _FORCE_INLINE_ uint64_t get_script_clear_epoch() { return _script_clear_epoch.load(std::memory_order_acquire); }
 	void debug_get_stack_member_state(int p_line, List<Pair<StringName, int>> *r_stackvars) const;
 
 #ifdef DEBUG_ENABLED
