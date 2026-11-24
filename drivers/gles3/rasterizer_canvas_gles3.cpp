@@ -352,7 +352,18 @@ void RasterizerCanvasGLES3::canvas_render_items(RID p_to_render_target, Item *p_
 		state_buffer.tex_to_sdf = 1.0 / ((canvas_scale.x + canvas_scale.y) * 0.5);
 
 		glBindBufferBase(GL_UNIFORM_BUFFER, BASE_UNIFORM_LOCATION, state.canvas_instance_data_buffers[state.current_data_buffer_index].state_ubo);
-		glBufferData(GL_UNIFORM_BUFFER, sizeof(StateBuffer), &state_buffer, GL_STREAM_DRAW);
+#ifdef WEB_ENABLED
+		glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(StateBuffer), &state_buffer);
+#else
+		// On desktop and mobile, state_ubo is fence-protected per DataBuffer so unsynchronized mapping avoids driver buffer orphaning.
+		void *state_ubo_data = glMapBufferRange(GL_UNIFORM_BUFFER, 0, sizeof(StateBuffer), GL_MAP_WRITE_BIT | GL_MAP_UNSYNCHRONIZED_BIT);
+		if (state_ubo_data != nullptr) {
+			memcpy(state_ubo_data, &state_buffer, sizeof(StateBuffer));
+			glUnmapBuffer(GL_UNIFORM_BUFFER);
+		} else {
+			glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(StateBuffer), &state_buffer);
+		}
+#endif
 
 		GLuint global_buffer = material_storage->global_shader_parameters_get_uniform_buffer();
 
@@ -662,6 +673,8 @@ void RasterizerCanvasGLES3::_render_items(RID p_to_render_target, int p_item_cou
 	state.current_tex = RID();
 
 	const uint64_t base_specialization = GLES3::Config::get_singleton()->float_texture_supported ? 0 : CanvasShaderGLES3::USE_RGBA_SHADOWS;
+	GLuint current_vao = 0;
+	GLuint current_array_buffer = 0;
 
 	for (uint32_t i = 0; i <= state.current_batch_index; i++) {
 		// Skipping when there is no instances.
@@ -778,9 +791,12 @@ void RasterizerCanvasGLES3::_render_items(RID p_to_render_target, int p_item_cou
 			last_blend_color = blend_color;
 		}
 
-		_render_batch(p_lights, i, r_render_info);
+		_render_batch(p_lights, i, current_vao, current_array_buffer, r_render_info);
 	}
 
+	if (current_vao != 0) {
+		glBindVertexArray(0);
+	}
 	glDisable(GL_SCISSOR_TEST);
 	state.current_batch_index = 0;
 	state.canvas_instance_batches.clear();
@@ -1272,7 +1288,7 @@ _FORCE_INLINE_ static uint32_t _indices_to_primitives(RSE::PrimitiveType p_primi
 	return (p_indices - subtractor[p_primitive]) / divisor[p_primitive];
 }
 
-void RasterizerCanvasGLES3::_render_batch(Light *p_lights, uint32_t p_index, RenderingServerTypes::RenderInfo *r_render_info) {
+void RasterizerCanvasGLES3::_render_batch(Light *p_lights, uint32_t p_index, GLuint &r_current_vao, GLuint &r_current_array_buffer, RenderingServerTypes::RenderInfo *r_render_info) {
 	ERR_FAIL_NULL(state.canvas_instance_batches[state.current_batch_index].command);
 
 	// Used by Polygon and Mesh.
@@ -1283,13 +1299,19 @@ void RasterizerCanvasGLES3::_render_batch(Light *p_lights, uint32_t p_index, Ren
 	switch (state.canvas_instance_batches[p_index].command_type) {
 		case Item::Command::TYPE_RECT:
 		case Item::Command::TYPE_NINEPATCH: {
-			glBindVertexArray(data.indexed_quad_array);
-			glBindBuffer(GL_ARRAY_BUFFER, state.canvas_instance_data_buffers[state.current_data_buffer_index].instance_buffers[state.canvas_instance_batches[p_index].instance_buffer_index]);
+			if (r_current_vao != data.indexed_quad_array) {
+				glBindVertexArray(data.indexed_quad_array);
+				r_current_vao = data.indexed_quad_array;
+			}
+			const GLuint instance_buffer = state.canvas_instance_data_buffers[state.current_data_buffer_index].instance_buffers[state.canvas_instance_batches[p_index].instance_buffer_index];
+			if (r_current_array_buffer != instance_buffer) {
+				glBindBuffer(GL_ARRAY_BUFFER, instance_buffer);
+				r_current_array_buffer = instance_buffer;
+			}
 			uint32_t range_start = state.canvas_instance_batches[p_index].start * sizeof(InstanceData);
-			_enable_attributes(range_start, false);
+			_set_instance_attribute_pointers(range_start, false);
 
 			glDrawElementsInstanced(GL_TRIANGLES, 6, GL_UNSIGNED_INT, nullptr, state.canvas_instance_batches[p_index].instance_count);
-			glBindVertexArray(0);
 
 			if (r_render_info) {
 				r_render_info->info[RSE::VIEWPORT_RENDER_INFO_TYPE_CANVAS][RSE::VIEWPORT_RENDER_INFO_OBJECTS_IN_FRAME] += state.canvas_instance_batches[p_index].instance_count;
@@ -1321,6 +1343,8 @@ void RasterizerCanvasGLES3::_render_batch(Light *p_lights, uint32_t p_index, Ren
 				glDrawArraysInstanced(prim[polygon->primitive], 0, pb->count, 1);
 			}
 			glBindVertexArray(0);
+			r_current_vao = 0;
+			r_current_array_buffer = 0;
 
 			if (pb->color_disabled && pb->color != Color(1.0, 1.0, 1.0, 1.0)) {
 				// Reset so this doesn't pollute other draw calls.
@@ -1335,10 +1359,17 @@ void RasterizerCanvasGLES3::_render_batch(Light *p_lights, uint32_t p_index, Ren
 		} break;
 
 		case Item::Command::TYPE_PRIMITIVE: {
-			glBindVertexArray(data.canvas_quad_array);
-			glBindBuffer(GL_ARRAY_BUFFER, state.canvas_instance_data_buffers[state.current_data_buffer_index].instance_buffers[state.canvas_instance_batches[p_index].instance_buffer_index]);
+			if (r_current_vao != data.canvas_quad_array) {
+				glBindVertexArray(data.canvas_quad_array);
+				r_current_vao = data.canvas_quad_array;
+			}
+			const GLuint instance_buffer = state.canvas_instance_data_buffers[state.current_data_buffer_index].instance_buffers[state.canvas_instance_batches[p_index].instance_buffer_index];
+			if (r_current_array_buffer != instance_buffer) {
+				glBindBuffer(GL_ARRAY_BUFFER, instance_buffer);
+				r_current_array_buffer = instance_buffer;
+			}
 			uint32_t range_start = state.canvas_instance_batches[p_index].start * sizeof(InstanceData);
-			_enable_attributes(range_start, true);
+			_set_instance_attribute_pointers(range_start, true);
 
 			const GLenum primitive[5] = { GL_POINTS, GL_POINTS, GL_LINES, GL_TRIANGLES, GL_TRIANGLES };
 			int instance_count = state.canvas_instance_batches[p_index].instance_count;
@@ -1449,7 +1480,9 @@ void RasterizerCanvasGLES3::_render_batch(Light *p_lights, uint32_t p_index, Ren
 				index_array_gl = mesh_storage->mesh_surface_get_index_buffer(surface, 0);
 				bool use_index_buffer = false;
 				glBindVertexArray(vertex_array_gl);
+				r_current_vao = vertex_array_gl;
 				glBindBuffer(GL_ARRAY_BUFFER, state.canvas_instance_data_buffers[state.current_data_buffer_index].instance_buffers[state.canvas_instance_batches[p_index].instance_buffer_index]);
+				r_current_array_buffer = 0;
 
 				uint32_t range_start = state.canvas_instance_batches[p_index].start * sizeof(InstanceData);
 				_enable_attributes(range_start, false, instance_count);
@@ -1497,12 +1530,15 @@ void RasterizerCanvasGLES3::_render_batch(Light *p_lights, uint32_t p_index, Ren
 				}
 				glBindBuffer(GL_ARRAY_BUFFER, 0);
 				glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+				r_current_array_buffer = 0;
 				if (use_instancing) {
 					glDisableVertexAttribArray(5);
 					glDisableVertexAttribArray(8);
 					glDisableVertexAttribArray(9);
 					glDisableVertexAttribArray(10);
 				}
+				glBindVertexArray(0);
+				r_current_vao = 0;
 				if (r_render_info) {
 					// Meshes, Particles, and MultiMesh are always just one object with one draw call.
 					r_render_info->info[RSE::VIEWPORT_RENDER_INFO_TYPE_CANVAS][RSE::VIEWPORT_RENDER_INFO_OBJECTS_IN_FRAME]++;
@@ -1578,6 +1614,16 @@ void RasterizerCanvasGLES3::_enable_attributes(uint32_t p_start, bool p_primitiv
 		glEnableVertexAttribArray(i);
 		glVertexAttribIPointer(i, 4, GL_UNSIGNED_INT, sizeof(InstanceData), CAST_INT_TO_UCHAR_PTR(p_start + (i - 8) * 4 * sizeof(float)));
 		glVertexAttribDivisor(i, p_rate);
+	}
+}
+
+void RasterizerCanvasGLES3::_set_instance_attribute_pointers(uint32_t p_start, bool p_primitive) {
+	const uint32_t split = p_primitive ? 13 : 14;
+	for (uint32_t i = 8; i < split; i++) {
+		glVertexAttribPointer(i, 4, GL_FLOAT, GL_FALSE, sizeof(InstanceData), CAST_INT_TO_UCHAR_PTR(p_start + (i - 8) * 4 * sizeof(float)));
+	}
+	for (uint32_t i = split; i <= 15; i++) {
+		glVertexAttribIPointer(i, 4, GL_UNSIGNED_INT, sizeof(InstanceData), CAST_INT_TO_UCHAR_PTR(p_start + (i - 8) * 4 * sizeof(float)));
 	}
 }
 RID RasterizerCanvasGLES3::light_create() {
@@ -2879,6 +2925,10 @@ RasterizerCanvasGLES3::RasterizerCanvasGLES3() {
 		glBindBuffer(GL_ARRAY_BUFFER, data.canvas_quad_vertices);
 		glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(float) * 2, nullptr);
 		glEnableVertexAttribArray(0);
+		for (uint32_t attribute = 8; attribute <= 15; attribute++) {
+			glEnableVertexAttribArray(attribute);
+			glVertexAttribDivisor(attribute, 1);
+		}
 		glBindVertexArray(0);
 		glBindBuffer(GL_ARRAY_BUFFER, 0); //unbind
 	}
@@ -3025,6 +3075,10 @@ RasterizerCanvasGLES3::RasterizerCanvasGLES3() {
 		glGenBuffers(1, &data.indexed_quad_buffer);
 		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, data.indexed_quad_buffer);
 		glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(uint32_t) * 6, indices, GL_STATIC_DRAW);
+		for (uint32_t attribute = 8; attribute <= 15; attribute++) {
+			glEnableVertexAttribArray(attribute);
+			glVertexAttribDivisor(attribute, 1);
+		}
 		glBindVertexArray(0);
 	}
 
@@ -3111,8 +3165,8 @@ RasterizerCanvasGLES3::~RasterizerCanvasGLES3() {
 	glDeleteBuffers(1, &data.canvas_quad_vertices);
 	glDeleteVertexArrays(1, &data.canvas_quad_array);
 
-	glDeleteBuffers(1, &data.canvas_quad_vertices);
-	glDeleteVertexArrays(1, &data.canvas_quad_array);
+	glDeleteBuffers(1, &data.indexed_quad_buffer);
+	glDeleteVertexArrays(1, &data.indexed_quad_array);
 
 	GLES3::TextureStorage::get_singleton()->canvas_texture_free(default_canvas_texture);
 	memdelete_arr(state.instance_data_array);

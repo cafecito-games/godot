@@ -33,6 +33,7 @@
 #include "audio_driver_opensl.h"
 
 #include "core/os/main_loop.h"
+#include "core/os/mutex.h"
 #include "drivers/unix/os_unix.h"
 
 class GodotJavaWrapper;
@@ -81,6 +82,8 @@ private:
 
 	GodotJavaWrapper *godot_java = nullptr;
 	GodotIOJavaWrapper *godot_io_java = nullptr;
+	Mutex frame_rate_hint_mutex;
+	int last_frame_rate_hint = -1;
 
 	void _load_system_font_config() const;
 	String get_system_property(const char *key) const;
@@ -155,6 +158,7 @@ public:
 	virtual String get_unique_id() const override;
 
 	virtual String get_system_dir(SystemDir p_dir, bool p_shared_storage = true) const override;
+	virtual void set_frame_rate_hint(int p_fps) override;
 
 	virtual Error move_to_trash(const String &p_path) override;
 

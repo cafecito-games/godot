@@ -48,6 +48,7 @@ private:
 
 	jmethodID _configure_pointer_icon = nullptr;
 	jmethodID _set_pointer_icon = nullptr;
+	jmethodID _set_frame_rate_hint = nullptr;
 
 public:
 	GodotJavaViewWrapper(jobject godot_view);
@@ -60,6 +61,7 @@ public:
 
 	void configure_pointer_icon(int pointer_type, const String &image_path, const Vector2 &p_hotspot);
 	void set_pointer_icon(int pointer_type);
+	void set_frame_rate_hint(int p_fps);
 
 	~GodotJavaViewWrapper();
 };

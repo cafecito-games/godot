@@ -50,6 +50,13 @@ GodotJavaViewWrapper::GodotJavaViewWrapper(jobject godot_view) {
 		_request_pointer_capture = env->GetMethodID(_cls, "requestPointerCapture", "()V");
 		_release_pointer_capture = env->GetMethodID(_cls, "releasePointerCapture", "()V");
 	}
+	if (android_device_api_level >= __ANDROID_API_R__) {
+		_set_frame_rate_hint = env->GetMethodID(_cls, "setFrameRateHint", "(I)V");
+		if (env->ExceptionCheck()) {
+			env->ExceptionClear();
+			_set_frame_rate_hint = nullptr;
+		}
+	}
 
 	_can_capture_pointer = env->GetMethodID(_cls, "canCapturePointer", "()Z");
 }
@@ -106,6 +113,15 @@ void GodotJavaViewWrapper::set_pointer_icon(int pointer_type) {
 		ERR_FAIL_NULL(env);
 
 		env->CallVoidMethod(_godot_view, _set_pointer_icon, pointer_type);
+	}
+}
+
+void GodotJavaViewWrapper::set_frame_rate_hint(int p_fps) {
+	if (_set_frame_rate_hint != nullptr) {
+		JNIEnv *env = get_jni_env();
+		ERR_FAIL_NULL(env);
+
+		env->CallVoidMethod(_godot_view, _set_frame_rate_hint, p_fps);
 	}
 }
 

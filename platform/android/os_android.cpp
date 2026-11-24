@@ -987,6 +987,20 @@ String OS_Android::get_system_ca_certificates() {
 	return godot_java->get_ca_certificates();
 }
 
+void OS_Android::set_frame_rate_hint(int p_fps) {
+	const int clamped_fps = p_fps > 0 ? p_fps : 0;
+	if (!godot_java) {
+		return;
+	}
+	MutexLock lock(frame_rate_hint_mutex);
+	GodotJavaViewWrapper *godot_view = godot_java->get_godot_view();
+	if (!godot_view || last_frame_rate_hint == clamped_fps) {
+		return;
+	}
+	last_frame_rate_hint = clamped_fps;
+	godot_view->set_frame_rate_hint(clamped_fps);
+}
+
 Error OS_Android::setup_remote_filesystem(const String &p_server_host, int p_port, const String &p_password, String &r_project_path) {
 	r_project_path = OS::get_user_data_dir();
 	Error err = OS_Unix::setup_remote_filesystem(p_server_host, p_port, p_password, r_project_path);

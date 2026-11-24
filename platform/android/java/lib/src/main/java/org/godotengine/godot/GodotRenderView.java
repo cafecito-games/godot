@@ -32,10 +32,44 @@ package org.godotengine.godot;
 
 import org.godotengine.godot.input.GodotInputHandler;
 
+import android.os.Build;
+import android.util.Log;
+import android.view.Surface;
 import android.view.SurfaceView;
 
 public interface GodotRenderView {
 	SurfaceView getView();
+
+	/**
+	 * Hint the underlying Android Surface with the target frame rate cap (0 clears the hint).
+	 */
+	default void setFrameRateHint(int fps) {}
+
+	/**
+	 * Applies the requested frame rate hint to the given SurfaceView on Android 11+ (API 30+),
+	 * letting SurfaceFlinger seamlessly switch multi-refresh-rate displays (e.g. 90/120 Hz -> 60 Hz)
+	 * instead of falling to an uneven vsync divisor.
+	 */
+	static void applySurfaceFrameRate(SurfaceView surfaceView, int fps, boolean isXrRuntime) {
+		if (isXrRuntime || Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+			return;
+		}
+		Surface surface = surfaceView.getHolder().getSurface();
+		if (surface == null || !surface.isValid()) {
+			return;
+		}
+		float frameRate = fps > 0 ? (float)fps : 0.0f;
+		int compatibility = fps > 0 ? Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE : Surface.FRAME_RATE_COMPATIBILITY_DEFAULT;
+		try {
+			if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+				surface.setFrameRate(frameRate, compatibility, Surface.CHANGE_FRAME_RATE_ONLY_IF_SEAMLESS);
+			} else {
+				surface.setFrameRate(frameRate, compatibility);
+			}
+		} catch (IllegalArgumentException | IllegalStateException e) {
+			Log.w("GodotRenderView", "Unable to apply surface frame rate hint (" + frameRate + " Hz)", e);
+		}
+	}
 
 	/**
 	 * Starts the thread that will drive Godot's rendering.
