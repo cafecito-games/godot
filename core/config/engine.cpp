@@ -36,6 +36,7 @@
 #include "core/extension/cafecito_extensions.h"
 #include "core/license.gen.h"
 #include "core/object/object.h"
+#include "core/os/os.h"
 #include "core/variant/typed_array.h"
 #include "core/version.h"
 #include "servers/rendering/rendering_device.h"
@@ -91,6 +92,9 @@ void Engine::set_max_fps(int p_fps) {
 	RenderingDevice *rd = RenderingDevice::get_singleton();
 	if (rd) {
 		rd->_set_max_fps(_max_fps);
+	}
+	if (OS::get_singleton()) {
+		OS::get_singleton()->set_frame_rate_hint(_max_fps);
 	}
 }
 

@@ -383,7 +383,7 @@ public:
 	void canvas_render_items(RID p_to_render_target, Item *p_item_list, const Color &p_modulate, Light *p_light_list, Light *p_directional_list, const Transform2D &p_canvas_transform, RSE::CanvasItemTextureFilter p_default_filter, RSE::CanvasItemTextureRepeat p_default_repeat, bool p_snap_2d_vertices_to_pixel, bool &r_sdf_used, RenderingServerTypes::RenderInfo *r_render_info = nullptr) override;
 	void _render_items(RID p_to_render_target, int p_item_count, const Transform2D &p_canvas_transform_inverse, Light *p_lights, bool &r_sdf_used, bool p_to_backbuffer = false, RenderingServerTypes::RenderInfo *r_render_info = nullptr, bool p_backbuffer_has_mipmaps = false);
 	void _record_item_commands(const Item *p_item, RID p_render_target, const Transform2D &p_canvas_transform_inverse, Item *&current_clip, GLES3::CanvasShaderData::BlendMode p_blend_mode, Light *p_lights, uint32_t &r_index, bool &r_break_batch, bool &r_sdf_used, const Point2 &p_repeat_offset);
-	void _render_batch(Light *p_lights, uint32_t p_index, RenderingServerTypes::RenderInfo *r_render_info = nullptr);
+	void _render_batch(Light *p_lights, uint32_t p_index, GLuint &r_current_vao, GLuint &r_current_array_buffer, RenderingServerTypes::RenderInfo *r_render_info = nullptr);
 	bool _bind_material(GLES3::CanvasMaterialData *p_material_data, CanvasShaderGLES3::ShaderVariant p_variant, uint64_t p_specialization);
 	void _new_batch(bool &r_batch_broken);
 	void _add_to_batch(uint32_t &r_index, bool &r_batch_broken);
@@ -395,6 +395,7 @@ public:
 	void _invalidate_shadow_framebuffer(bool p_invalidate_color, bool p_invalidate_depth);
 	void _apply_shadow_cull_mode(RSE::CanvasOccluderPolygonCullMode p_cull_mode);
 	void _enable_attributes(uint32_t p_start, bool p_primitive, uint32_t p_rate = 1);
+	void _set_instance_attribute_pointers(uint32_t p_start, bool p_primitive);
 
 	void flush_frame_fence() override;
 	void set_time(double p_time);

@@ -394,6 +394,9 @@ public:
 
 	virtual PreferredTextureFormat get_preferred_texture_format() const;
 
+	// Notify the platform surface of the target frame rate cap (0 = uncapped / system default).
+	virtual void set_frame_rate_hint(int p_fps) {}
+
 	// Load GDExtensions specific to this platform.
 	// This is invoked by the GDExtensionManager after loading GDExtensions specified by the project.
 	virtual void load_platform_gdextensions() const {}

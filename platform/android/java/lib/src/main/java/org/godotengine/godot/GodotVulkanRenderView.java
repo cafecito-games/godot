@@ -44,6 +44,7 @@ import android.util.SparseArray;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.PointerIcon;
+import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 
 import androidx.annotation.Keep;
@@ -55,6 +56,7 @@ class GodotVulkanRenderView extends VkSurfaceView implements GodotRenderView {
 	private final GodotInputHandler mInputHandler;
 	private final VkRenderer mRenderer;
 	private final SparseArray<PointerIcon> customPointerIcons = new SparseArray<>();
+	private volatile int targetFrameRate = 0;
 
 	public GodotVulkanRenderView(Godot godot, GodotInputHandler inputHandler, boolean shouldBeTranslucent) {
 		super(godot.getContext());
@@ -222,5 +224,20 @@ class GodotVulkanRenderView extends VkSurfaceView implements GodotRenderView {
 	@Override
 	public PointerIcon onResolvePointerIcon(MotionEvent me, int pointerIndex) {
 		return getPointerIcon();
+	}
+
+	@Keep
+	@Override
+	public void setFrameRateHint(int fps) {
+		targetFrameRate = Math.max(fps, 0);
+		post(() -> GodotRenderView.applySurfaceFrameRate(this, targetFrameRate, godot.isXrRuntime()));
+	}
+
+	@Override
+	public void surfaceCreated(SurfaceHolder holder) {
+		super.surfaceCreated(holder);
+		if (targetFrameRate > 0) {
+			GodotRenderView.applySurfaceFrameRate(this, targetFrameRate, godot.isXrRuntime());
+		}
 	}
 }

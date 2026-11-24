@@ -51,6 +51,7 @@ import android.util.SparseArray;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.PointerIcon;
+import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 
 import androidx.annotation.Keep;
@@ -80,6 +81,7 @@ class GodotGLRenderView extends GLSurfaceView implements GodotRenderView {
 	private final GodotInputHandler inputHandler;
 	private final GodotRenderer godotRenderer;
 	private final SparseArray<PointerIcon> customPointerIcons = new SparseArray<>();
+	private volatile int targetFrameRate = 0;
 
 	public GodotGLRenderView(Godot godot, GodotInputHandler inputHandler, XRMode xrMode, boolean useDebugOpengl, boolean shouldBeTranslucent) {
 		super(godot.getContext());
@@ -288,5 +290,20 @@ class GodotGLRenderView extends GLSurfaceView implements GodotRenderView {
 	public void startRenderer() {
 		/* Set the renderer responsible for frame rendering */
 		setRenderer(godotRenderer);
+	}
+
+	@Keep
+	@Override
+	public void setFrameRateHint(int fps) {
+		targetFrameRate = Math.max(fps, 0);
+		post(() -> GodotRenderView.applySurfaceFrameRate(this, targetFrameRate, godot.isXrRuntime()));
+	}
+
+	@Override
+	public void surfaceCreated(SurfaceHolder holder) {
+		super.surfaceCreated(holder);
+		if (targetFrameRate > 0) {
+			GodotRenderView.applySurfaceFrameRate(this, targetFrameRate, godot.isXrRuntime());
+		}
 	}
 }

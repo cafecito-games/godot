@@ -3483,6 +3483,9 @@ Error Main::setup2(bool p_show_boot_logo) {
 	if (rd) {
 		rd->_set_max_fps(engine->get_max_fps());
 	}
+	if (OS::get_singleton()) {
+		OS::get_singleton()->set_frame_rate_hint(engine->get_max_fps());
+	}
 
 #ifdef TOOLS_ENABLED
 	// If the editor is running in windowed mode, ensure the window rect fits
