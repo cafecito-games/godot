@@ -30,9 +30,31 @@ class PolyXor extends PolyBase:
 		return (value ^ 0x55) + 3
 
 
+class SignalEmitter extends RefCounted:
+	signal one_listener(value: int, delta: int)
+	signal multi_listener(value: int)
+	signal empty_signal(value: int)
+
+
+class SignalListener extends RefCounted:
+	var accumulator: int = 0
+
+	func on_two_args(value: int, delta: int) -> void:
+		accumulator = (accumulator + value + delta) & 0x3fffffff
+
+	func on_one_arg_first(value: int) -> void:
+		accumulator = (accumulator + value * 2) & 0x3fffffff
+
+	func on_one_arg_second(value: int) -> void:
+		accumulator = (accumulator + (value ^ 7)) & 0x3fffffff
+
+
 var _worker: TargetWorker = TargetWorker.new()
 var _poly_objects: Array[PolyBase] = []
 var _node: Node2D = null
+var _signal_emitter: SignalEmitter = null
+var _unconnected_emitter: SignalEmitter = null
+var _signal_listener: SignalListener = null
 
 
 static func build_cases(scale: float) -> Array:
@@ -123,6 +145,17 @@ static func build_cases(scale: float) -> Array:
 		func() -> int: return suite._bench_lambda_typed(lambda_call_count)
 	))
 
+	var signal_emit_count := BenchCase.scaled_count(60000, scale)
+	cases.append(BenchCase.new(
+		"signal_emit",
+		"calls",
+		"Emit signals across 1-listener, 3-listener (methods + lambda), and unconnected emitters",
+		signal_emit_count * 4,
+		func() -> int: return suite._bench_signal_emit(signal_emit_count),
+		func() -> void: suite._setup_signals(),
+		func() -> void: suite._teardown_signals()
+	))
+
 	return cases
 
 
@@ -135,6 +168,26 @@ func _teardown_node() -> void:
 	if _node != null:
 		_node.free()
 		_node = null
+
+
+func _setup_signals() -> void:
+	_teardown_signals()
+	_signal_emitter = SignalEmitter.new()
+	_unconnected_emitter = SignalEmitter.new()
+	_signal_listener = SignalListener.new()
+	_signal_emitter.one_listener.connect(_signal_listener.on_two_args)
+	_signal_emitter.multi_listener.connect(_signal_listener.on_one_arg_first)
+	_signal_emitter.multi_listener.connect(_signal_listener.on_one_arg_second)
+	var listener := _signal_listener
+	_signal_emitter.multi_listener.connect(func(value: int) -> void:
+		listener.accumulator = (listener.accumulator + value + 5) & 0x3fffffff
+	)
+
+
+func _teardown_signals() -> void:
+	_signal_emitter = null
+	_unconnected_emitter = null
+	_signal_listener = null
 
 
 func _self_helper(value_a: int, value_b: int) -> int:
@@ -238,3 +291,17 @@ func _bench_lambda_typed(iterations: int) -> int:
 		else:
 			total = capturing.call(total)
 	return total
+
+
+func _bench_signal_emit(iterations: int) -> int:
+	var emitter: SignalEmitter = _signal_emitter
+	var unconnected: SignalEmitter = _unconnected_emitter
+	var listener: SignalListener = _signal_listener
+	listener.accumulator = 0
+	for index: int in range(iterations):
+		var value: int = index & 255
+		emitter.one_listener.emit(value, 3)
+		emitter.multi_listener.emit(value)
+		emitter.empty_signal.emit(value)
+		unconnected.empty_signal.emit(value)
+	return listener.accumulator

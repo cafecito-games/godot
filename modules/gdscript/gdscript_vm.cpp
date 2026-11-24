@@ -2358,61 +2358,79 @@ Variant GDScriptFunction::_call_vm(GDScriptFunction *func, GDScriptInstance *p_i
 					Object *target_obj = dst->is_ref_counted() ? *VariantInternal::get_object(dst) : dst->get_validated_object();
 #endif
 					if (likely(target_obj != nullptr)) {
+#ifndef TOOLS_ENABLED
+						const MemberCacheSlot *native_slot = nullptr;
+#endif
 						ScriptInstance *script_inst = target_obj->get_script_instance();
 						if (script_inst != nullptr) {
 							if (likely(script_inst->get_language() == GDScriptLanguage::get_singleton() && !script_inst->is_placeholder())) {
 								GDScriptInstance *gds_inst = static_cast<GDScriptInstance *>(script_inst);
 								const GDScript *target_script = gds_inst->script.ptr();
 								if (likely(target_script != nullptr && target_script->valid)) {
-									const MemberCacheSlot *slot = func->_lookup_member_cache(indexname, target_script);
+									const MemberCacheSlot *slot = func->_lookup_script_member_cache(indexname, target_script, target_obj);
 									if (unlikely(slot == nullptr)) {
-										slot = func->_populate_gdscript_member_cache(indexname, target_script);
+										slot = func->_populate_gdscript_member_cache(indexname, target_script, target_obj);
 									}
-									if (likely(slot != nullptr && slot->member_data_type->is_type_exact_fast(*value))) {
-										if (slot->kind == MemberCacheSlot::GDSCRIPT_DIRECT || slot->setter_func == nullptr) {
-											VariantInternal::assign_fast(&gds_inst->members.ptrw()[slot->member_index], value);
-											handled = true;
-										} else {
-											GDScriptFunction *setter_func = slot->setter_func;
-											const uint32_t callee_frame_bytes = likely(setter_func->_frame_bytes != 0)
-													? setter_func->_frame_bytes
-													: static_cast<uint32_t>(sizeof(Variant) * static_cast<size_t>(setter_func->_stack_size) + sizeof(Variant *) * static_cast<size_t>(setter_func->_instruction_args_size));
-											if (likely(setter_func->_code_ptr != nullptr &&
-														!setter_func->is_vararg() &&
-														setter_func->_argument_count == 1 &&
-														vm_state.call_depth < MAX_CALL_DEPTH &&
-														vm_state.inline_frame_top < static_cast<uint32_t>(MAX_CALL_DEPTH) &&
-														callee_frame_bytes <= VM_SINGLE_FRAME_ALLOCA_LIMIT &&
-														vm_state.alloca_bytes_in_use <= VM_TOTAL_ALLOCA_BUDGET &&
-														callee_frame_bytes <= VM_TOTAL_ALLOCA_BUDGET - vm_state.alloca_bytes_in_use
+									if (likely(slot != nullptr)) {
+										if (likely(slot->kind == MemberCacheSlot::GDSCRIPT_DIRECT)) {
+											if (likely(slot->member_data_type->is_type_exact_fast(*value))) {
+												VariantInternal::assign_fast(&gds_inst->members.ptrw()[slot->member_index], value);
+												ip += 4;
+												DISPATCH_OPCODE;
+											}
+										} else if (slot->kind == MemberCacheSlot::GDSCRIPT_ACCESSOR) {
+											if (likely(slot->member_data_type->is_type_exact_fast(*value))) {
+												if (slot->setter_func == nullptr) {
+													VariantInternal::assign_fast(&gds_inst->members.ptrw()[slot->member_index], value);
+													ip += 4;
+													DISPATCH_OPCODE;
+												}
+												GDScriptFunction *setter_func = slot->setter_func;
+												const uint32_t callee_frame_bytes = likely(setter_func->_frame_bytes != 0)
+														? setter_func->_frame_bytes
+														: static_cast<uint32_t>(sizeof(Variant) * static_cast<size_t>(setter_func->_stack_size) + sizeof(Variant *) * static_cast<size_t>(setter_func->_instruction_args_size));
+												if (likely(setter_func->_code_ptr != nullptr &&
+															!setter_func->is_vararg() &&
+															setter_func->_argument_count == 1 &&
+															vm_state.call_depth < MAX_CALL_DEPTH &&
+															vm_state.inline_frame_top < static_cast<uint32_t>(MAX_CALL_DEPTH) &&
+															callee_frame_bytes <= VM_SINGLE_FRAME_ALLOCA_LIMIT &&
+															vm_state.alloca_bytes_in_use <= VM_TOTAL_ALLOCA_BUDGET &&
+															callee_frame_bytes <= VM_TOTAL_ALLOCA_BUDGET - vm_state.alloca_bytes_in_use
 #ifdef DEBUG_ENABLED
-														&& !GDScriptLanguage::get_singleton()->profiling
+															&& !GDScriptLanguage::get_singleton()->profiling
 #endif
-														)) {
-												const bool arg_exact = setter_func->_all_args_fast_check
-														? (setter_func->_fast_arg_types[0] == Variant::NIL || static_cast<uint8_t>(value->get_type()) == setter_func->_fast_arg_types[0])
-														: setter_func->argument_types[0].is_type_exact_fast(*value);
-												if (likely(arg_exact && vm_state.ensure_buffer() != nullptr && vm_state.ensure_frames() != nullptr)) {
-													cold_state.pending_callee = setter_func;
-													cold_state.pending_instance = gds_inst;
-													cold_state.pending_single_arg = value;
-													cold_state.pending_args = &cold_state.pending_single_arg;
-													cold_state.pending_argc = 1;
-													cold_state.pending_ret_slot = nullptr;
-													cold_state.pending_return_ip = ip + 4;
+															)) {
+													const bool arg_exact = setter_func->_all_args_fast_check
+															? (setter_func->_fast_arg_types[0] == Variant::NIL || static_cast<uint8_t>(value->get_type()) == setter_func->_fast_arg_types[0])
+															: setter_func->argument_types[0].is_type_exact_fast(*value);
+													if (likely(arg_exact && vm_state.ensure_buffer() != nullptr && vm_state.ensure_frames() != nullptr)) {
+														cold_state.pending_callee = setter_func;
+														cold_state.pending_instance = gds_inst;
+														cold_state.pending_single_arg = value;
+														cold_state.pending_args = &cold_state.pending_single_arg;
+														cold_state.pending_argc = 1;
+														cold_state.pending_ret_slot = nullptr;
+														cold_state.pending_return_ip = ip + 4;
 #ifdef DEBUG_ENABLED
-													cold_state.pending_call_ret = false;
-													cold_state.pending_call_async = false;
+														cold_state.pending_call_ret = false;
+														cold_state.pending_call_async = false;
 #endif
-													goto INLINE_FRAME_PUSH;
+														goto INLINE_FRAME_PUSH;
+													}
+												}
+												const Variant *arg_ptr = value;
+												Callable::CallError err;
+												setter_func->call(gds_inst, &arg_ptr, 1, err);
+												if (likely(err.error == Callable::CallError::CALL_OK)) {
+													ip += 4;
+													DISPATCH_OPCODE;
 												}
 											}
-											const Variant *arg_ptr = value;
-											Callable::CallError err;
-											setter_func->call(gds_inst, &arg_ptr, 1, err);
-											if (likely(err.error == Callable::CallError::CALL_OK)) {
-												handled = true;
-											}
+#ifndef TOOLS_ENABLED
+										} else if (slot->kind == MemberCacheSlot::NATIVE_PROPERTY) {
+											native_slot = slot;
+#endif
 										}
 									}
 								}
@@ -2420,18 +2438,22 @@ Variant GDScriptFunction::_call_vm(GDScriptFunction *func, GDScriptInstance *p_i
 						} else {
 #ifndef TOOLS_ENABLED
 							const void *gdtype_key = &target_obj->get_gdtype();
-							const MemberCacheSlot *slot = func->_lookup_member_cache(indexname, gdtype_key);
-							if (unlikely(slot == nullptr)) {
-								slot = func->_populate_native_member_cache(indexname, target_obj);
-							}
-							if (likely(slot != nullptr && slot->native_setter != nullptr && value->get_type() == slot->setter_arg_type)) {
-								const Variant *arg_ptr = value;
-								slot->native_setter->validated_call(target_obj, &arg_ptr, nullptr);
-								handled = true;
+							native_slot = func->_lookup_member_cache(indexname, gdtype_key);
+							if (unlikely(native_slot == nullptr)) {
+								native_slot = func->_populate_native_member_cache(indexname, target_obj);
 							}
 #endif
 						}
+#ifndef TOOLS_ENABLED
+						if (native_slot != nullptr && native_slot->kind == MemberCacheSlot::NATIVE_PROPERTY && native_slot->native_setter != nullptr && value->get_type() == native_slot->setter_arg_type) {
+							const Variant *arg_ptr = value;
+							native_slot->native_setter->validated_call(target_obj, &arg_ptr, nullptr);
+							handled = true;
+						}
+#endif
 					}
+				} else {
+					handled = func->_set_named_cached_fallback(indexname, dst, value, nullptr, nullptr, nullptr);
 				}
 
 				if (unlikely(!handled)) {
@@ -2496,26 +2518,38 @@ Variant GDScriptFunction::_call_vm(GDScriptFunction *func, GDScriptInstance *p_i
 					Object *target_obj = src->is_ref_counted() ? *VariantInternal::get_object(src) : src->get_validated_object();
 #endif
 					if (likely(target_obj != nullptr)) {
+						const MemberCacheSlot *native_slot = nullptr;
 						ScriptInstance *script_inst = target_obj->get_script_instance();
 						if (script_inst != nullptr) {
 							if (likely(script_inst->get_language() == GDScriptLanguage::get_singleton() && !script_inst->is_placeholder())) {
 								GDScriptInstance *gds_inst = static_cast<GDScriptInstance *>(script_inst);
 								const GDScript *target_script = gds_inst->script.ptr();
 								if (likely(target_script != nullptr && target_script->valid)) {
-									const MemberCacheSlot *slot = func->_lookup_member_cache(indexname, target_script);
+									const MemberCacheSlot *slot = func->_lookup_script_member_cache(indexname, target_script, target_obj);
 									if (unlikely(slot == nullptr)) {
-										slot = func->_populate_gdscript_member_cache(indexname, target_script);
+										slot = func->_populate_gdscript_member_cache(indexname, target_script, target_obj);
 									}
 									if (likely(slot != nullptr)) {
-										if (slot->kind == MemberCacheSlot::GDSCRIPT_DIRECT || slot->getter_func == nullptr) {
+										if (likely(slot->kind == MemberCacheSlot::GDSCRIPT_DIRECT)) {
 											if (likely(src != dst)) {
 												VariantInternal::assign_fast(dst, &gds_inst->members.ptr()[slot->member_index]);
 											} else {
 												Variant temp_val = gds_inst->members.ptr()[slot->member_index];
 												VariantInternal::assign_move_fast(dst, temp_val);
 											}
-											handled = true;
-										} else {
+											ip += 4;
+											DISPATCH_OPCODE;
+										} else if (slot->kind == MemberCacheSlot::GDSCRIPT_ACCESSOR) {
+											if (slot->getter_func == nullptr) {
+												if (likely(src != dst)) {
+													VariantInternal::assign_fast(dst, &gds_inst->members.ptr()[slot->member_index]);
+												} else {
+													Variant temp_val = gds_inst->members.ptr()[slot->member_index];
+													VariantInternal::assign_move_fast(dst, temp_val);
+												}
+												ip += 4;
+												DISPATCH_OPCODE;
+											}
 											GDScriptFunction *getter_func = slot->getter_func;
 											const uint32_t callee_frame_bytes = likely(getter_func->_frame_bytes != 0)
 													? getter_func->_frame_bytes
@@ -2546,40 +2580,49 @@ Variant GDScriptFunction::_call_vm(GDScriptFunction *func, GDScriptInstance *p_i
 													goto INLINE_FRAME_PUSH;
 												}
 											}
-											Callable::CallError err;
-											Variant getter_ret = getter_func->call(gds_inst, nullptr, 0, err);
-											if (likely(err.error == Callable::CallError::CALL_OK)) {
-												VariantInternal::assign_move_fast(dst, getter_ret);
-											} else {
-												*dst = Variant();
+											{
+												Callable::CallError err;
+												Variant getter_ret = getter_func->call(gds_inst, nullptr, 0, err);
+												if (likely(err.error == Callable::CallError::CALL_OK)) {
+													VariantInternal::assign_move_fast(dst, getter_ret);
+												} else {
+													*dst = Variant();
+												}
 											}
-											handled = true;
+											ip += 4;
+											DISPATCH_OPCODE;
+										} else if (slot->kind == MemberCacheSlot::NATIVE_PROPERTY) {
+											native_slot = slot;
+										} else {
+											handled = func->_get_named_cached_fallback(indexname, src, dst, target_obj, target_script, slot);
 										}
 									}
 								}
 							}
 						} else {
 							const void *gdtype_key = &target_obj->get_gdtype();
-							const MemberCacheSlot *slot = func->_lookup_member_cache(indexname, gdtype_key);
-							if (unlikely(slot == nullptr)) {
-								slot = func->_populate_native_member_cache(indexname, target_obj);
-							}
-							if (likely(slot != nullptr && slot->native_getter != nullptr)) {
-								if (likely(src != dst)) {
-									if (unlikely(dst->get_type() != slot->getter_return_type)) {
-										VariantInternal::initialize(dst, slot->getter_return_type);
-									}
-									slot->native_getter->validated_call(target_obj, nullptr, dst);
-								} else {
-									Variant temp_ret;
-									VariantInternal::initialize(&temp_ret, slot->getter_return_type);
-									slot->native_getter->validated_call(target_obj, nullptr, &temp_ret);
-									VariantInternal::assign_move_fast(dst, temp_ret);
-								}
-								handled = true;
+							native_slot = func->_lookup_member_cache(indexname, gdtype_key);
+							if (unlikely(native_slot == nullptr)) {
+								native_slot = func->_populate_native_member_cache(indexname, target_obj);
 							}
 						}
+						if (native_slot != nullptr && native_slot->kind == MemberCacheSlot::NATIVE_PROPERTY && native_slot->native_getter != nullptr) {
+							if (likely(src != dst)) {
+								if (unlikely(dst->get_type() != native_slot->getter_return_type)) {
+									VariantInternal::initialize(dst, native_slot->getter_return_type);
+								}
+								native_slot->native_getter->validated_call(target_obj, nullptr, dst);
+							} else {
+								Variant temp_ret;
+								VariantInternal::initialize(&temp_ret, native_slot->getter_return_type);
+								native_slot->native_getter->validated_call(target_obj, nullptr, &temp_ret);
+								VariantInternal::assign_move_fast(dst, temp_ret);
+							}
+							handled = true;
+						}
 					}
+				} else {
+					handled = func->_get_named_cached_fallback(indexname, src, dst, nullptr, nullptr, nullptr);
 				}
 
 				if (unlikely(!handled)) {
@@ -2625,19 +2668,21 @@ Variant GDScriptFunction::_call_vm(GDScriptFunction *func, GDScriptInstance *p_i
 				GD_ERR_BREAK(indexname < 0 || indexname >= func->_global_names_count);
 				const StringName *index = &func->_global_names_ptr[indexname];
 
-				bool valid;
+				if (unlikely(!func->_set_member_cached(indexname, p_instance->owner, src))) {
+					bool valid;
 #ifndef DEBUG_ENABLED
-				ClassDB::set_property(p_instance->owner, *index, *src, &valid);
+					ClassDB::set_property(p_instance->owner, *index, *src, &valid);
 #else
-				bool ok = ClassDB::set_property(p_instance->owner, *index, *src, &valid);
-				if (!ok) {
-					err_text = "Internal error setting property: " + String(*index);
-					OPCODE_BREAK;
-				} else if (!valid) {
-					err_text = "Error setting property '" + String(*index) + "' with value of type " + Variant::get_type_name(src->get_type()) + ".";
-					OPCODE_BREAK;
-				}
+					bool ok = ClassDB::set_property(p_instance->owner, *index, *src, &valid);
+					if (!ok) {
+						err_text = "Internal error setting property: " + String(*index);
+						OPCODE_BREAK;
+					} else if (!valid) {
+						err_text = "Error setting property '" + String(*index) + "' with value of type " + Variant::get_type_name(src->get_type()) + ".";
+						OPCODE_BREAK;
+					}
 #endif
+				}
 				ip += 3;
 			}
 			DISPATCH_OPCODE;
@@ -2648,15 +2693,18 @@ Variant GDScriptFunction::_call_vm(GDScriptFunction *func, GDScriptInstance *p_i
 				int indexname = code_ptr[ip + 2];
 				GD_ERR_BREAK(indexname < 0 || indexname >= func->_global_names_count);
 				const StringName *index = &func->_global_names_ptr[indexname];
+
+				if (unlikely(!func->_get_member_cached(indexname, p_instance->owner, dst))) {
 #ifndef DEBUG_ENABLED
-				ClassDB::get_property(p_instance->owner, *index, *dst);
+					ClassDB::get_property(p_instance->owner, *index, *dst);
 #else
-				bool ok = ClassDB::get_property(p_instance->owner, *index, *dst);
-				if (!ok) {
-					err_text = "Internal error getting property: " + String(*index);
-					OPCODE_BREAK;
-				}
+					bool ok = ClassDB::get_property(p_instance->owner, *index, *dst);
+					if (!ok) {
+						err_text = "Internal error getting property: " + String(*index);
+						OPCODE_BREAK;
+					}
 #endif
+				}
 				ip += 3;
 			}
 			DISPATCH_OPCODE;
@@ -3259,6 +3307,14 @@ Variant GDScriptFunction::_call_vm(GDScriptFunction *func, GDScriptInstance *p_i
 						native_target_obj = nullptr;
 #endif
 					}
+				} else if (!call_ret && base->get_type() == Variant::SIGNAL && *methodname == CoreStringName(emit)
+#ifdef DEBUG_ENABLED
+						&& !GDScriptLanguage::get_singleton()->profiling
+#endif
+				) {
+					VariantInternal::get_signal(base)->emit(const_cast<const Variant **>(argptrs), argc);
+					ip += 3;
+					DISPATCH_OPCODE;
 				} else if (base->get_type() == Variant::CALLABLE && *methodname == CoreStringName(call)
 #ifdef DEBUG_ENABLED
 						&& !call_async &&
@@ -3348,7 +3404,7 @@ Variant GDScriptFunction::_call_vm(GDScriptFunction *func, GDScriptInstance *p_i
 						Variant call_result = cached_gdscript_func->call(gds_target_instance, (const Variant **)argptrs, argc, err);
 						VariantInternal::assign_move_fast(ret, call_result);
 #ifndef DEBUG_ENABLED
-					} else if (native_target_obj != nullptr && func->_try_call_native_cached(methodname_idx, native_target_obj, native_script_key, base, argptrs, argc, ret, temp_ret, err)) {
+					} else if (native_target_obj != nullptr && func->_try_call_native_cached(methodname_idx, native_target_obj, native_script_key, base, argptrs, argc, ret, err)) {
 #endif
 					} else {
 						base->callp(*methodname, (const Variant **)argptrs, argc, temp_ret, err);
@@ -3393,7 +3449,7 @@ Variant GDScriptFunction::_call_vm(GDScriptFunction *func, GDScriptInstance *p_i
 					if (likely(cached_gdscript_func != nullptr)) {
 						temp_ret = cached_gdscript_func->call(gds_target_instance, (const Variant **)argptrs, argc, err);
 #ifndef DEBUG_ENABLED
-					} else if (native_target_obj != nullptr && func->_try_call_native_cached(methodname_idx, native_target_obj, native_script_key, base, argptrs, argc, nullptr, temp_ret, err)) {
+					} else if (native_target_obj != nullptr && func->_try_call_native_cached(methodname_idx, native_target_obj, native_script_key, base, argptrs, argc, nullptr, err)) {
 #endif
 					} else {
 						base->callp(*methodname, (const Variant **)argptrs, argc, temp_ret, err);

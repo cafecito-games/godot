@@ -416,18 +416,27 @@ private:
 			NONE = 0,
 			GDSCRIPT_DIRECT,
 			GDSCRIPT_ACCESSOR,
+			GDSCRIPT_SIGNAL,
 			NATIVE_PROPERTY,
+			BUILTIN_MEMBER,
 		};
 		Kind kind = NONE;
 		Variant::Type getter_return_type = Variant::NIL;
 		Variant::Type setter_arg_type = Variant::NIL;
 		int member_index = -1;
 		const void *key = nullptr;
+		const void *native_gdtype_key = nullptr;
 		const GDScriptDataType *member_data_type = nullptr;
-		GDScriptFunction *getter_func = nullptr;
-		GDScriptFunction *setter_func = nullptr;
-		MethodBind *native_getter = nullptr;
-		MethodBind *native_setter = nullptr;
+		union {
+			GDScriptFunction *getter_func = nullptr;
+			MethodBind *native_getter;
+			Variant::ValidatedGetter builtin_getter;
+		};
+		union {
+			GDScriptFunction *setter_func = nullptr;
+			MethodBind *native_setter;
+			Variant::ValidatedSetter builtin_setter;
+		};
 	};
 
 	struct MemberInlineCache {
@@ -445,11 +454,17 @@ private:
 	void prepare_vm_frame_metadata();
 #ifndef DEBUG_ENABLED
 	const NativeCallCacheSlot *_populate_native_call_cache(int p_methodname_idx, const Object *p_object, const GDScript *p_script_key) const;
-	_NO_INLINE_ bool _try_call_native_cached(int p_methodname_idx, Object *p_target_obj, const GDScript *p_script_key, const Variant *p_base, Variant **p_args, int p_argc, Variant *p_ret_slot, Variant &r_temp_ret, Callable::CallError &r_err) const;
+	_NO_INLINE_ bool _try_call_native_cached(int p_methodname_idx, Object *p_target_obj, const GDScript *p_script_key, const Variant *p_base, Variant **p_args, int p_argc, Variant *p_ret_slot, Callable::CallError &r_err) const;
 #endif
 	bool _populate_type_test_cache(int p_native_type_idx, const Object *p_object, const StringName &p_native_type) const;
-	const MemberCacheSlot *_populate_gdscript_member_cache(int p_name_idx, const GDScript *p_target_script) const;
+	const MemberCacheSlot *_insert_member_cache_slot(int p_name_idx, const MemberCacheSlot &p_populated) const;
+	const MemberCacheSlot *_populate_gdscript_member_cache(int p_name_idx, const GDScript *p_target_script, const Object *p_object) const;
 	const MemberCacheSlot *_populate_native_member_cache(int p_name_idx, const Object *p_object) const;
+	const MemberCacheSlot *_populate_builtin_member_cache(int p_name_idx, Variant::Type p_type) const;
+	_NO_INLINE_ bool _set_named_cached_fallback(int p_name_idx, Variant *p_dst, const Variant *p_value, Object *p_target_obj, const GDScript *p_target_script, const MemberCacheSlot *p_slot) const;
+	_NO_INLINE_ bool _get_named_cached_fallback(int p_name_idx, const Variant *p_src, Variant *p_dst, Object *p_target_obj, const GDScript *p_target_script, const MemberCacheSlot *p_slot) const;
+	_NO_INLINE_ bool _set_member_cached(int p_name_idx, Object *p_owner, const Variant *p_src) const;
+	_NO_INLINE_ bool _get_member_cached(int p_name_idx, Object *p_owner, Variant *p_dst) const;
 
 #ifndef DEBUG_ENABLED
 	_FORCE_INLINE_ const NativeCallCacheSlot *_lookup_native_call_cache(int p_methodname_idx, const void *p_gdtype_key, const GDScript *p_script_key) const {
@@ -509,6 +524,29 @@ private:
 					for (uint32_t slot_index = 0; slot_index < count; slot_index++) {
 						if (likely(entry.slots[slot_index].key == p_key)) {
 							return &entry.slots[slot_index];
+						}
+					}
+				}
+			}
+		}
+		return nullptr;
+	}
+
+	_FORCE_INLINE_ const MemberCacheSlot *_lookup_script_member_cache(int p_name_idx, const GDScript *p_target_script, const Object *p_object) const {
+		MemberInlineCache *cache_array = _member_cache.load(std::memory_order_acquire);
+		if (likely(cache_array != nullptr)) {
+			const MemberInlineCache &entry = cache_array[p_name_idx];
+			const uint64_t current_epoch = _script_clear_epoch.load(std::memory_order_relaxed);
+			const uint64_t meta = entry.epoch_and_count.load(std::memory_order_acquire);
+			if (likely((meta >> 8) == current_epoch)) {
+				const uint32_t count = static_cast<uint32_t>(meta & 0xFF);
+				if (likely(count <= MemberInlineCache::MAX_SLOTS)) {
+					for (uint32_t slot_index = 0; slot_index < count; slot_index++) {
+						const MemberCacheSlot &slot = entry.slots[slot_index];
+						if (likely(slot.key == p_target_script)) {
+							if (likely(slot.native_gdtype_key == nullptr || slot.native_gdtype_key == &p_object->get_gdtype())) {
+								return &slot;
+							}
 						}
 					}
 				}

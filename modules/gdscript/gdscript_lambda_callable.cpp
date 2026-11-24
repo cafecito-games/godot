@@ -161,7 +161,7 @@ static bool _captures_contain_object(const Vector<Variant> &p_captures) {
 	const int capture_count = p_captures.size();
 	const Variant *captures_ptr = p_captures.ptr();
 	for (int index = 0; index < capture_count; index++) {
-		if (captures_ptr[index].get_type() == Variant::OBJECT) {
+		if (captures_ptr[index].get_type() == Variant::OBJECT && !captures_ptr[index].is_ref_counted()) {
 			return true;
 		}
 	}

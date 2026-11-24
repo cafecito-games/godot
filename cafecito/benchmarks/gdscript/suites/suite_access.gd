@@ -62,6 +62,15 @@ static func build_cases(scale: float) -> Array:
 		func() -> void: suite._setup_native_node(),
 		func() -> void: suite._teardown_native_node()
 	))
+	cases.append(BenchCase.new(
+		"member_other_native_scripted",
+		"access",
+		"Read/write native Node2D properties on another scripted instance via GET_NAMED/SET_NAMED",
+		native_member_count,
+		func() -> int: return suite._bench_member_other_native_scripted(native_member_count),
+		func() -> void: suite._setup_native_node(),
+		func() -> void: suite._teardown_native_node()
+	))
 
 	var other_member_count := BenchCase.scaled_count(300000, scale)
 	cases.append(BenchCase.new(
@@ -218,6 +227,17 @@ func _bench_member_self_direct(iterations: int) -> int:
 		_self_counter = (_self_counter + (index & 15)) & 0x3fffffff
 		_self_weight = _self_weight * 0.9999 + 0.01
 	return _self_counter + int(_self_weight * 100.0)
+
+
+func _bench_member_other_native_scripted(iterations: int) -> int:
+	var node: NativeMemberNode = _native_member_node
+	var accumulator: float = 0.0
+	for index: int in range(iterations):
+		var offset: float = float(index & 255)
+		node.position = Vector2(offset, offset * 0.5)
+		node.rotation = offset * 0.01
+		accumulator += node.position.x + node.position.y + node.rotation
+	return int(accumulator)
 
 
 func _bench_member_other_typed(iterations: int) -> int:

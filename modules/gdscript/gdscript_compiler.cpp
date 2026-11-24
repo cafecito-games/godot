@@ -258,6 +258,53 @@ static bool _can_use_validate_call(const MethodBind *p_method, const Vector<GDSc
 	return true;
 }
 
+static bool _is_declared_object_signal(const GDScriptParser::DataType &p_base_type, const StringName &p_signal_name) {
+	if (p_base_type.has_no_type() || p_base_type.is_meta_type) {
+		return false;
+	}
+	switch (p_base_type.kind) {
+		case GDScriptParser::DataType::NATIVE:
+			return GDScriptAnalyzer::class_exists(p_base_type.native_type) && ClassDB::has_signal(p_base_type.native_type, p_signal_name);
+		case GDScriptParser::DataType::CLASS: {
+			const GDScriptParser::ClassNode *class_cursor = p_base_type.class_type;
+			while (class_cursor != nullptr) {
+				if (class_cursor->has_member(p_signal_name)) {
+					return class_cursor->get_member(p_signal_name).type == GDScriptParser::ClassNode::Member::SIGNAL;
+				}
+				if (class_cursor->base_type.kind == GDScriptParser::DataType::CLASS) {
+					class_cursor = class_cursor->base_type.class_type;
+				} else {
+					return _is_declared_object_signal(class_cursor->base_type, p_signal_name);
+				}
+			}
+			return false;
+		}
+		case GDScriptParser::DataType::SCRIPT: {
+			const Script *script = p_base_type.script_type.ptr();
+			if (script != nullptr && script->has_script_signal(p_signal_name)) {
+				return true;
+			}
+			const GDScript *gdscript = Object::cast_to<GDScript>(script);
+			if (gdscript == nullptr) {
+				return false;
+			}
+			const StringName native_type = p_base_type.native_type != StringName() ? p_base_type.native_type : script->get_instance_base_type();
+			if (native_type != StringName() && GDScriptAnalyzer::class_exists(native_type) && ClassDB::has_signal(native_type, p_signal_name)) {
+				while (gdscript != nullptr) {
+					if (gdscript->get_members().has(p_signal_name) || gdscript->get_constants().has(p_signal_name)) {
+						return false;
+					}
+					gdscript = gdscript->get_base_script_ptr();
+				}
+				return true;
+			}
+			return false;
+		}
+		default:
+			return false;
+	}
+}
+
 void GDScriptCompiler::_write_get_class_member_property(CodeGen &codegen, const GDScriptCodeGenerator::Address &p_target, const StringName &p_name) {
 	StringName native_class_name = _get_native_class_name(codegen.script);
 	if (native_class_name != StringName()) {
@@ -744,39 +791,81 @@ GDScriptCodeGenerator::Address GDScriptCompiler::_parse_expression(CodeGen &code
 									gen->write_call_native_static(result, class_name, subscript->attribute->name, arguments);
 								}
 							} else {
-								GDScriptCodeGenerator::Address base = _parse_expression(codegen, r_error, subscript->base);
-								if (r_error) {
-									return GDScriptCodeGenerator::Address();
-								}
-								if (is_awaited) {
-									gen->write_call_async(result, base, call->function_name, arguments);
-								} else if (base.type.kind != GDScriptDataType::VARIANT && base.type.kind != GDScriptDataType::BUILTIN) {
-									// Native method, use faster path.
-									StringName class_name;
-									if (base.type.kind == GDScriptDataType::NATIVE) {
-										class_name = base.type.native_type;
-									} else {
-										class_name = base.type.native_type == StringName() ? base.type.script_type->get_instance_base_type() : base.type.native_type;
-									}
-									if (GDScriptAnalyzer::class_exists(class_name) && ClassDB::has_method(class_name, call->function_name)) {
-										MethodBind *method = ClassDB::get_method(class_name, call->function_name);
-										if (_can_use_validate_call(method, arguments)) {
-											// Exact arguments, use validated call.
-											gen->write_call_method_bind_validated(result, base, method, arguments);
-										} else {
-											// Not exact arguments, but still can use method bind call.
-											gen->write_call_method_bind(result, base, method, arguments);
+								bool lowered_signal_emit = false;
+								if (p_root && !is_awaited && call->function_name == CoreStringName(emit)) {
+									MethodBind *emit_signal_method = ClassDB::get_method(Object::get_class_static(), SNAME("emit_signal"));
+									if (emit_signal_method != nullptr) {
+										StringName direct_signal_name;
+										GDScriptCodeGenerator::Address direct_emitter;
+										bool has_direct_emitter = false;
+										if (subscript->base->type == GDScriptParser::Node::IDENTIFIER) {
+											const GDScriptParser::IdentifierNode *signal_ident = static_cast<const GDScriptParser::IdentifierNode *>(subscript->base);
+											if (signal_ident->source == GDScriptParser::IdentifierNode::MEMBER_SIGNAL && !codegen.is_static && !(codegen.function_node && codegen.function_node->is_static)) {
+												direct_signal_name = signal_ident->name;
+												direct_emitter = GDScriptCodeGenerator::Address(GDScriptCodeGenerator::Address::SELF);
+												has_direct_emitter = true;
+											}
+										} else if (subscript->base->type == GDScriptParser::Node::SUBSCRIPT) {
+											const GDScriptParser::SubscriptNode *inner_subscript = static_cast<const GDScriptParser::SubscriptNode *>(subscript->base);
+											if (inner_subscript->is_attribute && _is_declared_object_signal(inner_subscript->base->get_datatype(), inner_subscript->attribute->name)) {
+												direct_emitter = _parse_expression(codegen, r_error, inner_subscript->base);
+												if (r_error) {
+													return GDScriptCodeGenerator::Address();
+												}
+												direct_signal_name = inner_subscript->attribute->name;
+												has_direct_emitter = true;
+											}
 										}
+										if (has_direct_emitter) {
+											Vector<GDScriptCodeGenerator::Address> emit_arguments;
+											emit_arguments.resize(arguments.size() + 1);
+											emit_arguments.write[0] = codegen.add_constant(direct_signal_name);
+											for (int arg_index = 0; arg_index < arguments.size(); arg_index++) {
+												emit_arguments.write[arg_index + 1] = arguments[arg_index];
+											}
+											gen->write_call_method_bind(result, direct_emitter, emit_signal_method, emit_arguments);
+											if (direct_emitter.mode == GDScriptCodeGenerator::Address::TEMPORARY) {
+												gen->pop_temporary();
+											}
+											lowered_signal_emit = true;
+										}
+									}
+								}
+								if (!lowered_signal_emit) {
+									GDScriptCodeGenerator::Address base = _parse_expression(codegen, r_error, subscript->base);
+									if (r_error) {
+										return GDScriptCodeGenerator::Address();
+									}
+									if (is_awaited) {
+										gen->write_call_async(result, base, call->function_name, arguments);
+									} else if (base.type.kind != GDScriptDataType::VARIANT && base.type.kind != GDScriptDataType::BUILTIN) {
+										// Native method, use faster path.
+										StringName class_name;
+										if (base.type.kind == GDScriptDataType::NATIVE) {
+											class_name = base.type.native_type;
+										} else {
+											class_name = base.type.native_type == StringName() ? base.type.script_type->get_instance_base_type() : base.type.native_type;
+										}
+										if (GDScriptAnalyzer::class_exists(class_name) && ClassDB::has_method(class_name, call->function_name)) {
+											MethodBind *method = ClassDB::get_method(class_name, call->function_name);
+											if (_can_use_validate_call(method, arguments)) {
+												// Exact arguments, use validated call.
+												gen->write_call_method_bind_validated(result, base, method, arguments);
+											} else {
+												// Not exact arguments, but still can use method bind call.
+												gen->write_call_method_bind(result, base, method, arguments);
+											}
+										} else {
+											gen->write_call(result, base, call->function_name, arguments);
+										}
+									} else if (base.type.kind == GDScriptDataType::BUILTIN) {
+										gen->write_call_builtin_type(result, base, base.type.builtin_type, call->function_name, arguments);
 									} else {
 										gen->write_call(result, base, call->function_name, arguments);
 									}
-								} else if (base.type.kind == GDScriptDataType::BUILTIN) {
-									gen->write_call_builtin_type(result, base, base.type.builtin_type, call->function_name, arguments);
-								} else {
-									gen->write_call(result, base, call->function_name, arguments);
-								}
-								if (base.mode == GDScriptCodeGenerator::Address::TEMPORARY) {
-									gen->pop_temporary();
+									if (base.mode == GDScriptCodeGenerator::Address::TEMPORARY) {
+										gen->pop_temporary();
+									}
 								}
 							}
 						} else {
