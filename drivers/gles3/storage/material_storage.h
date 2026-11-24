@@ -95,6 +95,8 @@ struct MaterialData {
 	virtual void bind_uniforms() = 0;
 	virtual ~MaterialData();
 
+	int get_texture_cache_size() const { return texture_cache.size(); }
+
 	// Used internally by all Materials
 	void update_parameters_internal(const HashMap<StringName, Variant> &p_parameters, bool p_uniform_dirty, bool p_textures_dirty, const HashMap<StringName, ShaderLanguage::ShaderNode::Uniform> &p_uniforms, const uint32_t *p_uniform_offsets, const Vector<ShaderCompiler::GeneratedCode::Texture> &p_texture_uniforms, const HashMap<StringName, HashMap<int, RID>> &p_default_texture_params, uint32_t p_ubo_size, bool p_is_3d_shader_type);
 
