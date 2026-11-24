@@ -3888,6 +3888,12 @@ Error Main::setup2(bool p_show_boot_logo) {
 	// when opening a project without a UID cache file or with an invalid cache.
 	if (editor) {
 		ResourceUID::scan_for_uid_on_startup = EditorFileSystem::scan_for_uid;
+	} else if (!project_manager && !ProjectSettings::get_singleton()->is_using_datapack() && !ProjectSettings::get_singleton()->get_resource_path().is_empty() && FileAccess::exists("res://project.godot")) {
+		// In non-editor runs against loose project files on disk, enable on-demand UID
+		// recovery first so uid:// extends paths resolve while synchronizing global script
+		// classes, preventing stale or missing .godot/ caches from causing false failures.
+		ResourceUID::scan_for_uid_on_startup = ResourceUID::scan_project_uids_from_disk;
+		ScriptServer::refresh_global_classes_from_disk(true);
 	}
 
 #endif

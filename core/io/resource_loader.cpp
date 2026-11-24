@@ -2213,6 +2213,29 @@ ResourceUID::ID ResourceLoader::get_resource_uid(const String &p_path) {
 	return ResourceUID::INVALID_ID;
 }
 
+#ifdef TOOLS_ENABLED
+ResourceUID::ID ResourceLoader::get_resource_uid_from_disk(const String &p_path) {
+	const String local_path = _validate_local_path(p_path);
+
+	for (int i = 0; i < loader_count; i++) {
+		if (!loader[i]->has_custom_uid_support()) {
+			continue;
+		}
+		ResourceUID::ID id = loader[i]->get_resource_uid(local_path);
+		if (id != ResourceUID::INVALID_ID) {
+			return id;
+		}
+	}
+
+	Ref<FileAccess> uid_file = FileAccess::open(local_path + ".uid", FileAccess::READ);
+	if (uid_file.is_valid()) {
+		return ResourceUID::get_singleton()->text_to_id(uid_file->get_line().strip_edges());
+	}
+
+	return ResourceUID::INVALID_ID;
+}
+#endif // TOOLS_ENABLED
+
 bool ResourceLoader::should_create_uid_file(const String &p_path) {
 	const String local_path = _validate_local_path(p_path);
 	if (FileAccess::exists(local_path + ".uid")) {

@@ -34,10 +34,15 @@
 #include "core/crypto/crypto_core.h"
 #include "core/io/dir_access.h"
 #include "core/io/file_access.h"
+#ifdef TOOLS_ENABLED
+#include "core/io/resource_importer.h"
+#endif
 #include "core/io/resource_loader.h"
 #include "core/io/stream_peer.h"
 #include "core/math/random_pcg.h"
 #include "core/object/class_db.h"
+#include "core/os/os.h"
+#include "core/templates/safe_refcount.h"
 
 // These constants are off by 1, causing the 'z' and '9' characters never to be used.
 // This cannot be fixed without breaking compatibility; see GH-83843.
@@ -154,9 +159,41 @@ ResourceUID::ID ResourceUID::create_id_for_path(const String &p_path) {
 	return id;
 }
 
+#ifdef TOOLS_ENABLED
+const ResourceUID::Cache *ResourceUID::_get_cache_entry_with_startup_scan(ID p_id) const {
+	const Cache *cache = unique_ids.getptr(p_id);
+	if (p_id == INVALID_ID || !scan_for_uid_on_startup) {
+		return cache;
+	}
+
+	// On startup, scan_for_uid_on_startup scans loose project files on disk when
+	// a UID is missing or points to a stale path that no longer exists.
+	// The callback clears scan_for_uid_on_startup before scanning so it runs at most once.
+	bool needs_scan = !cache;
+	if (!needs_scan) {
+		const ProjectSettings *project_settings = ProjectSettings::get_singleton();
+		if (project_settings && !project_settings->is_using_datapack() && !project_settings->get_resource_path().is_empty()) {
+			const String cached_path = String::utf8(cache->cs.ptr());
+			if (cached_path.begins_with("res://") && !FileAccess::exists(cached_path)) {
+				needs_scan = true;
+			}
+		}
+	}
+	if (needs_scan && scan_for_uid_on_startup) {
+		scan_for_uid_on_startup();
+		cache = unique_ids.getptr(p_id);
+	}
+	return cache;
+}
+#endif // TOOLS_ENABLED
+
 bool ResourceUID::has_id(ID p_id) const {
 	MutexLock l(mutex);
+#ifdef TOOLS_ENABLED
+	return _get_cache_entry_with_startup_scan(p_id) != nullptr;
+#else
 	return unique_ids.has(p_id);
+#endif
 }
 
 void ResourceUID::add_id(ID p_id, const String &p_path) {
@@ -183,6 +220,12 @@ void ResourceUID::set_id(ID p_id, const String &p_path) {
 		return; // Both are empty strings.
 	}
 	if ((update_ptr == nullptr) != (cached_ptr == nullptr) || strcmp(update_ptr, cached_ptr) != 0) {
+		if (use_reverse_cache) {
+			const ID *existing_reverse = reverse_cache.getptr(unique_ids[p_id].cs);
+			if (existing_reverse && *existing_reverse == p_id) {
+				reverse_cache.erase(unique_ids[p_id].cs);
+			}
+		}
 		unique_ids[p_id].cs = cs;
 		unique_ids[p_id].saved_to_cache = false; //changed
 		if (use_reverse_cache) {
@@ -195,18 +238,10 @@ void ResourceUID::set_id(ID p_id, const String &p_path) {
 String ResourceUID::get_id_path(ID p_id) const {
 	ERR_FAIL_COND_V_MSG(p_id == INVALID_ID, String(), "Invalid UID.");
 	MutexLock l(mutex);
+#ifdef TOOLS_ENABLED
+	const ResourceUID::Cache *cache = _get_cache_entry_with_startup_scan(p_id);
+#else
 	const ResourceUID::Cache *cache = unique_ids.getptr(p_id);
-
-#if TOOLS_ENABLED
-	// On startup, the scan_for_uid_on_startup callback should be set and will
-	// execute EditorFileSystem::scan_for_uid, which scans all project files
-	// to reload the UID cache before the first scan.
-	// Note: EditorFileSystem::scan_for_uid sets scan_for_uid_on_startup to nullptr
-	//       once the first scan_for_uid is complete.
-	if (!cache && scan_for_uid_on_startup) {
-		scan_for_uid_on_startup();
-		cache = unique_ids.getptr(p_id);
-	}
 #endif
 
 	if (unlikely(!cache)) {
@@ -220,7 +255,18 @@ String ResourceUID::get_id_path(ID p_id) const {
 }
 
 ResourceUID::ID ResourceUID::get_path_id(const String &p_path) const {
-	const ID *id = reverse_cache.getptr(p_path.utf8());
+	MutexLock lock(mutex);
+	const CharString utf8_path = p_path.utf8();
+	const ID *id = reverse_cache.getptr(utf8_path);
+#ifdef TOOLS_ENABLED
+	if (!id && use_reverse_cache && scan_for_uid_on_startup) {
+		const ProjectSettings *project_settings = ProjectSettings::get_singleton();
+		if (project_settings && !project_settings->is_using_datapack() && !project_settings->get_resource_path().is_empty()) {
+			scan_for_uid_on_startup();
+			id = reverse_cache.getptr(utf8_path);
+		}
+	}
+#endif
 	if (id) {
 		return *id;
 	}
@@ -234,6 +280,7 @@ void ResourceUID::remove_id(ID p_id) {
 		reverse_cache.erase(unique_ids[p_id].cs);
 	}
 	unique_ids.erase(p_id);
+	changed = true;
 }
 
 String ResourceUID::uid_to_path(const String &p_uid) {
@@ -272,32 +319,59 @@ Vector<uint8_t> ResourceUID::encode_binary_cache(const Vector<Pair<ID, String>> 
 }
 
 Error ResourceUID::save_to_cache() {
-	String cache_file = get_cache_file();
-	if (!FileAccess::exists(cache_file)) {
-		Ref<DirAccess> d = DirAccess::create(DirAccess::ACCESS_RESOURCES);
-		d->make_dir_recursive(String(cache_file).get_base_dir()); //ensure base dir exists
-	}
+	MutexLock lock(mutex);
 
-	Ref<FileAccess> f = FileAccess::open(cache_file, FileAccess::WRITE);
-	if (f.is_null()) {
+	const String cache_file = get_cache_file();
+	const String cache_directory = cache_file.get_base_dir();
+	Ref<DirAccess> directory_access = DirAccess::create(DirAccess::ACCESS_RESOURCES);
+	if (directory_access.is_null()) {
 		return ERR_CANT_OPEN;
 	}
-
-	MutexLock l(mutex);
+	if (!directory_access->dir_exists(cache_directory)) {
+		const Error mkdir_error = directory_access->make_dir_recursive(cache_directory);
+		if (mkdir_error != OK) {
+			return mkdir_error;
+		}
+	}
 
 	Vector<Pair<ID, String>> entries;
 	entries.reserve(unique_ids.size());
-	cache_entries = 0;
-
-	for (KeyValue<ID, Cache> &E : unique_ids) {
-		entries.push_back(Pair<ID, String>(E.key, String::utf8(E.value.cs.ptr(), E.value.cs.length())));
-		E.value.saved_to_cache = true;
-		cache_entries++;
+	for (const KeyValue<ID, Cache> &entry : unique_ids) {
+		entries.push_back(Pair<ID, String>(entry.key, String::utf8(entry.value.cs.ptr(), entry.value.cs.length())));
 	}
 
-	Vector<uint8_t> data = encode_binary_cache(entries);
-	f->store_buffer(data.ptr(), data.size());
+	const Vector<uint8_t> data = encode_binary_cache(entries);
 
+	static SafeNumeric<uint64_t> temporary_file_counter{ 0 };
+	const uint64_t unique_counter = temporary_file_counter.increment();
+	const int64_t process_id = OS::get_singleton() ? OS::get_singleton()->get_process_id() : 0;
+	const String temporary_path = cache_file + "." + String::num_int64(process_id) + "." + String::num_uint64(unique_counter) + ".tmp";
+
+	Error open_error = OK;
+	Ref<FileAccess> file_access = FileAccess::open(temporary_path, FileAccess::WRITE, &open_error);
+	if (file_access.is_null() || open_error != OK) {
+		return open_error != OK ? open_error : ERR_CANT_OPEN;
+	}
+
+	const bool stored = file_access->store_buffer(data.ptr(), data.size());
+	const Error write_error = file_access->get_error();
+	file_access.unref();
+
+	if (!stored || write_error != OK) {
+		directory_access->remove(temporary_path);
+		return write_error != OK ? write_error : ERR_FILE_CANT_WRITE;
+	}
+
+	const Error rename_error = directory_access->rename(temporary_path, cache_file);
+	if (rename_error != OK) {
+		directory_access->remove(temporary_path);
+		return rename_error;
+	}
+
+	for (KeyValue<ID, Cache> &entry : unique_ids) {
+		entry.value.saved_to_cache = true;
+	}
+	cache_entries = entries.size();
 	changed = false;
 	return OK;
 }
@@ -341,43 +415,144 @@ Error ResourceUID::load_from_cache(bool p_reset) {
 }
 
 Error ResourceUID::update_cache() {
+	MutexLock lock(mutex);
 	if (!changed) {
 		return OK;
 	}
+	return save_to_cache();
+}
 
-	if (cache_entries == 0) {
-		return save_to_cache();
+#ifdef TOOLS_ENABLED
+namespace {
+
+static bool should_skip_uid_scan_directory(const String &p_directory_path, const String &p_project_data_path) {
+	if (p_directory_path == p_project_data_path || p_directory_path.begins_with(p_project_data_path + "/")) {
+		return true;
 	}
-	MutexLock l(mutex);
+	if (FileAccess::exists(p_directory_path.path_join("project.godot"))) {
+		return true;
+	}
+	if (FileAccess::exists(p_directory_path.path_join(".gdignore"))) {
+		return true;
+	}
+	return false;
+}
 
-	Ref<FileAccess> f;
-	for (KeyValue<ID, Cache> &E : unique_ids) {
-		if (!E.value.saved_to_cache) {
-			if (f.is_null()) {
-				f = FileAccess::open(get_cache_file(), FileAccess::READ_WRITE); // Append.
-				if (f.is_null()) {
-					return ERR_CANT_OPEN;
-				}
-				f->seek_end();
+static void scan_directory_for_uids(Ref<DirAccess> &p_directory_access, const String &p_project_data_path, const HashSet<String> &p_import_extensions) {
+	List<String> subdirectories;
+	List<String> files;
+
+	const String current_directory = p_directory_access->get_current_dir();
+
+	p_directory_access->list_dir_begin();
+	while (true) {
+		const String entry_name = p_directory_access->get_next();
+		if (entry_name.is_empty()) {
+			break;
+		}
+		if (p_directory_access->current_is_hidden()) {
+			continue;
+		}
+
+		if (p_directory_access->current_is_dir()) {
+			if (entry_name.begins_with(".")) {
+				continue;
 			}
-			f->store_64(uint64_t(E.key));
-			uint32_t s = E.value.cs.length();
-			f->store_32(s);
-			f->store_buffer((const uint8_t *)E.value.cs.ptr(), s);
-			E.value.saved_to_cache = true;
-			cache_entries++;
+			if (should_skip_uid_scan_directory(current_directory.path_join(entry_name), p_project_data_path)) {
+				continue;
+			}
+			subdirectories.push_back(entry_name);
+		} else {
+			files.push_back(entry_name);
+		}
+	}
+	p_directory_access->list_dir_end();
+
+	subdirectories.sort_custom<FileNoCaseComparator>();
+	files.sort_custom<FileNoCaseComparator>();
+
+	for (const String &subdirectory : subdirectories) {
+		if (p_directory_access->change_dir(subdirectory) == OK) {
+			const String next_directory = p_directory_access->get_current_dir();
+			const bool is_descendant = next_directory != current_directory && (current_directory == "res://" ? next_directory.begins_with("res://") : next_directory.begins_with(current_directory + "/"));
+			if (is_descendant) {
+				scan_directory_for_uids(p_directory_access, p_project_data_path, p_import_extensions);
+			}
+			p_directory_access->change_dir(current_directory);
 		}
 	}
 
-	if (f.is_valid()) {
-		f->seek(0);
-		f->store_32(cache_entries); //update amount of entries
+	ResourceUID *resource_uid = ResourceUID::get_singleton();
+	ResourceFormatImporter *importer = ResourceFormatImporter::get_singleton();
+	for (const String &file_name : files) {
+		const String extension = file_name.get_extension().to_lower();
+		if (extension == "uid" || extension == "import") {
+			continue;
+		}
+
+		const String full_path = current_directory.path_join(file_name);
+		ResourceUID::ID uid = ResourceUID::INVALID_ID;
+		if (p_import_extensions.has(extension)) {
+			if (importer && FileAccess::exists(full_path + ".import")) {
+				uid = importer->get_resource_uid(full_path);
+			}
+		} else {
+			uid = ResourceLoader::get_resource_uid_from_disk(full_path);
+		}
+
+		if (uid != ResourceUID::INVALID_ID) {
+			if (!resource_uid->has_id(uid)) {
+				resource_uid->add_id(uid, full_path);
+			} else {
+				const String existing_path = resource_uid->get_id_path(uid);
+				if (existing_path != full_path && !FileAccess::exists(existing_path)) {
+					resource_uid->set_id(uid, full_path);
+				}
+			}
+		}
+	}
+}
+
+} // namespace
+
+void ResourceUID::scan_project_uids_from_disk() {
+	ResourceUID *resource_uid = get_singleton();
+	if (!resource_uid) {
+		scan_for_uid_on_startup = nullptr;
+		return;
 	}
 
-	changed = false;
+	MutexLock lock(resource_uid->mutex);
+	// Clear the startup hook under the mutex before scanning so neither another thread
+	// nor recursive UID lookups during scanning can re-enter.
+	scan_for_uid_on_startup = nullptr;
 
-	return OK;
+	ProjectSettings *project_settings = ProjectSettings::get_singleton();
+	if (!project_settings || project_settings->is_using_datapack() || project_settings->get_resource_path().is_empty()) {
+		return;
+	}
+
+	Ref<DirAccess> directory_access = DirAccess::open("res://");
+	if (directory_access.is_null()) {
+		return;
+	}
+
+	HashSet<String> import_extensions;
+	if (ResourceFormatImporter::get_singleton()) {
+		List<String> extension_list;
+		ResourceFormatImporter::get_singleton()->get_recognized_extensions(&extension_list);
+		for (const String &extension : extension_list) {
+			import_extensions.insert(extension);
+		}
+	}
+
+	scan_directory_for_uids(directory_access, project_settings->get_project_data_path(), import_extensions);
+
+	if (resource_uid->changed) {
+		resource_uid->save_to_cache();
+	}
 }
+#endif // TOOLS_ENABLED
 
 String ResourceUID::get_path_from_cache(Ref<FileAccess> &p_cache_file, const String &p_uid_string) {
 	const int64_t uid_from_string = singleton->text_to_id(p_uid_string);
@@ -405,6 +580,7 @@ String ResourceUID::get_path_from_cache(Ref<FileAccess> &p_cache_file, const Str
 }
 
 void ResourceUID::clear() {
+	MutexLock lock(mutex);
 	cache_entries = 0;
 	if (use_reverse_cache) {
 		reverse_cache.clear();
