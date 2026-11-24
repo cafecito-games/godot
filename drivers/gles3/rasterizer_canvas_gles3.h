@@ -259,7 +259,7 @@ public:
 		RSE::CanvasItemTextureRepeat repeat = RSE::CANVAS_ITEM_TEXTURE_REPEAT_MAX;
 
 		GLES3::CanvasShaderData::BlendMode blend_mode = GLES3::CanvasShaderData::BLEND_MODE_MIX;
-		Color blend_color = Color(1.0, 1.0, 1.0, 1.0);
+		Color blend_color;
 
 		Item *clip = nullptr;
 
@@ -301,11 +301,21 @@ public:
 		uint8_t quadrant_mask = 0;
 	};
 
+	struct ActivePointLight {
+		Rect2 rect_cache;
+		uint32_t item_mask = 0;
+		uint32_t item_shadow_mask = 0;
+		int32_t z_min = 0;
+		int32_t z_max = 0;
+		uint32_t render_index = 0;
+	};
+
 	struct State {
 		LocalVector<DataBuffer> canvas_instance_data_buffers;
 		LocalVector<FrameFence> frame_fences;
 		LocalVector<Batch> canvas_instance_batches;
 		LocalVector<ShadowOccluderEntry> shadow_occluder_entries;
+		LocalVector<ActivePointLight> active_point_lights;
 		uint32_t current_data_buffer_index = 0;
 		uint32_t current_instance_buffer_index = 0;
 		uint32_t current_batch_index = 0;
@@ -332,6 +342,8 @@ public:
 		RID current_tex;
 		RSE::CanvasItemTextureFilter current_filter_mode = RSE::CANVAS_ITEM_TEXTURE_FILTER_MAX;
 		RSE::CanvasItemTextureRepeat current_repeat_mode = RSE::CANVAS_ITEM_TEXTURE_REPEAT_MAX;
+		GLuint current_normal_texture_id = 0;
+		GLuint current_specular_texture_id = 0;
 
 		bool transparent_render_target = false;
 
