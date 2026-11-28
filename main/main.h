@@ -57,6 +57,7 @@ class Main {
 	static uint32_t frame;
 	static bool force_redraw_requested;
 	static int iterating;
+	static bool _iteration(bool p_foreground_inactive);
 
 public:
 	static bool is_cmdline_tool();
@@ -78,6 +79,7 @@ public:
 	static int start();
 
 	static bool iteration();
+	static bool iteration_foreground_inactive();
 	static void force_redraw();
 
 	static bool is_iterating();
