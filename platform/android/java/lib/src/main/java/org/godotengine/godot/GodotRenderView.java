@@ -83,9 +83,19 @@ public interface GodotRenderView {
 
 	void onActivityPaused();
 
+	default void onForegroundPresentationPaused() {
+		onActivityPaused();
+	}
+
+	default void onDeferredApplicationPaused() {}
+
 	void onActivityStopped();
 
 	void onActivityResumed();
+
+	default void onForegroundPresentationResumed() {
+		onActivityResumed();
+	}
 
 	void onActivityStarted();
 

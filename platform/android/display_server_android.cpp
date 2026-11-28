@@ -39,6 +39,7 @@
 #include "core/input/input.h"
 #include "core/input/input_event.h"
 #include "core/os/os.h"
+#include "core/templates/safe_refcount.h"
 #include "servers/display/native_menu.h"
 
 #if defined(RD_ENABLED)
@@ -60,6 +61,9 @@
 static RenderingContextDriver *rendering_context_global = nullptr;
 static bool rendering_context_global_checked = false;
 #endif
+
+static SafeFlag foreground_presentation_input_blocked;
+static bool foreground_presentation_input_was_disabled = false;
 
 DisplayServerAndroid *DisplayServerAndroid::get_singleton() {
 	return static_cast<DisplayServerAndroid *>(DisplayServer::get_singleton());
@@ -469,10 +473,16 @@ void DisplayServerAndroid::send_window_event(DisplayServerEnums::WindowEvent p_e
 }
 
 void DisplayServerAndroid::send_input_event(const Ref<InputEvent> &p_event) const {
+	if (is_foreground_presentation_input_blocked()) {
+		return;
+	}
 	_window_callback(input_event_callback, false, p_event);
 }
 
 void DisplayServerAndroid::send_input_text(const String &p_text) const {
+	if (is_foreground_presentation_input_blocked()) {
+		return;
+	}
 	_window_callback(input_text_callback, false, p_text, false);
 }
 
@@ -785,6 +795,30 @@ void DisplayServerAndroid::notify_application_paused() {
 #endif // defined(RD_ENABLED)
 }
 
+void DisplayServerAndroid::set_foreground_presentation_input_blocked(bool p_blocked) {
+	const bool was_blocked = foreground_presentation_input_blocked.is_set();
+	if (p_blocked == was_blocked) {
+		return;
+	}
+	if (p_blocked) {
+		foreground_presentation_input_blocked.set();
+	} else {
+		foreground_presentation_input_blocked.clear();
+	}
+	if (Input *input = Input::get_singleton()) {
+		if (p_blocked) {
+			foreground_presentation_input_was_disabled = input->is_input_disabled();
+			input->set_disable_input(true);
+		} else {
+			input->set_disable_input(foreground_presentation_input_was_disabled);
+		}
+	}
+}
+
+bool DisplayServerAndroid::is_foreground_presentation_input_blocked() {
+	return foreground_presentation_input_blocked.is_set();
+}
+
 DisplayServerAndroid::DisplayServerAndroid(const String &p_rendering_driver, DisplayServerEnums::WindowMode p_mode, DisplayServerEnums::VSyncMode p_vsync_mode, uint32_t p_flags, const Vector2i *p_position, const Vector2i &p_resolution, int p_screen, DisplayServerEnums::Context p_context, int64_t p_parent_window, Error &r_error) {
 	rendering_driver = p_rendering_driver;
 
@@ -842,6 +876,8 @@ DisplayServerAndroid::DisplayServerAndroid(const String &p_rendering_driver, Dis
 }
 
 DisplayServerAndroid::~DisplayServerAndroid() {
+	set_foreground_presentation_input_blocked(false);
+
 	if (native_menu) {
 		memdelete(native_menu);
 		native_menu = nullptr;

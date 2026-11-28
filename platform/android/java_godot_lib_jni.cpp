@@ -700,6 +700,52 @@ JNIEXPORT void JNICALL Java_org_godotengine_godot_GodotLib_onRendererPaused(JNIE
 	}
 }
 
+JNIEXPORT void JNICALL Java_org_godotengine_godot_GodotLib_onForegroundPresentationPaused(JNIEnv *env, jclass clazz) {
+	if (step.get() <= STEP_SETUP) {
+		return;
+	}
+
+	CameraServer *camera_server = CameraServer::get_singleton();
+	if (camera_server) {
+		camera_server->handle_application_pause();
+	}
+}
+
+JNIEXPORT void JNICALL Java_org_godotengine_godot_GodotLib_onForegroundPresentationResumed(JNIEnv *env, jclass clazz) {
+	if (step.get() <= STEP_SETUP) {
+		return;
+	}
+
+	// We force redraw to ensure we render at least once when resuming the app.
+	Main::force_redraw();
+	CameraServer *camera_server = CameraServer::get_singleton();
+	if (camera_server) {
+		camera_server->handle_application_resume();
+	}
+}
+
+JNIEXPORT void JNICALL Java_org_godotengine_godot_GodotLib_onDeferredApplicationPaused(JNIEnv *env, jclass clazz) {
+	if (step.get() <= STEP_SETUP) {
+		return;
+	}
+
+	if (os_android->get_main_loop()) {
+		os_android->get_main_loop()->notification(MainLoop::NOTIFICATION_APPLICATION_PAUSED);
+	}
+
+	if (DisplayServerAndroid *dsa = Object::cast_to<DisplayServerAndroid>(DisplayServer::get_singleton())) {
+		dsa->notify_application_paused();
+	}
+}
+
+JNIEXPORT void JNICALL Java_org_godotengine_godot_GodotLib_setForegroundPresentationInputBlocked(JNIEnv *env, jclass clazz, jboolean p_blocked) {
+	if (step.get() <= STEP_SETUP) {
+		return;
+	}
+
+	DisplayServerAndroid::set_foreground_presentation_input_blocked(p_blocked == JNI_TRUE);
+}
+
 JNIEXPORT void JNICALL Java_org_godotengine_godot_GodotLib_onOrientationChange(JNIEnv *env, jclass clazz, jint p_orientation) {
 	if (step.get() <= STEP_SETUP) {
 		return;

@@ -113,6 +113,21 @@ class GodotGLRenderView extends GLSurfaceView implements GodotRenderView {
 	}
 
 	@Override
+	public void onForegroundPresentationPaused() {
+		queueEvent(() -> {
+			GodotLib.focusout();
+			godotRenderer.onForegroundPresentationPaused();
+		});
+	}
+
+	@Override
+	public void onDeferredApplicationPaused() {
+		queueEvent(() -> {
+			godotRenderer.onDeferredApplicationPaused();
+		});
+	}
+
+	@Override
 	public void onActivityStopped() {
 		pauseGLThread();
 	}
@@ -122,6 +137,14 @@ class GodotGLRenderView extends GLSurfaceView implements GodotRenderView {
 		queueEvent(() -> {
 			// Resume the renderer
 			godotRenderer.onActivityResumed();
+			GodotLib.focusin();
+		});
+	}
+
+	@Override
+	public void onForegroundPresentationResumed() {
+		queueEvent(() -> {
+			godotRenderer.onForegroundPresentationResumed();
 			GodotLib.focusin();
 		});
 	}
