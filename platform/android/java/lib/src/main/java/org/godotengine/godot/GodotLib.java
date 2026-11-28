@@ -300,6 +300,26 @@ public class GodotLib {
 	public static native void onRendererPaused();
 
 	/**
+	 * Invoked on the render thread when paused underneath a visible foreground presentation.
+	 */
+	public static native void onForegroundPresentationPaused();
+
+	/**
+	 * Invoked on the render thread when resuming from a visible foreground presentation pause.
+	 */
+	public static native void onForegroundPresentationResumed();
+
+	/**
+	 * Invoked on the render thread when the host activity stops after a deferred application pause.
+	 */
+	public static native void onDeferredApplicationPaused();
+
+	/**
+	 * Invoked on the render thread to block or restore gameplay input during a foreground presentation.
+	 */
+	public static native void setForegroundPresentationInputBlocked(boolean blocked);
+
+	/**
 	 * Invoked when the screen orientation changes.
 	 * @param orientation the new screen orientation
 	 */

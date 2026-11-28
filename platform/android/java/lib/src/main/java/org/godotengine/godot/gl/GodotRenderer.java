@@ -47,6 +47,7 @@ public class GodotRenderer implements GLSurfaceView.Renderer {
 
 	private final GodotPluginRegistry pluginRegistry;
 	private boolean activityJustResumed = false;
+	private boolean foregroundPresentationJustResumed = false;
 
 	public GodotRenderer() {
 		this.pluginRegistry = GodotPluginRegistry.getPluginRegistry();
@@ -56,6 +57,9 @@ public class GodotRenderer implements GLSurfaceView.Renderer {
 		if (activityJustResumed) {
 			GodotLib.onRendererResumed();
 			activityJustResumed = false;
+		} else if (foregroundPresentationJustResumed) {
+			GodotLib.onForegroundPresentationResumed();
+			foregroundPresentationJustResumed = false;
 		}
 
 		boolean swapBuffers = GodotLib.step();
@@ -90,9 +94,29 @@ public class GodotRenderer implements GLSurfaceView.Renderer {
 		// We defer invoking GodotLib.onRendererResumed() until the first draw frame call.
 		// This ensures we have a valid GL context and surface when we do so.
 		activityJustResumed = true;
+		foregroundPresentationJustResumed = false;
+	}
+
+	public void onForegroundPresentationResumed() {
+		foregroundPresentationJustResumed = true;
+		activityJustResumed = false;
 	}
 
 	public void onActivityPaused() {
+		activityJustResumed = false;
+		foregroundPresentationJustResumed = false;
 		GodotLib.onRendererPaused();
+	}
+
+	public void onForegroundPresentationPaused() {
+		activityJustResumed = false;
+		foregroundPresentationJustResumed = false;
+		GodotLib.onForegroundPresentationPaused();
+	}
+
+	public void onDeferredApplicationPaused() {
+		activityJustResumed = false;
+		foregroundPresentationJustResumed = false;
+		GodotLib.onDeferredApplicationPaused();
 	}
 }

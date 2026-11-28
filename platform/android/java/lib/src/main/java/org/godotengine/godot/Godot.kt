@@ -186,7 +186,10 @@ class Godot private constructor(val context: Context) {
 	 * Tracks whether we're in the RESUMED lifecycle state.
 	 * See [onResume] and [onPause]
 	 */
+	@Volatile
 	private var resumed = false
+
+	private val foregroundPresentation = ForegroundPresentationState()
 
 	/**
 	 * Tracks the engine's run status.
@@ -661,14 +664,68 @@ class Godot private constructor(val context: Context) {
 		}
 	}
 
+	/**
+	 * Marks the start of a scoped foreground native presentation (such as a translucent Play
+	 * Billing activity) while the host activity remains visible underneath.
+	 *
+	 * Pass the same unique [token] instance to [endForegroundPresentation] when the presentation
+	 * completes. Returns true if the presentation scope was acquired.
+	 */
+	fun beginForegroundPresentation(token: Any): Boolean {
+		synchronized(foregroundPresentation) {
+			val canBegin = resumed && primaryHost != null && renderView != null && runStatus == RunStatus.STARTED
+			val wasBlockingInput = foregroundPresentation.suppressesInput
+			val began = foregroundPresentation.begin(token, canBegin)
+			if (began) {
+				syncForegroundPresentationInputLocked(wasBlockingInput)
+			}
+			return began
+		}
+	}
+
+	/**
+	 * Ends the foreground native presentation previously started with [token].
+	 */
+	fun endForegroundPresentation(token: Any) {
+		synchronized(foregroundPresentation) {
+			val wasBlockingInput = foregroundPresentation.suppressesInput
+			if (foregroundPresentation.end(token)) {
+				syncForegroundPresentationInputLocked(wasBlockingInput)
+			}
+		}
+	}
+
+	private fun syncForegroundPresentationInputLocked(wasBlockingInput: Boolean) {
+		val isBlockingInput = foregroundPresentation.suppressesInput
+		if (wasBlockingInput != isBlockingInput) {
+			renderView?.queueOnRenderThread {
+				GodotLib.setForegroundPresentationInputBlocked(isBlockingInput)
+			}
+		}
+	}
+
 	fun onResume(host: GodotHost) {
 		Log.v(TAG, "OnResume: $host")
-		resumed = true
 		if (host != primaryHost) {
+			synchronized(foregroundPresentation) {
+				resumed = true
+			}
 			return
 		}
 
-		renderView?.onActivityResumed()
+		synchronized(foregroundPresentation) {
+			resumed = true
+			val wasBlockingInput = foregroundPresentation.suppressesInput
+			when (foregroundPresentation.onResume()) {
+				ForegroundPresentationState.ResumeAction.NORMAL_RESUME -> {
+					renderView?.onActivityResumed()
+				}
+				ForegroundPresentationState.ResumeAction.VISIBLE_PRESENTATION_RESUME -> {
+					renderView?.onForegroundPresentationResumed()
+				}
+			}
+			syncForegroundPresentationInputLocked(wasBlockingInput)
+		}
 		registerSensorsIfNeeded()
 		for (plugin in pluginRegistry.allPlugins) {
 			plugin.onMainResume()
@@ -703,15 +760,30 @@ class Godot private constructor(val context: Context) {
 
 	fun onPause(host: GodotHost) {
 		Log.v(TAG, "OnPause: $host")
-		resumed = false
 		if (host != primaryHost) {
+			synchronized(foregroundPresentation) {
+				resumed = false
+			}
 			return
 		}
 
 		for (plugin in pluginRegistry.allPlugins) {
 			plugin.onMainPause()
 		}
-		renderView?.onActivityPaused()
+		synchronized(foregroundPresentation) {
+			resumed = false
+			when (foregroundPresentation.onPause()) {
+				ForegroundPresentationState.PauseAction.NORMAL_PAUSE -> {
+					renderView?.onActivityPaused()
+				}
+				ForegroundPresentationState.PauseAction.VISIBLE_PRESENTATION_PAUSE -> {
+					renderView?.onForegroundPresentationPaused()
+				}
+				ForegroundPresentationState.PauseAction.ALREADY_PAUSED_VISIBLE -> {
+					// Already paused for the active visible presentation.
+				}
+			}
+		}
 		mSensorManager?.unregisterListener(godotInputHandler)
 	}
 
@@ -724,6 +796,14 @@ class Godot private constructor(val context: Context) {
 		for (plugin in pluginRegistry.allPlugins) {
 			plugin.onMainStop()
 		}
+		synchronized(foregroundPresentation) {
+			val wasBlockingInput = foregroundPresentation.suppressesInput
+			val emitDeferredPause = foregroundPresentation.onStop()
+			syncForegroundPresentationInputLocked(wasBlockingInput)
+			if (emitDeferredPause) {
+				renderView?.onDeferredApplicationPaused()
+			}
+		}
 		renderView?.onActivityStopped()
 	}
 
@@ -732,6 +812,12 @@ class Godot private constructor(val context: Context) {
 			return
 		}
 		Log.v(TAG, "OnDestroy: $primaryHost")
+
+		synchronized(foregroundPresentation) {
+			val wasBlockingInput = foregroundPresentation.suppressesInput
+			foregroundPresentation.onDestroy()
+			syncForegroundPresentationInputLocked(wasBlockingInput)
+		}
 
 		for (plugin in pluginRegistry.allPlugins) {
 			plugin.onMainDestroy()

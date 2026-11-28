@@ -257,6 +257,9 @@ public:
 	void notify_surface_changed(int p_width, int p_height);
 	void notify_application_paused();
 
+	static void set_foreground_presentation_input_blocked(bool p_blocked);
+	static bool is_foreground_presentation_input_blocked();
+
 	virtual Point2i mouse_get_position() const override;
 	virtual BitField<MouseButtonMask> mouse_get_button_state() const override;
 

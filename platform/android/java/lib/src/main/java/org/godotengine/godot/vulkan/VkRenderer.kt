@@ -115,12 +115,39 @@ internal class VkRenderer {
 	}
 
 	/**
+	 * Called when resuming from a visible foreground presentation pause.
+	 */
+	fun onVkForegroundPresentationResume() {
+		Log.v(TAG, "Renderer resumed from foreground presentation")
+		rendererResumed = true
+		GodotLib.onForegroundPresentationResumed()
+	}
+
+	/**
 	 * Called when the rendering thread is paused.
 	 */
 	fun onVkPause() {
 		Log.v(TAG, "Renderer paused")
 		rendererResumed = false
 		GodotLib.onRendererPaused()
+	}
+
+	/**
+	 * Called when paused underneath a visible foreground presentation.
+	 */
+	fun onVkForegroundPresentationPause() {
+		Log.v(TAG, "Renderer paused for foreground presentation")
+		rendererResumed = false
+		GodotLib.onForegroundPresentationPaused()
+	}
+
+	/**
+	 * Called on activity stop when the application pause notification was deferred.
+	 */
+	fun onVkDeferredApplicationPause() {
+		Log.v(TAG, "Renderer emitting deferred application pause")
+		rendererResumed = false
+		GodotLib.onDeferredApplicationPaused()
 	}
 
 	/**

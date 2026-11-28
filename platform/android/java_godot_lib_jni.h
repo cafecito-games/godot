@@ -72,6 +72,10 @@ JNIEXPORT void JNICALL Java_org_godotengine_godot_GodotLib_hardwareKeyboardConne
 JNIEXPORT void JNICALL Java_org_godotengine_godot_GodotLib_filePickerCallback(JNIEnv *env, jclass clazz, jboolean p_ok, jobjectArray p_selected_paths);
 JNIEXPORT void JNICALL Java_org_godotengine_godot_GodotLib_onRendererResumed(JNIEnv *env, jclass clazz);
 JNIEXPORT void JNICALL Java_org_godotengine_godot_GodotLib_onRendererPaused(JNIEnv *env, jclass clazz);
+JNIEXPORT void JNICALL Java_org_godotengine_godot_GodotLib_onForegroundPresentationPaused(JNIEnv *env, jclass clazz);
+JNIEXPORT void JNICALL Java_org_godotengine_godot_GodotLib_onForegroundPresentationResumed(JNIEnv *env, jclass clazz);
+JNIEXPORT void JNICALL Java_org_godotengine_godot_GodotLib_onDeferredApplicationPaused(JNIEnv *env, jclass clazz);
+JNIEXPORT void JNICALL Java_org_godotengine_godot_GodotLib_setForegroundPresentationInputBlocked(JNIEnv *env, jclass clazz, jboolean p_blocked);
 JNIEXPORT void JNICALL Java_org_godotengine_godot_GodotLib_onOrientationChange(JNIEnv *env, jclass clazz, jint p_orientation);
 JNIEXPORT jboolean JNICALL Java_org_godotengine_godot_GodotLib_shouldDispatchInputToRenderThread(JNIEnv *env, jclass clazz);
 JNIEXPORT jstring JNICALL Java_org_godotengine_godot_GodotLib_getProjectResourceDir(JNIEnv *env, jclass clazz);
