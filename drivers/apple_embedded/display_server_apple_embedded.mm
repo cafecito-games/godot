@@ -296,6 +296,11 @@ void DisplayServerAppleEmbedded::_dispatch_input_events(const Ref<InputEvent> &p
 }
 
 void DisplayServerAppleEmbedded::send_input_event(const Ref<InputEvent> &p_event, DisplayServerEnums::WindowID p_id) const {
+#ifdef IOS_ENABLED
+	if ([GDTAppDelegateService isForegroundPresentationBlockingInput]) {
+		return;
+	}
+#endif
 	if (p_id != DisplayServerEnums::INVALID_WINDOW_ID) {
 		const Callable *callback = input_event_callbacks.getptr(p_id);
 		if (callback) {
@@ -309,6 +314,11 @@ void DisplayServerAppleEmbedded::send_input_event(const Ref<InputEvent> &p_event
 }
 
 void DisplayServerAppleEmbedded::send_input_text(const String &p_text, DisplayServerEnums::WindowID p_id) const {
+#ifdef IOS_ENABLED
+	if ([GDTAppDelegateService isForegroundPresentationBlockingInput]) {
+		return;
+	}
+#endif
 	const Callable *callback = input_text_callbacks.getptr(p_id);
 	if (callback) {
 		_window_callback(*callback, p_text);

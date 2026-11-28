@@ -38,4 +38,8 @@
 
 @property(strong, class, nonatomic) GDTViewController *viewController;
 
+#ifdef IOS_ENABLED
++ (BOOL)isForegroundPresentationBlockingInput;
+#endif
+
 @end
